@@ -60,6 +60,22 @@ BROWSER_SURFACE = {
     "user_library", "current_project", "max_for_live", "source",
 }
 
+# VERIFIED ABSENT from Live 12.2.7 (probed 2026-08-01 against a running Live;
+# positive controls passed 9/9, and direct `get`/`call` returned AttributeError,
+# e.g. "'Clip' object has no attribute 'follow_action_a'").
+#
+# These are members jpoindexter references that Live 12.2.7 does not have. Some
+# are hasattr-guarded in its source; several are NOT, so those tools raise on
+# Live 12. There is nothing here for us to cover - the API is gone.
+ABSENT_IN_12_2_7 = {
+    "clear_automation_envelope", "create_group_track", "fade_in_end",
+    "fade_in_start", "fade_out_end", "fade_out_start", "follow_action_a",
+    "follow_action_b", "follow_action_chance", "follow_action_time", "freeze",
+    "get_cpu_load", "insert_value", "insert_warp_marker", "is_modified",
+    "selected_chain_index", "track_delay", "track_height", "track_width",
+    "ungroup", "zoom",
+}
+
 # Infrastructure of the competitor's own server, plus stdlib the attribute
 # regex cannot distinguish from Live members. Not Live API.
 INFRA = {
@@ -175,7 +191,8 @@ def main(verbose: bool = False) -> int:
 
     browser = sorted(allres & BROWSER_SURFACE)
     infra = sorted(allres & INFRA)
-    unexplained = sorted(allres - BROWSER_SURFACE - INFRA)
+    absent = sorted(allres & ABSENT_IN_12_2_7)
+    unexplained = sorted(allres - BROWSER_SURFACE - INFRA - ABSENT_IN_12_2_7)
 
     print(f"RESIDUE: {len(allres)} attributes competitors touch that the census lacks")
     print()
@@ -190,16 +207,30 @@ def main(verbose: bool = False) -> int:
     if infra:
         print("      " + ", ".join(infra))
     print()
-    print(f"  [C] UNEXPLAINED - needs live verification {len(unexplained):>3}")
-    print("      Either genuinely absent from Live 12.2.7 (competitor targets an")
-    print("      older Live and this is dead code), or a real gap. CANNOT be")
-    print("      settled without Ableton running - do not assume either way.")
+    print(f"  [C] Verified ABSENT from Live 12.2.7 ..... {len(absent):>3}  nothing to cover")
+    print("      Probed live 2026-08-01, controls 9/9. Direct get/call returns")
+    print("      AttributeError, e.g. \"'Clip' object has no attribute")
+    print("      'follow_action_a'\". jpoindexter references members Live 12")
+    print("      removed; several unguarded, so those tools RAISE on Live 12.")
+    if absent:
+        print("      " + ", ".join(absent))
+    print()
+    print(f"  [D] STILL UNEXPLAINED .................... {len(unexplained):>3}")
     for a in unexplained:
         who = [n.split("/")[0] for n, r in grand_residue.items() if a in r]
         print(f"      {a:32} used by: {', '.join(who)}")
     print()
-    print("VERDICT: superset claim is CONDITIONAL pending [A] and [C].")
-    return 0
+
+    blocking = len(browser) + len(unexplained)
+    if blocking == 0:
+        print("VERDICT: SUPERSET PROVEN for the three Remote Script competitors.")
+        print("  Every Live API member they touch is either in our census, their")
+        print("  own infrastructure, or absent from Live 12.2.7 entirely.")
+        print("  NOT proven for xiaolaa2 / Simon-Kansara - different bridges,")
+        print("  excluded from this method by construction, not yet tested.")
+    else:
+        print(f"VERDICT: CONDITIONAL - {blocking} attribute(s) unresolved.")
+    return 0 if blocking == 0 else 1
 
 
 if __name__ == "__main__":

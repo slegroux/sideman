@@ -340,8 +340,32 @@ def op_types(surface, params):
     if m["types"] is None:
         raise RuntimeError("_MxDCore unavailable: %s" % m["error"])
 
+    # get_available_lom_types() registers 43 types, but the reachable object
+    # graph is larger: Browser/BrowserItem are navigable (live_app browser ...)
+    # yet unregistered. Probe known-reachable paths and fold their types in,
+    # otherwise the census understates what the server can actually address.
+    extra = []
+    for probe in ("live_app browser", "live_app browser instruments",
+                  "live_set view", "live_set tracks 0 view",
+                  "live_set tracks 0 clip_slots 0",
+                  "live_set tracks 0 input_routing_type",
+                  "live_set tracks 0 input_routing_channel",
+                  "live_set tracks 0 output_routing_type",
+                  "live_set tracks 0 output_routing_channel"):
+        try:
+            extra.append(type(resolve(surface, probe)))
+        except Exception:
+            pass
+
     types, totals = {}, {"mxd": 0, "union": 0, "substantive": 0, "listeners": 0}
-    for t in m["types"].get_available_lom_types():
+    registered = list(m["types"].get_available_lom_types())
+    seen_ids = set(id(t) for t in registered)
+    unregistered = [t for t in extra if id(t) not in seen_ids
+                    and not seen_ids.add(id(t))]
+    totals["registered_types"] = len(registered)
+    totals["unregistered_types"] = len(unregistered)
+
+    for t in registered + unregistered:
         name = _type_name_of_class(t)
         try:
             mxd_names = set(p.name for p in

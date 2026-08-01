@@ -3,12 +3,14 @@
   3,
   0
  ],
- "type_count": 43,
+ "type_count": 47,
  "totals": {
   "mxd": 785,
-  "union": 2183,
-  "substantive": 887,
-  "listeners": 1296
+  "union": 2227,
+  "substantive": 922,
+  "listeners": 1305,
+  "registered_types": 43,
+  "unregistered_types": 4
  },
  "types": {
   "Application.Application": {
@@ -1412,6 +1414,116 @@
    "listener_count": 60,
    "hidden_by_mxd": [
     "View"
+   ]
+  },
+  "Browser.Browser": {
+   "members": [
+    "audio_effects",
+    "clips",
+    "colors",
+    "current_project",
+    "drums",
+    "filter_type",
+    "hotswap_target",
+    "instruments",
+    "legacy_libraries",
+    "load_item",
+    "max_for_live",
+    "midi_effects",
+    "packs",
+    "plugins",
+    "preview_item",
+    "relation_to_hotswap_target",
+    "samples",
+    "sounds",
+    "stop_preview",
+    "user_folders",
+    "user_library"
+   ],
+   "mxd_count": 0,
+   "union_count": 30,
+   "substantive_count": 21,
+   "listener_count": 9,
+   "hidden_by_mxd": [
+    "audio_effects",
+    "clips",
+    "colors",
+    "current_project",
+    "drums",
+    "filter_type",
+    "hotswap_target",
+    "instruments",
+    "legacy_libraries",
+    "load_item",
+    "max_for_live",
+    "midi_effects",
+    "packs",
+    "plugins",
+    "preview_item",
+    "relation_to_hotswap_target",
+    "samples",
+    "sounds",
+    "stop_preview",
+    "user_folders",
+    "user_library"
+   ]
+  },
+  "Browser.BrowserItem": {
+   "members": [
+    "children",
+    "is_device",
+    "is_folder",
+    "is_loadable",
+    "is_selected",
+    "iter_children",
+    "name",
+    "source",
+    "uri"
+   ],
+   "mxd_count": 0,
+   "union_count": 9,
+   "substantive_count": 9,
+   "listener_count": 0,
+   "hidden_by_mxd": [
+    "children",
+    "is_device",
+    "is_folder",
+    "is_loadable",
+    "is_selected",
+    "iter_children",
+    "name",
+    "source",
+    "uri"
+   ]
+  },
+  "Track.RoutingType": {
+   "members": [
+    "attached_object",
+    "category",
+    "display_name"
+   ],
+   "mxd_count": 0,
+   "union_count": 3,
+   "substantive_count": 3,
+   "listener_count": 0,
+   "hidden_by_mxd": [
+    "attached_object",
+    "category",
+    "display_name"
+   ]
+  },
+  "Track.RoutingChannel": {
+   "members": [
+    "display_name",
+    "layout"
+   ],
+   "mxd_count": 0,
+   "union_count": 2,
+   "substantive_count": 2,
+   "listener_count": 0,
+   "hidden_by_mxd": [
+    "display_name",
+    "layout"
    ]
   }
  }
