@@ -22,7 +22,15 @@ import re
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-CENSUS = REPO / "baseline" / "lom_census_12.2.7.json"
+def _census_path():
+    """Newest census on disk. Hardcoding a version is how the harness ends up
+    silently checking against an API Live no longer has - the same drift that
+    rotted the write guard. Regenerate with scripts/census.py after upgrading."""
+    files = sorted((REPO / "baseline").glob("lom_census_*.json"))
+    return files[-1] if files else REPO / "baseline" / "lom_census_MISSING.json"
+
+
+CENSUS = _census_path()
 
 SCRATCH = pathlib.Path(
     "/private/tmp/claude-501/-Users-slegroux/"

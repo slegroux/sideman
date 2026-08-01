@@ -23,7 +23,22 @@ fi
 ln -s "$SRC" "$LINK"
 echo "linked: $LINK -> $SRC"
 echo
+# Refresh the LOM census if Live is already up with the script enabled.
+# On a first install it will not be, which is fine - this is best-effort and
+# never fails the install. Re-run install.sh (or scripts/census.py) once Live
+# is running to capture the census for your Live version.
+echo
+if "$REPO/scripts/census.py" --check >/dev/null 2>&1; then
+  echo "census: already matches the running Live"
+elif "$REPO/scripts/census.py"; then
+  :
+else
+  echo "census: skipped (Live not reachable yet) - run scripts/census.py after step 3"
+fi
+
+echo
 echo "Next:"
 echo "  1. Restart Ableton Live"
 echo "  2. Preferences > Link, Tempo & MIDI > Control Surface > AbletonLOM"
 echo "  3. $REPO/scripts/lomcli.py ping"
+echo "  4. $REPO/scripts/census.py      # capture the LOM map for your Live version"
