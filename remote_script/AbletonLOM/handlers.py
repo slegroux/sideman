@@ -171,23 +171,37 @@ def _mfl_index(type_):
 
 
 def _member_names(obj):
-    """Authoritative member list, with a dir() fallback."""
-    idx = _mfl_index(type(obj))
-    if idx:
-        return sorted(idx), "mxd"
-    return sorted(n for n in dir(obj) if not n.startswith("_")), "dir"
+    """Union of Ableton's M4L registry and dir().
+
+    These are NOT the same set. The M4L registry is what Max for Live chose to
+    expose; the raw Python API can carry more (and occasionally different)
+    members. Preferring one would silently cap coverage, which is the exact
+    failure mode this project exists to fix - so we merge and report the split.
+    """
+    mxd = set(_mfl_index(type(obj)))
+    raw = set(n for n in dir(obj) if not n.startswith("_"))
+    both = mxd | raw
+    meta = {
+        "mxd_count": len(mxd),
+        "dir_count": len(raw),
+        "union_count": len(both),
+        "mxd_only": sorted(mxd - raw),
+        "dir_only": sorted(raw - mxd),
+    }
+    return sorted(both), ("union" if mxd else "dir"), meta
 
 
 def describe(surface, path, include_values=True):
     """getinfo, but honest about per-INSTANCE availability."""
     obj = resolve(surface, path)
-    names, source = _member_names(obj)
+    names, source, meta = _member_names(obj)
     idx = _mfl_index(type(obj))
 
     out = {
         "path": path,
         "type": _type_name(obj),
         "source": source,
+        "sources": meta,
         "properties": {},
         "children": {},
         "functions": [],
@@ -302,22 +316,60 @@ def op_count(surface, params):
     return {"path": params["path"], "child": child, "count": len(val)}
 
 
+def _is_listener_plumbing(name):
+    """add_x_listener / remove_x_listener / x_has_listener.
+
+    Three of these exist per observable property. Counting them as distinct
+    "coverage" would inflate the headline number, so they are reported
+    separately rather than folded into the substantive total.
+    """
+    return (name.endswith("_has_listener")
+            or (name.startswith("add_") and name.endswith("_listener"))
+            or (name.startswith("remove_") and name.endswith("_listener")))
+
+
 def op_types(surface, params):
-    """Full LOM type census - the coverage-harness baseline."""
+    """Full LOM type census - the coverage-harness baseline.
+
+    Uses the UNION of Ableton's M4L registry and dir() on the class. These
+    differ substantially: for Clip the registry lists 69 members while dir()
+    finds 190, and everything the registry omits (the extended-notes API, the
+    automation-envelope API, the whole listener API) is real and callable.
+    """
     m = _mxd()
     if m["types"] is None:
         raise RuntimeError("_MxDCore unavailable: %s" % m["error"])
-    out = {}
+
+    types, totals = {}, {"mxd": 0, "union": 0, "substantive": 0, "listeners": 0}
     for t in m["types"].get_available_lom_types():
+        name = _type_name_of_class(t)
         try:
-            props = m["types"].get_available_properties_for_type(t, EPII_VERSION)
-            out[_type_name_of_class(t)] = sorted(p.name for p in props)
-        except Exception as e:
-            out[_type_name_of_class(t)] = {"error": str(e)}
-    return {"epii_version": list(EPII_VERSION), "types": out,
-            "type_count": len(out),
-            "member_total": sum(len(v) for v in out.values()
-                                if isinstance(v, list))}
+            mxd_names = set(p.name for p in
+                            m["types"].get_available_properties_for_type(t, EPII_VERSION))
+        except Exception:
+            mxd_names = set()
+        raw_names = set(n for n in dir(t) if not n.startswith("_"))
+        union = mxd_names | raw_names
+        listeners = set(n for n in union if _is_listener_plumbing(n))
+        substantive = union - listeners
+
+        types[name] = {
+            "members": sorted(substantive),
+            "mxd_count": len(mxd_names),
+            "union_count": len(union),
+            "substantive_count": len(substantive),
+            "listener_count": len(listeners),
+            "hidden_by_mxd": sorted(substantive - mxd_names),
+        }
+        totals["mxd"] += len(mxd_names)
+        totals["union"] += len(union)
+        totals["substantive"] += len(substantive)
+        totals["listeners"] += len(listeners)
+
+    return {"epii_version": list(EPII_VERSION),
+            "type_count": len(types),
+            "totals": totals,
+            "types": types}
 
 
 def _type_name_of_class(t):
@@ -330,6 +382,295 @@ def op_describe(surface, params):
                     include_values=params.get("include_values", True))
 
 
+# ------------------------------------------------------------- PHASE 3: notes
+#
+# Generic get/set cannot express notes: get_notes_extended returns a
+# MidiNoteVector of MidiNote objects, and writes need MidiNoteSpecification.
+# jsonify() would render those as opaque {"__lom__": ...} handles. Hence typed
+# wrappers - the one place hand-written code genuinely earns its keep.
+#
+# This is the Live 11+ "extended" API, which the M4L registry does not list.
+
+NOTE_FIELDS = ("pitch", "start_time", "duration", "velocity", "mute",
+               "probability", "velocity_deviation", "release_velocity")
+
+
+def _note_to_dict(n):
+    out = {"note_id": getattr(n, "note_id", None)}
+    for f in NOTE_FIELDS:
+        out[f] = getattr(n, f, None)
+    return out
+
+
+def _require_midi_clip(surface, path):
+    clip = resolve(surface, path)
+    if not getattr(clip, "is_midi_clip", False):
+        raise TypeError("%s is not a MIDI clip" % path)
+    return clip
+
+
+def op_notes_get(surface, params):
+    clip = _require_midi_clip(surface, params["path"])
+    from_pitch = int(params.get("from_pitch", 0))
+    pitch_span = int(params.get("pitch_span", 128))
+    from_time = float(params.get("from_time", 0.0))
+    time_span = float(params.get("time_span", clip.length or 0.0))
+    notes = clip.get_notes_extended(from_pitch, pitch_span, from_time, time_span)
+    return {"path": params["path"], "count": len(notes),
+            "notes": [_note_to_dict(n) for n in notes]}
+
+
+def op_notes_add(surface, params):
+    """notes: [{pitch, start_time, duration, velocity?, mute?}, ...]"""
+    from Live.Clip import MidiNoteSpecification
+    clip = _require_midi_clip(surface, params["path"])
+    specs = []
+    for n in params["notes"]:
+        specs.append(MidiNoteSpecification(
+            pitch=int(n["pitch"]),
+            start_time=float(n["start_time"]),
+            duration=float(n["duration"]),
+            velocity=float(n.get("velocity", 100)),
+            mute=bool(n.get("mute", False)),
+        ))
+    with _undo(surface, "add notes"):
+        clip.add_new_notes(tuple(specs))
+    return {"path": params["path"], "added": len(specs)}
+
+
+def op_notes_remove(surface, params):
+    clip = _require_midi_clip(surface, params["path"])
+    from_pitch = int(params.get("from_pitch", 0))
+    pitch_span = int(params.get("pitch_span", 128))
+    from_time = float(params.get("from_time", 0.0))
+    time_span = float(params.get("time_span", clip.length or 0.0))
+    before = len(clip.get_notes_extended(from_pitch, pitch_span,
+                                         from_time, time_span))
+    with _undo(surface, "remove notes"):
+        clip.remove_notes_extended(from_pitch, pitch_span, from_time, time_span)
+    return {"path": params["path"], "removed": before}
+
+
+def op_notes_modify(surface, params):
+    """Edit existing notes in place. Each entry needs note_id plus the fields
+    to change; note_id comes from notes_get."""
+    clip = _require_midi_clip(surface, params["path"])
+    wanted = {}
+    for n in params["notes"]:
+        if n.get("note_id") is None:
+            raise ValueError("each note needs a note_id (from notes_get)")
+        wanted[int(n["note_id"])] = n
+
+    live_notes = clip.get_notes_extended(0, 128, 0.0, clip.length or 0.0)
+    touched = 0
+    for ln in live_notes:
+        spec = wanted.get(getattr(ln, "note_id", None))
+        if spec is None:
+            continue
+        for f in NOTE_FIELDS:
+            if f in spec:
+                setattr(ln, f, spec[f])
+        touched += 1
+    if touched:
+        with _undo(surface, "modify notes"):
+            clip.apply_note_modifications(live_notes)
+    missing = sorted(set(wanted) - set(getattr(n, "note_id", None)
+                                       for n in live_notes))
+    return {"path": params["path"], "modified": touched,
+            "unmatched_note_ids": missing}
+
+
+# ----------------------------------------------------------- PHASE 3: browser
+
+def _browser(surface):
+    app = Live.Application.get_application()
+    b = getattr(app, "browser", None)
+    if b is None:
+        raise RuntimeError("Application.browser unavailable")
+    return b
+
+
+def _browser_item(it):
+    return {"name": getattr(it, "name", None),
+            "is_loadable": bool(getattr(it, "is_loadable", False)),
+            "is_folder": bool(getattr(it, "is_folder", False)),
+            "is_device": bool(getattr(it, "is_device", False)),
+            "uri": getattr(it, "uri", None),
+            "children": len(getattr(it, "children", []) or [])}
+
+
+BROWSER_ROOTS = ("instruments", "sounds", "drums", "audio_effects",
+                 "midi_effects", "plugins", "clips", "samples", "packs",
+                 "user_library", "current_project", "max_for_live")
+
+
+def op_browser_list(surface, params):
+    """path is browser-relative: '' for roots, or 'plugins/My Plugin/...'."""
+    b = _browser(surface)
+    rel = (params.get("path") or "").strip("/")
+    if not rel:
+        out = []
+        for r in BROWSER_ROOTS:
+            node = getattr(b, r, None)
+            if node is not None:
+                d = _browser_item(node)
+                d["name"] = d["name"] or r
+                d["root"] = r
+                out.append(d)
+        return {"path": "", "items": out}
+
+    parts = rel.split("/")
+    node = getattr(b, parts[0], None)
+    if node is None:
+        raise ValueError("unknown browser root %r; expected one of %s"
+                         % (parts[0], list(BROWSER_ROOTS)))
+    for p in parts[1:]:
+        match = None
+        for c in (getattr(node, "children", []) or []):
+            if getattr(c, "name", None) == p:
+                match = c
+                break
+        if match is None:
+            raise ValueError("no browser child %r under %r" % (p, node.name))
+        node = match
+    return {"path": rel, "item": _browser_item(node),
+            "items": [_browser_item(c)
+                      for c in (getattr(node, "children", []) or [])]}
+
+
+def op_browser_load(surface, params):
+    """Load a browser item onto the SELECTED track. Set `select_track` to a
+    track index first if you need a specific destination."""
+    b = _browser(surface)
+    rel = params["path"].strip("/")
+    parts = rel.split("/")
+    node = getattr(b, parts[0], None)
+    if node is None:
+        raise ValueError("unknown browser root %r" % parts[0])
+    for p in parts[1:]:
+        match = None
+        for c in (getattr(node, "children", []) or []):
+            if getattr(c, "name", None) == p:
+                match = c
+                break
+        if match is None:
+            raise ValueError("no browser child %r under %r" % (p, node.name))
+        node = match
+    if not getattr(node, "is_loadable", False):
+        raise ValueError("%r is not loadable" % rel)
+
+    song = surface.song()
+    idx = params.get("track_index")
+    if idx is not None:
+        song.view.selected_track = song.tracks[int(idx)]
+    with _undo(surface, "load browser item"):
+        b.load_item(node)
+    return {"loaded": rel,
+            "track": getattr(song.view.selected_track, "name", None)}
+
+
+# -------------------------------------------------- PHASE 3: automation envelopes
+#
+# Envelopes hang off a (clip, DeviceParameter) pair, so both must be addressed
+# by path. Parameter paths look like:
+#   live_set tracks 0 devices 0 parameters 1
+#   live_set tracks 0 mixer_device volume
+
+def _envelope(surface, params, create=False):
+    clip = resolve(surface, params["path"])
+    param = resolve(surface, params["parameter"])
+    env = clip.automation_envelope(param)
+    if env is None and create:
+        env = clip.create_automation_envelope(param)
+    return clip, param, env
+
+
+def op_envelope_get(surface, params):
+    """Sample an envelope at the given times (defaults to 8 points over the clip)."""
+    clip, param, env = _envelope(surface, params)
+    if env is None:
+        return {"path": params["path"], "parameter": params["parameter"],
+                "exists": False, "points": []}
+    times = params.get("times")
+    if not times:
+        n = int(params.get("samples", 8))
+        length = float(clip.length or 0.0)
+        times = [length * i / max(n - 1, 1) for i in range(n)]
+    return {"path": params["path"], "parameter": params["parameter"],
+            "exists": True,
+            "parameter_name": getattr(param, "name", None),
+            "min": getattr(param, "min", None), "max": getattr(param, "max", None),
+            "points": [{"time": float(t), "value": env.value_at_time(float(t))}
+                       for t in times]}
+
+
+def op_envelope_insert_step(surface, params):
+    """Write a flat step into an envelope, creating it if needed."""
+    clip, param, env = _envelope(surface, params, create=True)
+    if env is None:
+        raise RuntimeError("could not create an envelope for that parameter")
+    with _undo(surface, "insert envelope step"):
+        env.insert_step(float(params["time"]), float(params["length"]),
+                        float(params["value"]))
+    return {"path": params["path"], "parameter": params["parameter"],
+            "time": params["time"], "length": params["length"],
+            "value": params["value"]}
+
+
+def op_envelope_clear(surface, params):
+    clip = resolve(surface, params["path"])
+    with _undo(surface, "clear envelope"):
+        if params.get("parameter"):
+            clip.clear_envelope(resolve(surface, params["parameter"]))
+            return {"cleared": params["parameter"]}
+        clip.clear_all_envelopes()
+    return {"cleared": "all"}
+
+
+# ------------------------------------------------- PHASE 3: arrangement view
+#
+# The gap in jpoindexter's 128 tools: it can navigate the arrangement but not
+# author clips into it.
+
+def op_arrangement_create_clip(surface, params):
+    """Create a clip directly in the Arrangement. kind: 'midi' | 'audio'."""
+    track = resolve(surface, params["path"])
+    start = float(params["start_time"])
+    kind = params.get("kind", "midi")
+    with _undo(surface, "create arrangement clip"):
+        if kind == "midi":
+            clip = track.create_midi_clip(start, float(params["length"]))
+        elif kind == "audio":
+            clip = track.create_audio_clip(params["file_path"], start)
+        else:
+            raise ValueError("kind must be 'midi' or 'audio'")
+    return {"path": params["path"], "kind": kind, "start_time": start,
+            "clip": jsonify(clip)}
+
+
+def op_arrangement_duplicate_clip(surface, params):
+    """Copy a session clip into the Arrangement at a given time."""
+    track = resolve(surface, params["path"])
+    clip = resolve(surface, params["clip"])
+    with _undo(surface, "duplicate clip to arrangement"):
+        result = track.duplicate_clip_to_arrangement(
+            clip, float(params["destination_time"]))
+    return {"track": params["path"], "clip": params["clip"],
+            "destination_time": params["destination_time"],
+            "result": jsonify(result)}
+
+
+def op_arrangement_list(surface, params):
+    track = resolve(surface, params["path"])
+    clips = getattr(track, "arrangement_clips", []) or []
+    return {"path": params["path"], "count": len(clips),
+            "clips": [{"index": i, "name": getattr(c, "name", None),
+                       "start_time": getattr(c, "start_time", None),
+                       "end_time": getattr(c, "end_time", None),
+                       "is_midi": getattr(c, "is_midi_clip", None)}
+                      for i, c in enumerate(clips)]}
+
+
 OPS = {
     "describe": op_describe,
     "get": op_get,
@@ -337,6 +678,18 @@ OPS = {
     "call": op_call,
     "count": op_count,
     "types": op_types,
+    "envelope_get": op_envelope_get,
+    "envelope_insert_step": op_envelope_insert_step,
+    "envelope_clear": op_envelope_clear,
+    "arrangement_create_clip": op_arrangement_create_clip,
+    "arrangement_duplicate_clip": op_arrangement_duplicate_clip,
+    "arrangement_list": op_arrangement_list,
+    "notes_get": op_notes_get,
+    "notes_add": op_notes_add,
+    "notes_remove": op_notes_remove,
+    "notes_modify": op_notes_modify,
+    "browser_list": op_browser_list,
+    "browser_load": op_browser_load,
 }
 
 

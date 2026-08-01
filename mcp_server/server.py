@@ -157,6 +157,169 @@ def lom_ping() -> str:
     return json.dumps(_request("ping"), indent=2)
 
 
+# --------------------------------------------------------------------- notes
+# Typed wrappers: notes cannot round-trip through generic get/set, because
+# Live hands back MidiNote objects and expects MidiNoteSpecification on write.
+
+
+@mcp.tool()
+def clip_get_notes(path: str, from_pitch: int = 0, pitch_span: int = 128,
+                   from_time: float = 0.0, time_span: float | None = None) -> str:
+    """Read MIDI notes from a clip, with note_id, pitch, start_time, duration,
+    velocity, mute, probability, velocity_deviation and release_velocity.
+
+    path is a clip path, e.g. "live_set tracks 0 clip_slots 0 clip".
+    Defaults cover the whole clip. Keep the note_ids - clip_modify_notes needs them.
+    """
+    p: dict[str, Any] = {"path": path, "from_pitch": from_pitch,
+                         "pitch_span": pitch_span, "from_time": from_time}
+    if time_span is not None:
+        p["time_span"] = time_span
+    return json.dumps(_request("notes_get", p), indent=2)
+
+
+@mcp.tool()
+def clip_add_notes(path: str, notes: list[dict[str, Any]]) -> str:
+    """Add MIDI notes to a clip. Undoable.
+
+    Each note: {"pitch": 60, "start_time": 0.0, "duration": 1.0,
+                "velocity": 100, "mute": false}
+    pitch is a MIDI note number (60 = C3); times are in beats.
+    """
+    return json.dumps(_request("notes_add", {"path": path, "notes": notes}),
+                      indent=2)
+
+
+@mcp.tool()
+def clip_modify_notes(path: str, notes: list[dict[str, Any]]) -> str:
+    """Edit existing notes in place. Undoable.
+
+    Each entry needs "note_id" (from clip_get_notes) plus the fields to change,
+    e.g. {"note_id": 3, "pitch": 62, "velocity": 80}.
+    Returns `unmatched_note_ids` for ids that no longer exist rather than failing.
+    """
+    return json.dumps(_request("notes_modify", {"path": path, "notes": notes}),
+                      indent=2)
+
+
+@mcp.tool()
+def clip_remove_notes(path: str, from_pitch: int = 0, pitch_span: int = 128,
+                      from_time: float = 0.0,
+                      time_span: float | None = None) -> str:
+    """Remove notes in a pitch/time range. Undoable. Defaults remove ALL notes."""
+    p: dict[str, Any] = {"path": path, "from_pitch": from_pitch,
+                         "pitch_span": pitch_span, "from_time": from_time}
+    if time_span is not None:
+        p["time_span"] = time_span
+    return json.dumps(_request("notes_remove", p), indent=2)
+
+
+# ------------------------------------------------------------------- browser
+
+
+@mcp.tool()
+def browser_list(path: str = "") -> str:
+    """Browse Live's library. Empty path lists the roots (instruments, sounds,
+    drums, audio_effects, midi_effects, plugins, clips, samples, packs,
+    user_library, current_project, max_for_live).
+
+    Then descend by name with "/", e.g. "instruments/Drift" or "plugins/VST3".
+    """
+    return json.dumps(_request("browser_list", {"path": path}), indent=2)
+
+
+@mcp.tool()
+def browser_load(path: str, track_index: int | None = None) -> str:
+    """Load a browser item (instrument, effect, plugin, sample) onto a track.
+
+    path is a browser path from browser_list, e.g. "instruments/Drift".
+    Loads onto the selected track unless track_index is given. Undoable.
+    """
+    p: dict[str, Any] = {"path": path}
+    if track_index is not None:
+        p["track_index"] = track_index
+    return json.dumps(_request("browser_load", p), indent=2)
+
+
+# --------------------------------------------------------------- automation
+
+
+@mcp.tool()
+def clip_envelope_get(path: str, parameter: str, samples: int = 8,
+                      times: list[float] | None = None) -> str:
+    """Sample a clip's automation envelope for one device/mixer parameter.
+
+    path      - clip path, e.g. "live_set tracks 0 clip_slots 0 clip"
+    parameter - parameter path, e.g. "live_set tracks 0 mixer_device volume"
+                or "live_set tracks 0 devices 0 parameters 1"
+    """
+    p: dict[str, Any] = {"path": path, "parameter": parameter,
+                         "samples": samples}
+    if times:
+        p["times"] = times
+    return json.dumps(_request("envelope_get", p), indent=2)
+
+
+@mcp.tool()
+def clip_envelope_insert_step(path: str, parameter: str, time: float,
+                              length: float, value: float) -> str:
+    """Write a flat automation step into a clip envelope, creating the envelope
+    if it does not exist. Times are in beats. Undoable."""
+    return json.dumps(_request("envelope_insert_step",
+                               {"path": path, "parameter": parameter,
+                                "time": time, "length": length,
+                                "value": value}), indent=2)
+
+
+@mcp.tool()
+def clip_envelope_clear(path: str, parameter: str | None = None) -> str:
+    """Clear one parameter's envelope, or ALL envelopes on the clip if
+    parameter is omitted. Undoable."""
+    p: dict[str, Any] = {"path": path}
+    if parameter:
+        p["parameter"] = parameter
+    return json.dumps(_request("envelope_clear", p), indent=2)
+
+
+# -------------------------------------------------------------- arrangement
+
+
+@mcp.tool()
+def arrangement_list_clips(path: str) -> str:
+    """List clips in a track's Arrangement, e.g. path "live_set tracks 0"."""
+    return json.dumps(_request("arrangement_list", {"path": path}), indent=2)
+
+
+@mcp.tool()
+def arrangement_create_clip(path: str, start_time: float,
+                            length: float = 4.0, kind: str = "midi",
+                            file_path: str | None = None) -> str:
+    """Create a clip directly in the Arrangement view. Undoable.
+
+    path       - track path, e.g. "live_set tracks 0"
+    start_time - position in beats
+    kind       - "midi" (uses length) or "audio" (requires file_path)
+    """
+    p: dict[str, Any] = {"path": path, "start_time": start_time,
+                         "length": length, "kind": kind}
+    if file_path:
+        p["file_path"] = file_path
+    return json.dumps(_request("arrangement_create_clip", p), indent=2)
+
+
+@mcp.tool()
+def arrangement_duplicate_clip(path: str, clip: str,
+                               destination_time: float) -> str:
+    """Copy a session clip into the Arrangement. Undoable.
+
+    path  - track path, e.g. "live_set tracks 0"
+    clip  - source clip path, e.g. "live_set tracks 0 clip_slots 0 clip"
+    """
+    return json.dumps(_request("arrangement_duplicate_clip",
+                               {"path": path, "clip": clip,
+                                "destination_time": destination_time}), indent=2)
+
+
 def main() -> None:
     mcp.run(transport="stdio")
 
