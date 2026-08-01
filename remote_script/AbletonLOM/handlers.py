@@ -1000,8 +1000,177 @@ def op_observe_poll(surface, params):
             "events": out}
 
 
+# ------------------------------------------- PHASE 2: search + canonical path
+#
+# The generic API is complete but not discoverable: knowing tempo lives at
+# "live_set tempo" is easy, knowing which index holds the track called "bass"
+# is not. search closes that gap without adding per-feature tools.
+
+# Collections worth walking. Deliberately EXCLUDES the browser: samples alone
+# has 6343 children, and a naive walk would hang Live's main thread.
+WALKABLE = (
+    "tracks", "return_tracks", "scenes", "clip_slots", "devices", "chains",
+    "drum_pads", "parameters", "arrangement_clips", "take_lanes", "cue_points",
+    "sends",
+)
+# Mixer parameters are DeviceParameter objects hanging off singular attributes,
+# not off a `parameters` collection - so a collection-only walk silently misses
+# every track volume and pan. Some of these raise per instance (crossfader is
+# main-track only); the walk already guards getattr.
+def _identity(obj):
+    """Stable identity for a Live object.
+
+    id() is NOT safe here: Live returns a fresh Python wrapper per getattr, and
+    once a wrapper is garbage-collected its address is reused - so a later,
+    different object gets mistaken for one already visited and the walk silently
+    truncates. _live_ptr is the underlying C++ pointer and is stable.
+    """
+    ptr = getattr(obj, "_live_ptr", None)
+    return ("ptr", ptr) if ptr is not None else ("id", id(obj))
+
+
+SINGULAR = (
+    "master_track", "mixer_device", "clip", "view", "sample",
+    "volume", "panning", "track_activator", "panning_mode",
+    "crossfade_assign", "crossfader", "cue_volume", "song_tempo",
+    "left_split_stereo", "right_split_stereo",
+)
+
+
+def op_search(surface, params):
+    """Find LOM paths by name and/or type, breadth-first from a root.
+
+    query   substring, case-insensitive, matched against `name`
+    type    substring matched against the type, e.g. "Track" or "DeviceParameter"
+
+    Bounded by max_results and max_nodes because this runs on Live's main
+    thread - an unbounded graph walk would freeze the GUI.
+    """
+    query = (params.get("query") or "").lower()
+    want_type = (params.get("type") or "").lower()
+    if not query and not want_type:
+        raise ValueError("give at least one of `query` or `type`")
+    max_results = int(params.get("max_results", 50))
+    max_nodes = int(params.get("max_nodes", 4000))
+    root = params.get("root", "live_set")
+
+    start = resolve(surface, root)
+    queue = [(root, start, 0)]
+    seen = set()
+    keepalive = []          # holds refs so wrapper addresses cannot be recycled
+    results = []
+    nodes = 0
+    truncated = False
+
+    while queue:
+        path, obj, depth = queue.pop(0)
+        if nodes >= max_nodes or len(results) >= max_results:
+            truncated = True
+            break
+        nodes += 1
+        oid = _identity(obj)
+        if oid in seen:
+            continue
+        seen.add(oid)
+        keepalive.append(obj)
+
+        tname = _type_name(obj)
+        name = getattr(obj, "name", None)
+        name = name if isinstance(name, str) else None
+        hit = True
+        if query:
+            hit = hit and name is not None and query in name.lower()
+        if want_type:
+            hit = hit and want_type in tname.lower()
+        if hit and path != root:
+            results.append({"path": path, "type": tname, "name": name})
+
+        if depth >= int(params.get("max_depth", 6)):
+            continue
+        for attr in WALKABLE:
+            try:
+                coll = getattr(obj, attr, None)
+            except Exception:
+                continue
+            if coll is None or not _is_vector(coll):
+                continue
+            try:
+                for i, child in enumerate(coll):
+                    queue.append(("%s %s %d" % (path, attr, i), child, depth + 1))
+            except Exception:
+                continue
+        for attr in SINGULAR:
+            try:
+                child = getattr(obj, attr, None)
+            except Exception:
+                continue
+            if child is not None and _is_lom_object(child):
+                queue.append(("%s %s" % (path, attr), child, depth + 1))
+
+    return {"query": params.get("query"), "type": params.get("type"),
+            "root": root, "count": len(results), "nodes_visited": nodes,
+            "truncated": truncated, "results": results}
+
+
+def op_canonical_path(surface, params):
+    """Resolve an alias path to its canonical location.
+
+    Useful because many paths point at the same object: "live_set view
+    selected_track" is whichever track is selected right now, and the canonical
+    form ("live_set tracks 3") is what you want to store or reuse.
+    """
+    path = params["path"]
+    obj = resolve(surface, path)
+    target = _identity(obj)
+
+    # Walk the same bounded graph and report where this object actually lives.
+    found = None
+    queue = [("live_set", resolve(surface, "live_set"), 0)]
+    seen = set()
+    keepalive = []
+    nodes = 0
+    while queue and found is None and nodes < 6000:
+        p, o, d = queue.pop(0)
+        nodes += 1
+        oid = _identity(o)
+        if oid in seen:
+            continue
+        seen.add(oid)
+        keepalive.append(o)
+        if oid == target and p != path:
+            found = p
+            break
+        if d >= 6:
+            continue
+        for attr in WALKABLE:
+            try:
+                coll = getattr(o, attr, None)
+            except Exception:
+                continue
+            if coll is not None and _is_vector(coll):
+                try:
+                    for i, c in enumerate(coll):
+                        queue.append(("%s %s %d" % (p, attr, i), c, d + 1))
+                except Exception:
+                    pass
+        for attr in SINGULAR:
+            try:
+                c = getattr(o, attr, None)
+            except Exception:
+                continue
+            if c is not None and _is_lom_object(c):
+                queue.append(("%s %s" % (p, attr), c, d + 1))
+
+    return {"path": path, "type": _type_name(obj),
+            "canonical_path": found or path,
+            "is_alias": bool(found and found != path),
+            "nodes_visited": nodes}
+
+
 OPS = {
     "describe": op_describe,
+    "search": op_search,
+    "canonical_path": op_canonical_path,
     "get_batch": op_get_batch,
     "set_batch": op_set_batch,
     "transaction": op_transaction,

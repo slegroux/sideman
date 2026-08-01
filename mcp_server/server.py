@@ -320,6 +320,43 @@ def arrangement_duplicate_clip(path: str, clip: str,
                                 "destination_time": destination_time}), indent=2)
 
 
+@mcp.tool()
+def lom_search(query: str | None = None, type: str | None = None,
+               root: str = "live_set", max_results: int = 50,
+               max_depth: int = 6) -> str:
+    """Find LOM paths by name and/or type, without walking the tree by hand.
+
+    query - substring of the object's name, case-insensitive ("bass", "drums")
+    type  - substring of the type ("Track", "Clip", "DeviceParameter")
+
+    Give at least one. Examples:
+      lom_search(query="bass")                -> live_set tracks 3
+      lom_search(type="DeviceParameter")      -> every automatable parameter
+
+    Check `truncated` - the walk is bounded so it cannot freeze Live's UI.
+    The browser is deliberately excluded (6000+ samples); use browser_list.
+    """
+    p: dict[str, Any] = {"root": root, "max_results": max_results,
+                         "max_depth": max_depth}
+    if query:
+        p["query"] = query
+    if type:
+        p["type"] = type
+    return json.dumps(_request("search", p), indent=2)
+
+
+@mcp.tool()
+def lom_canonical_path(path: str) -> str:
+    """Resolve an alias path to where the object actually lives.
+
+    Many paths point at the same object: "live_set view selected_track" is
+    whichever track is selected right now. This returns the stable form
+    ("live_set tracks 3") which is what you want to store or reuse.
+    `is_alias` says whether the input was one.
+    """
+    return json.dumps(_request("canonical_path", {"path": path}), indent=2)
+
+
 # ------------------------------------------------------ batch + transaction
 
 
