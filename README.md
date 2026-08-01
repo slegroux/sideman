@@ -20,8 +20,14 @@ Measured tool counts of the field (actual wired registrations, not README claims
 | ahujasid/ableton-mcp | ~21 | Remote Script |
 | Simon-Kansara/ableton-live-mcp-server | 1 | AbletonOSC |
 
-Live 12.2.7 exposes **43 LOM types**; `Song` alone has **91 members**. Nobody
-covers it by enumeration.
+Live 12.2.7 exposes **47 reachable types / 922 members** by measurement (see
+`baseline/`). Nobody covers that by enumeration.
+
+Coverage is verified, not claimed: `scripts/coverage_harness.py` checks every
+Live API attribute the three Remote Script competitors touch against our census
+and **exits nonzero if any is unaccounted for**. Currently 0 unaccounted.
+Not verified for xiaolaa2 (ableton-js) or Simon-Kansara (OSC) — different
+bridges, out of scope for that method.
 
 ## Architecture
 
@@ -60,14 +66,26 @@ claude mcp add ableton-lom -- /ABS/PATH/.venv/bin/python -m mcp_server.server
 
 ## Tools
 
+29 tools. Generic first — the typed ones exist only where generic access
+genuinely cannot work.
+
 | Tool | Purpose |
 |---|---|
-| `lom_describe` | Discover properties, children, functions at a path. **Start here.** |
-| `lom_get` / `lom_set` | Read/write any property (writes are undoable) |
-| `lom_call` | Call any LOM function (undoable, guarded) |
-| `lom_count` | Size of a collection |
-| `lom_types` | Full type census — the coverage baseline |
-| `lom_ping` | Connection + engine health |
+| `lom_search` | Find paths by name or type. **Start here.** |
+| `lom_describe` | Properties, children, functions, per-instance availability |
+| `lom_get` / `lom_set` / `lom_call` | Read / write / invoke anything |
+| `lom_get_batch` / `lom_set_batch` | Many ops, one round trip |
+| `lom_transaction` | Several ops, one undo step (see caveat below) |
+| `lom_canonical_path` | Resolve aliases (`view selected_track` → `tracks 3`) |
+| `lom_count` / `lom_types` / `lom_ping` | Collection size / census / health |
+| `clip_get_notes` / `add` / `modify` / `remove` | MIDI notes (typed) |
+| `browser_list` / `browser_load` | Library, incl. VST/AU/VST3 |
+| `clip_envelope_get` / `insert_step` / `clear` | Clip automation |
+| `arrangement_create_clip` / `duplicate_clip` / `list_clips` | Arrangement authoring |
+| `lom_observe` / `lom_poll_events` / `lom_observers` / `lom_unobserve*` | Change notification |
+
+**Observers are unique to this server.** Nothing else in the field reports
+changes *the user* makes in the GUI.
 
 ## Paths
 
@@ -103,7 +121,29 @@ rather than pretending the type list is uniformly gettable.
 `lomcli.py` speaks the wire protocol directly, so the engine can be exercised
 without the MCP layer in the way.
 
+## Skill
+
+`skills/ableton-lom/SKILL.md` teaches the path grammar — the one thing the tools
+cannot infer. Symlink it into `~/.claude/skills/`.
+
+Deliberately **no curated per-feature tool layer**. The plan called for ~30 sugar
+verbs; at 29 generic tools that would mean 59, and tool overload degrades
+selection. The skill buys the same ergonomics at zero tool cost.
+
+## Two measured caveats
+
+**Availability is per instance, not per type.** A MIDI track has no
+`input_meter_left`; only the main track has a `crossfader`. `lom_describe`
+reports these in an `unavailable` map instead of pretending the type list is
+uniformly gettable.
+
+**Undo grouping is partial.** `lom_transaction` collapses ops into one Cmd-Z —
+except automatable parameters, which Live always gives their own undo step:
+
+| Groups | Own step |
+|---|---|
+| track `name`, `color_index`, `signature_numerator` | `tempo`, mixer `volume`, `mute`, device parameters |
+
 ## Status
 
-Phase 1 (vertical slice) — generic engine + `describe`/`get`/`set`/`call`/`count`/`types`.
-Plan and phase roadmap: `~/.omc/plans/2026-08-01-ableton-mcp-superset.md`.
+Phases 0–7 done. Plan: `~/.omc/plans/2026-08-01-ableton-mcp-superset.md`.
