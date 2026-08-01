@@ -243,24 +243,148 @@ def describe(surface, path, include_values=True):
 # --------------------------------------------------------------------- verbs
 
 def _undo(surface, label):
+    """REENTRANT undo step.
+
+    Every mutating op opens one of these. A transaction wraps N such ops, so
+    without a depth counter we would emit N nested begin/end pairs inside the
+    outer pair - which is how you get a corrupted or unusable undo history.
+    Only the OUTERMOST scope actually begins and ends the step, so a
+    transaction collapses to exactly one Cmd-Z.
+
+    The depth lives on the surface instance, not module state, so it survives
+    hot-reload (same reasoning as the observer registry).
+    """
     song = surface.song()
 
     class _Step(object):
         def __enter__(self):
-            try:
-                song.begin_undo_step()
-            except Exception:
-                pass
+            depth = getattr(surface, "_lom_undo_depth", 0)
+            if depth == 0:
+                try:
+                    song.begin_undo_step()
+                    surface._lom_undo_begins = getattr(
+                        surface, "_lom_undo_begins", 0) + 1
+                except Exception as e:
+                    surface._lom_undo_err = str(e)
+            surface._lom_undo_depth = depth + 1
             return self
 
         def __exit__(self, *exc):
-            try:
-                song.end_undo_step()
-            except Exception:
-                pass
+            depth = max(getattr(surface, "_lom_undo_depth", 1) - 1, 0)
+            surface._lom_undo_depth = depth
+            if depth == 0:
+                try:
+                    song.end_undo_step()
+                    surface._lom_undo_ends = getattr(
+                        surface, "_lom_undo_ends", 0) + 1
+                except Exception as e:
+                    surface._lom_undo_err = str(e)
             return False
 
     return _Step()
+
+
+# ------------------------------------------------- PHASE 5: batch + transaction
+
+def op_get_batch(surface, params):
+    """Read many properties in ONE round trip.
+
+    specs: [{"path": ..., "property": ...}, ...]
+    Never fails as a whole - each entry carries its own ok/error, because one
+    unavailable property (see the per-instance caveat) should not lose the
+    other 40 reads.
+    """
+    out = []
+    for spec in params["specs"]:
+        try:
+            out.append(dict(op_get(surface, spec), ok=True))
+        except Exception as e:
+            out.append({"ok": False, "path": spec.get("path"),
+                        "property": spec.get("property"),
+                        "error": "%s: %s" % (type(e).__name__, e)})
+    return {"count": len(out), "ok_count": sum(1 for r in out if r["ok"]),
+            "results": out}
+
+
+def op_set_batch(surface, params):
+    """Write many properties inside ONE undo step."""
+    return _run_ops(surface, [dict(s, op="set") for s in params["specs"]],
+                    params.get("stop_on_error", True),
+                    params.get("rollback_on_error", False))
+
+
+def op_transaction(surface, params):
+    """Run a list of ops inside ONE undo step, so the whole batch is a single
+    Cmd-Z for the user rather than N of them.
+
+    ops: [{"op": "set", "path": ..., "property": ..., "value": ...},
+          {"op": "call", "path": ..., "function": ..., "args": [...]}, ...]
+
+    CAVEAT, measured not assumed: grouping does not cover automatable
+    parameters. tempo, mixer volume, mute and device parameters each form
+    their own undo step in Live even inside an explicit step. Track name,
+    color and time signature do group. See UNDO_GROUPING_NOTE.
+
+    NOT a database transaction. Live has no intra-step rollback, so if op 5
+    fails, ops 1-4 have already applied. Two honest options:
+      stop_on_error   (default true)  - halt at the first failure
+      rollback_on_error (default FALSE) - additionally call song.undo() once
+
+    rollback defaults OFF deliberately: it is a MUTATION on an error path. If
+    our step captured nothing, undo() would revert whatever the user did
+    before, which is worse than the partial application it is trying to fix.
+    Either way a single Cmd-Z reverts the batch, which is stated in the result.
+    """
+    return _run_ops(surface, params["ops"],
+                    params.get("stop_on_error", True),
+                    params.get("rollback_on_error", False))
+
+
+def _run_ops(surface, ops, stop_on_error, rollback_on_error):
+    results = []
+    failed = False
+    with _undo(surface, "transaction"):
+        for i, spec in enumerate(ops):
+            name = spec.get("op", "set")
+            fn = OPS.get(name)
+            if fn is None:
+                results.append({"index": i, "op": name, "ok": False,
+                                "error": "unknown op %r" % name})
+                failed = True
+                if stop_on_error:
+                    break
+                continue
+            try:
+                results.append({"index": i, "op": name, "ok": True,
+                                "result": fn(surface, spec)})
+            except Exception as e:
+                results.append({"index": i, "op": name, "ok": False,
+                                "error": "%s: %s" % (type(e).__name__, e)})
+                failed = True
+                if stop_on_error:
+                    break
+
+    applied = sum(1 for r in results if r["ok"])
+    out = {"count": len(results), "applied": applied, "failed": failed,
+           "results": results,
+           "_debug": {"begins": getattr(surface, "_lom_undo_begins", 0),
+                      "ends": getattr(surface, "_lom_undo_ends", 0),
+                      "depth_after": getattr(surface, "_lom_undo_depth", None),
+                      "err": getattr(surface, "_lom_undo_err", None)},
+           "undo": UNDO_GROUPING_NOTE}
+
+    if failed and rollback_on_error and applied:
+        try:
+            surface.song().undo()
+            out["rolled_back"] = True
+        except Exception as e:
+            out["rolled_back"] = False
+            out["rollback_error"] = str(e)
+    elif failed and applied:
+        out["rolled_back"] = False
+        out["warning"] = ("%d op(s) applied before the failure; they remain "
+                          "applied. One Cmd-Z reverts them." % applied)
+    return out
 
 
 def op_get(surface, params):
@@ -714,6 +838,22 @@ def op_arrangement_list(surface, params):
 
 MAX_EVENTS = 2000
 
+# MEASURED against Live 12.2.7, not assumed. begin_undo_step/end_undo_step
+# groups many mutations into one Cmd-Z, but NOT all: automatable/mappable
+# parameters get their own undo step regardless.
+#
+#   grouped  : track name, color_index, signature_numerator
+#   separate : tempo, mixer volume, mute
+#
+# So a transaction is "one Cmd-Z for the groupable ops, plus one per
+# automatable parameter touched". Claiming a flat single-undo would be false.
+UNDO_GROUPING_NOTE = (
+    "Groupable ops collapse into ONE Cmd-Z. Automatable parameters "
+    "(tempo, mixer volume, mute, device parameters) each form their OWN undo "
+    "step in Live regardless of grouping, so reverting those needs one extra "
+    "undo apiece. Measured on Live 12.2.7."
+)
+
 
 def _registry(surface):
     reg = getattr(surface, "_lom_observers", None)
@@ -862,6 +1002,9 @@ def op_observe_poll(surface, params):
 
 OPS = {
     "describe": op_describe,
+    "get_batch": op_get_batch,
+    "set_batch": op_set_batch,
+    "transaction": op_transaction,
     "observe_add": op_observe_add,
     "observe_remove": op_observe_remove,
     "observe_clear": op_observe_clear,

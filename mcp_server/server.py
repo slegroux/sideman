@@ -320,6 +320,61 @@ def arrangement_duplicate_clip(path: str, clip: str,
                                 "destination_time": destination_time}), indent=2)
 
 
+# ------------------------------------------------------ batch + transaction
+
+
+@mcp.tool()
+def lom_get_batch(specs: list[dict[str, Any]]) -> str:
+    """Read many properties in ONE round trip instead of N calls.
+
+    specs: [{"path": "live_set", "property": "tempo"},
+            {"path": "live_set tracks 0", "property": "name"}, ...]
+
+    Never fails as a whole - each result carries its own ok/error, so one
+    unavailable property does not lose the other reads.
+    """
+    return json.dumps(_request("get_batch", {"specs": specs}), indent=2)
+
+
+@mcp.tool()
+def lom_set_batch(specs: list[dict[str, Any]],
+                  stop_on_error: bool = True) -> str:
+    """Write many properties inside one undo step.
+
+    specs: [{"path": ..., "property": ..., "value": ...}, ...]
+    See lom_transaction for the undo-grouping caveat.
+    """
+    return json.dumps(_request("set_batch", {"specs": specs,
+                                             "stop_on_error": stop_on_error}),
+                      indent=2)
+
+
+@mcp.tool()
+def lom_transaction(ops: list[dict[str, Any]], stop_on_error: bool = True,
+                    rollback_on_error: bool = False) -> str:
+    """Run several ops as one undo step, so the user gets one Cmd-Z rather than N.
+
+    ops: [{"op": "set", "path": ..., "property": ..., "value": ...},
+          {"op": "call", "path": ..., "function": ..., "args": [...]}]
+
+    UNDO CAVEAT (measured on Live 12.2.7, not assumed): grouping does NOT cover
+    automatable parameters. tempo, mixer volume, mute and device parameters
+    each form their own undo step in Live even inside an explicit one. Track
+    name, colour and time signature do group. The `undo` field in the result
+    restates this.
+
+    NOT a database transaction - Live has no intra-step rollback, so if op 5
+    fails, ops 1-4 have already applied. `rollback_on_error` defaults to FALSE
+    on purpose: it is a mutation on an error path, and if the step captured
+    nothing it would revert whatever the user did beforehand. Prefer to
+    inspect the result and let the user press Cmd-Z.
+    """
+    return json.dumps(_request("transaction",
+                               {"ops": ops, "stop_on_error": stop_on_error,
+                                "rollback_on_error": rollback_on_error}),
+                      indent=2)
+
+
 # --------------------------------------------------------------- observers
 # MCP has no server->client push, so this is a pull with a ring buffer behind
 # it: Live accumulates change events, you collect them on demand.
