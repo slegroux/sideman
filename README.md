@@ -111,6 +111,24 @@ rather than pretending the type list is uniformly gettable.
 pattern, not a hand-kept list — the list had drifted, guarding two names Live 12
 does not have while missing eleven it does.
 
+## Tests
+
+```bash
+./scripts/test.sh
+```
+
+| Suite | Needs Live | Covers |
+|---|---|---|
+| `tests/test_mcp.py` | no | all 29 MCP tools: op mapping, optional-param handling, safe destructive defaults, transport error translation |
+| `tests/smoke.py` | yes | all 28 engine ops against real Ableton (~70s — it loads a real device and cycles scratch tracks) |
+
+The integration suite creates a scratch MIDI track named `__lomtest` and deletes
+it, so it works on an all-audio Set. It refuses to delete a track whose name
+changed underneath it, and never touches existing tracks.
+
+Only `test_mcp.py` is CI-able — a Remote Script cannot be exercised without its
+host, so the engine tests are integration by necessity.
+
 ## Development
 
 ```bash

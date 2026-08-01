@@ -108,23 +108,17 @@ def test_write_guard():
 
     # Regression: the guard used to be a hand-kept list that had drifted,
     # leaving these destructive Clip functions completely unguarded.
-    clip = None
-    for i in range(24):
-        c = request("count", {"path": "live_set tracks %d" % i,
-                              "child": "arrangement_clips"})
-        if c.get("ok") and c["result"]["count"]:
-            clip = "live_set tracks %d arrangement_clips 0" % i
-            break
-    if clip is None:
-        print("  skip clip-guard checks (no clip in this Set)")
-        return
-    for fn in ("remove_notes_extended", "clear_all_envelopes",
-               "clear_envelope", "crop", "remove_warp_marker"):
-        g = request("call", {"path": clip, "function": fn, "args": [],
-                             "confirm": False})
-        check("guard covers %s" % fn,
-              (g.get("error") or {}).get("type") == "PermissionError",
-              (g.get("error") or {}).get("type"))
+    # Makes its own clip rather than hunting for one - this check previously
+    # self-skipped on a Set with no clips, and a check that skips is not a check.
+    with Scratch() as s:
+        clip = s.clip()
+        for fn in ("remove_notes_extended", "clear_all_envelopes",
+                   "clear_envelope", "crop", "remove_warp_marker"):
+            g = request("call", {"path": clip, "function": fn, "args": [],
+                                 "confirm": False})
+            check("guard covers %s" % fn,
+                  (g.get("error") or {}).get("type") == "PermissionError",
+                  (g.get("error") or {}).get("type"))
 
     # ...without over-reaching: listener plumbing is not an edit.
     live = request("call", {"path": "live_app",
@@ -208,6 +202,236 @@ def test_observers():
     cleared = ok(request("observe_clear"), "observe_clear final")
     check("no listeners leaked", cleared and cleared.get("leaked") == 0,
           cleared and cleared.get("leaked"))
+
+
+# ---------------------------------------------------------------- scratch
+# The remaining ops need a MIDI clip. A user's Set may be all-audio, so the
+# suite makes its own track and removes it. It never touches existing tracks.
+
+class Scratch:
+    """Creates a MIDI track at the end of the Set; deletes it on exit."""
+
+    def __enter__(self):
+        n = request("count", {"path": "live_set", "child": "tracks"})
+        self.index = n["result"]["count"] if n.get("ok") else None
+        r = request("call", {"path": "live_set", "function": "create_midi_track",
+                             "args": [-1], "confirm": True})
+        if not r.get("ok"):
+            raise RuntimeError("could not create scratch track: %s" % r.get("error"))
+        self.track = "live_set tracks %d" % self.index
+        request("set", {"path": self.track, "property": "name",
+                        "value": "__lomtest"})
+        return self
+
+    def clip(self, length=4.0):
+        slot = "%s clip_slots 0" % self.track
+        r = request("call", {"path": slot, "function": "create_clip",
+                             "args": [length], "confirm": True})
+        if not r.get("ok"):
+            raise RuntimeError("could not create scratch clip: %s" % r.get("error"))
+        return slot + " clip"
+
+    def __exit__(self, *exc):
+        # Verify we are deleting OUR track, never a user's.
+        nm = request("get", {"path": self.track, "property": "name"})
+        if nm.get("ok") and nm["result"]["value"] == "__lomtest":
+            request("call", {"path": "live_set", "function": "delete_track",
+                             "args": [self.index], "confirm": True})
+        else:
+            FAILURES.append("scratch track moved; NOT deleting index %s"
+                            % self.index)
+        return False
+
+
+def test_notes_lifecycle():
+    with Scratch() as s:
+        clip = s.clip()
+        r = ok(request("notes_add", {"path": clip, "notes": [
+            {"pitch": 60, "start_time": 0.0, "duration": 1.0, "velocity": 100},
+            {"pitch": 64, "start_time": 1.0, "duration": 1.0, "velocity": 90},
+        ]}), "notes_add")
+        check("added 2 notes", r and r["added"] == 2, r)
+
+        g = ok(request("notes_get", {"path": clip}), "notes_get")
+        check("read back 2 notes", g and g["count"] == 2, g and g.get("count"))
+        if not g or not g["notes"]:
+            return
+        first = g["notes"][0]
+        for f in ("note_id", "pitch", "start_time", "duration", "velocity"):
+            check("note carries %s" % f, f in first)
+
+        m = ok(request("notes_modify", {"path": clip, "notes": [
+            {"note_id": first["note_id"], "pitch": 72}]}), "notes_modify")
+        check("modified 1 note", m and m["modified"] == 1, m)
+        after = ok(request("notes_get", {"path": clip}), "notes_get 2")
+        check("modification persisted",
+              after and any(n["pitch"] == 72 for n in after["notes"]))
+
+        bad = ok(request("notes_modify", {"path": clip,
+                                          "notes": [{"note_id": 999999}]}),
+                 "notes_modify bogus")
+        check("unknown note_id reported, not raised",
+              bad and bad["unmatched_note_ids"] == [999999], bad)
+
+        rem = ok(request("notes_remove", {"path": clip, "from_pitch": 70,
+                                          "pitch_span": 10}), "notes_remove")
+        check("range-scoped removal took only the in-range note",
+              rem and rem["removed"] == 1, rem)
+        left = ok(request("notes_get", {"path": clip}), "notes_get 3")
+        check("one note survives", left and left["count"] == 1,
+              left and left.get("count"))
+
+
+def test_envelope_ops():
+    with Scratch() as s:
+        clip = s.clip()
+        param = "%s mixer_device volume" % s.track
+        e = ok(request("envelope_get", {"path": clip, "parameter": param,
+                                        "samples": 3}), "envelope_get empty")
+        check("envelope_get handles absent envelope", e is not None and "exists" in e)
+
+        w = ok(request("envelope_insert_step",
+                       {"path": clip, "parameter": param, "time": 0.0,
+                        "length": 2.0, "value": 0.5}), "envelope_insert_step")
+        check("envelope step written", w is not None)
+        e2 = ok(request("envelope_get", {"path": clip, "parameter": param,
+                                         "samples": 5}), "envelope_get")
+        check("envelope now exists", e2 and e2["exists"] is True)
+        check("envelope reports the parameter name",
+              e2 and e2.get("parameter_name"), e2 and e2.get("parameter_name"))
+        inside = [p for p in (e2 or {}).get("points", []) if 0 < p["time"] < 2.0]
+        check("written value reads back", any(abs(p["value"] - 0.5) < 1e-6
+                                              for p in inside),
+              [p["value"] for p in inside])
+
+        c = ok(request("envelope_clear", {"path": clip}), "envelope_clear")
+        check("envelope cleared", c and c.get("cleared") == "all", c)
+
+
+def test_arrangement_ops():
+    with Scratch() as s:
+        r = ok(request("arrangement_create_clip",
+                       {"path": s.track, "start_time": 0.0, "length": 8.0,
+                        "kind": "midi"}), "arrangement_create_clip")
+        check("arrangement clip created", r is not None)
+        lst = ok(request("arrangement_list", {"path": s.track}),
+                 "arrangement_list")
+        check("arrangement lists the new clip", lst and lst["count"] == 1,
+              lst and lst.get("count"))
+        if lst and lst["clips"]:
+            c = lst["clips"][0]
+            check("clip reports its span",
+                  c["start_time"] == 0.0 and c["end_time"] == 8.0, c)
+            check("clip reported as MIDI", c["is_midi"] is True, c)
+
+
+def test_browser_ops():
+    r = ok(request("browser_list", {"path": ""}), "browser_list roots")
+    check("browser exposes roots", r and len(r["items"]) > 0)
+    roots = {i.get("root") for i in (r or {}).get("items", [])}
+    for expect in ("instruments", "audio_effects", "plugins"):
+        check("browser has %s" % expect, expect in roots)
+
+    sub = ok(request("browser_list", {"path": "instruments"}),
+             "browser_list instruments")
+    check("instruments has children", sub and len(sub["items"]) > 0)
+
+    bad = request("browser_list", {"path": "definitely_not_a_root"})
+    check("unknown browser root rejected", not bad.get("ok"))
+
+
+def test_browser_load():
+    """Loads a real device. Slow-ish, but it is the only way to prove the
+    browser path actually resolves to something loadable."""
+    with Scratch() as s:
+        before = ok(request("count", {"path": s.track, "child": "devices"}),
+                    "devices before")
+        check("scratch track starts empty", before and before["count"] == 0,
+              before and before.get("count"))
+
+        listing = ok(request("browser_list", {"path": "instruments"}),
+                     "browser_list")
+        target = next((i for i in (listing or {}).get("items", [])
+                       if i.get("is_loadable")), None)
+        if target is None:
+            print("  skip browser_load (no loadable instrument found)")
+            return
+
+        r = ok(request("browser_load", {"path": "instruments/%s" % target["name"],
+                                        "track_index": s.index}),
+               "browser_load")
+        check("browser_load reports the target track", r and r.get("track"), r)
+        after = ok(request("count", {"path": s.track, "child": "devices"}),
+                   "devices after")
+        check("device actually loaded onto the track",
+              after and after["count"] == 1, after and after.get("count"))
+
+        nl = request("browser_load", {"path": "instruments"})
+        check("loading a non-loadable folder is refused", not nl.get("ok"))
+
+
+def test_arrangement_duplicate_clip():
+    with Scratch() as s:
+        clip = s.clip()
+        r = ok(request("arrangement_duplicate_clip",
+                       {"path": s.track, "clip": clip,
+                        "destination_time": 4.0}),
+               "arrangement_duplicate_clip")
+        check("duplicate reported", r is not None)
+        lst = ok(request("arrangement_list", {"path": s.track}),
+                 "arrangement_list after duplicate")
+        check("session clip landed in the arrangement",
+              lst and lst["count"] == 1, lst and lst.get("count"))
+        if lst and lst["clips"]:
+            check("landed at the requested time",
+                  lst["clips"][0]["start_time"] == 4.0, lst["clips"][0])
+
+
+def test_set_batch():
+    with Scratch() as s:
+        r = ok(request("set_batch", {"specs": [
+            {"path": s.track, "property": "name", "value": "__lomtest"},
+            {"path": s.track, "property": "color_index", "value": 5},
+        ]}), "set_batch")
+        check("set_batch applied both", r and r["applied"] == 2, r)
+        check("set_batch states the undo caveat", r and "undo" in r)
+
+
+def test_types_census():
+    r = ok(request("types", {}), "types")
+    if not r:
+        return
+    check("census has types", r["type_count"] > 40, r.get("type_count"))
+    check("census counts substantive members",
+          r["totals"]["substantive"] > 500, r["totals"].get("substantive"))
+    check("census separates listener plumbing",
+          r["totals"]["listeners"] > 0, r["totals"].get("listeners"))
+    check("census includes unregistered types (Browser et al)",
+          r["totals"].get("unregistered_types", 0) > 0,
+          r["totals"].get("unregistered_types"))
+
+
+def test_observer_list_and_remove():
+    ok(request("observe_clear"), "observe_clear")
+    ok(request("observe_add", {"path": "live_set", "property": "tempo"}),
+       "observe_add")
+    lst = ok(request("observe_list"), "observe_list")
+    check("observe_list reports the listener",
+          lst and lst["active_listeners"] == 1, lst and lst.get("active_listeners"))
+    check("observe_list reports object validity",
+          lst and lst["listeners"][0]["object_valid"] is True)
+
+    rm = ok(request("observe_remove", {"path": "live_set",
+                                       "property": "tempo"}), "observe_remove")
+    check("observe_remove reports outcome", rm and rm["outcome"] == "removed", rm)
+    check("listener count back to zero",
+          rm and rm["active_listeners"] == 0, rm)
+
+    miss = ok(request("observe_remove", {"path": "live_set",
+                                         "property": "tempo"}),
+              "observe_remove twice")
+    check("removing a non-observer is not an error",
+          miss and miss["was_observing"] is False, miss)
 
 
 def main():
