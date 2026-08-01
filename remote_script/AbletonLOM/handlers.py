@@ -695,8 +695,178 @@ def op_arrangement_list(surface, params):
                       for i, c in enumerate(clips)]}
 
 
+# ------------------------------------------------------ PHASE 6: observers
+#
+# Live's listener API is add_<prop>_listener / remove_<prop>_listener /
+# <prop>_has_listener. Callbacks take NO arguments - they are bare
+# notifications - so the current value must be read inside the callback.
+#
+# Two failure modes drive this design:
+#
+# 1. LEAK ACROSS RELOAD. importlib.reload re-executes this module, so a
+#    registry in module globals would be reset to empty while Live still holds
+#    every callback - unremovable, firing forever. The registry therefore lives
+#    on the ControlSurface INSTANCE, which survives reload.
+#
+# 2. DANGLING OBJECTS. A listener keeps a reference to its Live object. If the
+#    user deletes that track/clip, touching the object can crash Live. Every
+#    callback re-checks liveobj_valid before reading.
+
+MAX_EVENTS = 2000
+
+
+def _registry(surface):
+    reg = getattr(surface, "_lom_observers", None)
+    if reg is None:
+        reg = {"listeners": {}, "events": [], "seq": 0, "dropped": 0}
+        surface._lom_observers = reg
+    return reg
+
+
+def _valid(obj):
+    m = _mxd()
+    if m["types"] is not None:
+        try:
+            return bool(m["types"].liveobj_valid(obj))
+        except Exception:
+            pass
+    return obj is not None
+
+
+def _key(path, prop):
+    return "%s\x00%s" % (path, prop)
+
+
+def op_observe_add(surface, params):
+    path, prop = params["path"], params["property"]
+    reg = _registry(surface)
+    k = _key(path, prop)
+    if k in reg["listeners"]:
+        return {"path": path, "property": prop, "already_observing": True}
+
+    obj = resolve(surface, path)
+    adder = getattr(obj, "add_%s_listener" % prop, None)
+    remover = getattr(obj, "remove_%s_listener" % prop, None)
+    if adder is None or remover is None:
+        raise AttributeError(
+            "%s has no listener for %r (expected add_%s_listener). Use "
+            "lom_describe to see which properties are observable."
+            % (_type_name(obj), prop, prop))
+
+    def _callback():
+        try:
+            if not _valid(obj):
+                return
+            try:
+                value = jsonify(getattr(obj, prop), depth=1)
+            except Exception as e:
+                value = {"error": "%s: %s" % (type(e).__name__, e)}
+            reg["seq"] += 1
+            reg["events"].append({"seq": reg["seq"], "path": path,
+                                  "property": prop, "value": value})
+            # Bounded: drop oldest, and record that we did rather than
+            # silently losing events.
+            over = len(reg["events"]) - MAX_EVENTS
+            if over > 0:
+                del reg["events"][:over]
+                reg["dropped"] += over
+        except Exception:
+            # A raising callback inside Live's notification loop is a good way
+            # to destabilise the GUI. Never propagate.
+            pass
+
+    adder(_callback)
+    reg["listeners"][k] = {"cb": _callback, "obj": obj, "remover": remover,
+                           "path": path, "property": prop}
+    return {"path": path, "property": prop, "observing": True,
+            "active_listeners": len(reg["listeners"])}
+
+
+def _remove_one(entry):
+    """-> 'removed' | 'object_gone' | 'failed:<reason>'
+
+    'object_gone' is NOT a leak: Live destroyed the object and its listener
+    list with it, so there is nothing left to detach from. Distinguished from
+    a genuine failure so a real leak cannot hide behind a benign one.
+    """
+    if not _valid(entry["obj"]):
+        return "object_gone"
+    try:
+        entry["remover"](entry["cb"])
+        return "removed"
+    except Exception as e:
+        return "failed:%s: %s" % (type(e).__name__, e)
+
+
+def op_observe_remove(surface, params):
+    reg = _registry(surface)
+    k = _key(params["path"], params["property"])
+    entry = reg["listeners"].pop(k, None)
+    if entry is None:
+        return {"path": params["path"], "property": params["property"],
+                "was_observing": False}
+    return {"path": params["path"], "property": params["property"],
+            "was_observing": True, "outcome": _remove_one(entry),
+            "active_listeners": len(reg["listeners"])}
+
+
+def op_observe_clear(surface, params):
+    reg = _registry(surface)
+    outcomes = {}
+    failures = []
+    for entry in list(reg["listeners"].values()):
+        r = _remove_one(entry)
+        bucket = r if r in ("removed", "object_gone") else "failed"
+        outcomes[bucket] = outcomes.get(bucket, 0) + 1
+        if bucket == "failed":
+            failures.append({"path": entry["path"],
+                             "property": entry["property"], "reason": r})
+    reg["listeners"].clear()
+    return {"attempted": sum(outcomes.values()), "outcomes": outcomes,
+            "failures": failures,
+            "leaked": len(failures)}
+
+
+def op_observe_list(surface, params):
+    reg = _registry(surface)
+    return {"active_listeners": len(reg["listeners"]),
+            "buffered_events": len(reg["events"]),
+            "dropped_events": reg["dropped"],
+            "max_events": MAX_EVENTS,
+            "listeners": [{"path": e["path"], "property": e["property"],
+                           "object_valid": _valid(e["obj"])}
+                          for e in reg["listeners"].values()]}
+
+
+def op_observe_poll(surface, params):
+    """Drain buffered events. Pass `since` (a seq) to avoid re-reading.
+
+    MCP has no server->client push, so this is a pull with a ring buffer
+    behind it - events accumulate in Live and are collected on demand.
+    """
+    reg = _registry(surface)
+    since = params.get("since")
+    events = reg["events"]
+    if since is not None:
+        events = [e for e in events if e["seq"] > int(since)]
+    limit = int(params.get("limit", 500))
+    out = events[-limit:] if limit and len(events) > limit else events
+    if params.get("consume"):
+        reg["events"] = []
+    return {"count": len(out),
+            "latest_seq": reg["seq"],
+            "dropped_events": reg["dropped"],
+            "active_listeners": len(reg["listeners"]),
+            "events": out}
+
+
 OPS = {
     "describe": op_describe,
+    "observe_add": op_observe_add,
+    "observe_remove": op_observe_remove,
+    "observe_clear": op_observe_clear,
+    "observe_list": op_observe_list,
+    "observe_poll": op_observe_poll,
     "get": op_get,
     "set": op_set,
     "call": op_call,
@@ -725,4 +895,11 @@ def dispatch(surface, op, params):
 
 
 def teardown(surface):
+    """Called on disconnect AND before reload. Must leave no listener behind:
+    Live holds the callback, so anything not removed here fires forever with
+    no way to reach it."""
     _MFL_CACHE.clear()
+    try:
+        op_observe_clear(surface, {})
+    except Exception:
+        pass

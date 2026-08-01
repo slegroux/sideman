@@ -320,6 +320,69 @@ def arrangement_duplicate_clip(path: str, clip: str,
                                 "destination_time": destination_time}), indent=2)
 
 
+# --------------------------------------------------------------- observers
+# MCP has no server->client push, so this is a pull with a ring buffer behind
+# it: Live accumulates change events, you collect them on demand.
+
+
+@mcp.tool()
+def lom_observe(path: str, property: str) -> str:
+    """Watch a property and record every change Live makes to it - including
+    changes the USER makes in the GUI, not just ones made through this server.
+
+    Then call lom_poll_events to collect them.
+
+    Not every property is observable. If there is no add_<property>_listener,
+    this says so; lom_describe lists what an object actually has.
+    Example: lom_observe("live_set", "tempo")
+    """
+    return json.dumps(_request("observe_add", {"path": path,
+                                               "property": property}), indent=2)
+
+
+@mcp.tool()
+def lom_unobserve(path: str, property: str) -> str:
+    """Stop watching one property.
+
+    Returns `outcome`: "removed", or "object_gone" if the underlying track/clip
+    was deleted (harmless - Live discarded its listeners with the object).
+    """
+    return json.dumps(_request("observe_remove", {"path": path,
+                                                  "property": property}),
+                      indent=2)
+
+
+@mcp.tool()
+def lom_observers() -> str:
+    """List active observers, buffered event count, and whether each observed
+    object is still valid (`object_valid: false` means it was deleted)."""
+    return json.dumps(_request("observe_list"), indent=2)
+
+
+@mcp.tool()
+def lom_unobserve_all() -> str:
+    """Remove every observer. Reports `leaked` - the number that could NOT be
+    detached and are still firing inside Live. Should always be 0."""
+    return json.dumps(_request("observe_clear"), indent=2)
+
+
+@mcp.tool()
+def lom_poll_events(since: int | None = None, limit: int = 500,
+                    consume: bool = False) -> str:
+    """Collect change events recorded by lom_observe.
+
+    Pass `since` = the previous `latest_seq` to get only new events; that is
+    cheaper and avoids re-reading. `consume=true` empties the buffer instead.
+
+    Check `dropped_events`: the buffer holds 2000 events and drops oldest
+    first, so a nonzero value means changes were lost between polls.
+    """
+    p: dict[str, Any] = {"limit": limit, "consume": consume}
+    if since is not None:
+        p["since"] = since
+    return json.dumps(_request("observe_poll", p), indent=2)
+
+
 def main() -> None:
     mcp.run(transport="stdio")
 

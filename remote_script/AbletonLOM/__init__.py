@@ -51,6 +51,15 @@ class AbletonLOM(ControlSurface):
 
     def _load_handlers(self):
         """(Re)import the engine module. Never let a bad engine kill the server."""
+        # Tear down BEFORE reloading. reload() re-executes the module, so any
+        # listener still registered would be orphaned: Live keeps firing the
+        # callback and nothing can remove it any more.
+        try:
+            if self._handlers and hasattr(self._handlers, "teardown"):
+                self._handlers.teardown(self)
+        except Exception:
+            self.log_message("AbletonLOM: teardown before reload failed\n"
+                             + traceback.format_exc())
         try:
             import importlib
             from . import handlers
