@@ -126,8 +126,8 @@ def lom_call(path: str, function: str, args: list[Any] | None = None,
     Example: lom_call("live_set", "create_midi_track", [-1])
              lom_call("live_set tracks 0 clip_slots 0", "fire")
 
-    Destructive functions (delete_track, delete_scene, remove_all_notes, ...)
-    refuse to run unless confirm=True. Ask the user before setting it.
+    Destructive functions refuse to run unless confirm=True - anything named
+    delete_*, remove_* or clear_*, plus crop. Ask the user before setting it.
     """
     return json.dumps(_request("call", {"path": path, "function": function,
                                         "args": args or [],

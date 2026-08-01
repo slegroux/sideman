@@ -97,9 +97,9 @@ This catches changes made in the GUI, not just your own writes.
 
 ## Safety
 
-- Destructive functions (`delete_track`, `delete_scene`, `remove_all_notes`)
-  refuse to run without `confirm=true`. **Ask the user first** — these destroy
-  work, and a Live Set is not version-controlled.
+- Destructive functions refuse to run without `confirm=true` — anything named
+  `delete_*`, `remove_*` or `clear_*`, plus `crop`. **Ask the user first** —
+  these destroy work, and a Live Set is not version-controlled.
 - Prefer additive operations. Renaming beats deleting-and-recreating.
 - The user's Set is live and often unsaved. Don't experiment in it; if you need
   a scratch track, create one and remove it, and say what you did.

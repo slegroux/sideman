@@ -14,17 +14,31 @@
 
 from __future__ import absolute_import, print_function
 
+import re
 import traceback
 
 import Live
 
 EPII_VERSION = (3, 0)
 
-# Functions that destroy user work. Require params["confirm"] is True.
-WRITE_GUARD = frozenset([
-    "delete_track", "delete_return_track", "delete_scene", "delete_device",
-    "delete_clip", "delete_cue_point", "remove_all_notes", "crop",
-])
+# Functions that destroy user work require params["confirm"] is True.
+#
+# Derived from a pattern rather than a hand-kept list. The previous list had
+# drifted badly: it guarded two names Live 12 does not have
+# (delete_cue_point, remove_all_notes) while MISSING eleven it does - including
+# remove_notes_extended, clear_all_envelopes and delete_all_chains. A stale
+# allowlist is worse than none, because it looks like coverage.
+_DESTRUCTIVE = re.compile(r"^(delete|remove|clear)_|^crop$")
+
+# Destructive but not matching the prefix pattern.
+_DESTRUCTIVE_EXTRA = frozenset(["crop"])
+
+
+def _is_destructive(fn):
+    # add_x_listener / remove_x_listener are lifecycle plumbing, not edits.
+    if fn.endswith("_listener"):
+        return False
+    return fn in _DESTRUCTIVE_EXTRA or bool(_DESTRUCTIVE.match(fn))
 
 _MXD = {"types": None, "utils": None, "error": None}
 
@@ -49,7 +63,6 @@ def _roots(surface):
         "live_set": surface.song(),
         "live_app": app,
         "app_view": app.view,
-        "this_device": None,
     }
 
 
@@ -181,26 +194,26 @@ def _member_names(obj):
     mxd = set(_mfl_index(type(obj)))
     raw = set(n for n in dir(obj) if not n.startswith("_"))
     both = mxd | raw
+    # Counts only. The full mxd_only/dir_only name lists were a Phase 3
+    # diagnostic; shipping them on every describe added ~120 redundant strings
+    # per Clip to the most-called tool.
     meta = {
         "mxd_count": len(mxd),
         "dir_count": len(raw),
         "union_count": len(both),
-        "mxd_only": sorted(mxd - raw),
-        "dir_only": sorted(raw - mxd),
     }
-    return sorted(both), ("union" if mxd else "dir"), meta
+    return sorted(both), meta
 
 
 def describe(surface, path, include_values=True):
     """getinfo, but honest about per-INSTANCE availability."""
     obj = resolve(surface, path)
-    names, source, meta = _member_names(obj)
+    names, meta = _member_names(obj)
     idx = _mfl_index(type(obj))
 
     out = {
         "path": path,
         "type": _type_name(obj),
-        "source": source,
         "sources": meta,
         "properties": {},
         "children": {},
@@ -242,7 +255,7 @@ def describe(surface, path, include_values=True):
 
 # --------------------------------------------------------------------- verbs
 
-def _undo(surface, label):
+def _undo(surface):
     """REENTRANT undo step.
 
     Every mutating op opens one of these. A transaction wraps N such ops, so
@@ -262,10 +275,8 @@ def _undo(surface, label):
             if depth == 0:
                 try:
                     song.begin_undo_step()
-                    surface._lom_undo_begins = getattr(
-                        surface, "_lom_undo_begins", 0) + 1
-                except Exception as e:
-                    surface._lom_undo_err = str(e)
+                except Exception:
+                    pass
             surface._lom_undo_depth = depth + 1
             return self
 
@@ -275,10 +286,8 @@ def _undo(surface, label):
             if depth == 0:
                 try:
                     song.end_undo_step()
-                    surface._lom_undo_ends = getattr(
-                        surface, "_lom_undo_ends", 0) + 1
-                except Exception as e:
-                    surface._lom_undo_err = str(e)
+                except Exception:
+                    pass
             return False
 
     return _Step()
@@ -343,7 +352,7 @@ def op_transaction(surface, params):
 def _run_ops(surface, ops, stop_on_error, rollback_on_error):
     results = []
     failed = False
-    with _undo(surface, "transaction"):
+    with _undo(surface):
         for i, spec in enumerate(ops):
             name = spec.get("op", "set")
             fn = OPS.get(name)
@@ -367,10 +376,6 @@ def _run_ops(surface, ops, stop_on_error, rollback_on_error):
     applied = sum(1 for r in results if r["ok"])
     out = {"count": len(results), "applied": applied, "failed": failed,
            "results": results,
-           "_debug": {"begins": getattr(surface, "_lom_undo_begins", 0),
-                      "ends": getattr(surface, "_lom_undo_ends", 0),
-                      "depth_after": getattr(surface, "_lom_undo_depth", None),
-                      "err": getattr(surface, "_lom_undo_err", None)},
            "undo": UNDO_GROUPING_NOTE}
 
     if failed and rollback_on_error and applied:
@@ -409,7 +414,7 @@ def op_set(surface, params):
     if callable(getattr(obj, prop)):
         raise TypeError("%r is a function; use op 'call'" % prop)
     value = _coerce(obj, prop, params["value"])
-    with _undo(surface, "set %s" % prop):
+    with _undo(surface):
         setattr(obj, prop, value)
     return {"path": path, "property": prop, "value": jsonify(getattr(obj, prop))}
 
@@ -423,10 +428,10 @@ def op_call(surface, params):
         raise AttributeError("%s has no member %r" % (_type_name(obj), fn))
     if not callable(target):
         raise TypeError("%r is a property; use op 'get'/'set'" % fn)
-    if fn in WRITE_GUARD and not params.get("confirm"):
+    if _is_destructive(fn) and not params.get("confirm"):
         raise PermissionError(
             "%r is destructive; re-send with confirm=true to proceed" % fn)
-    with _undo(surface, "call %s" % fn):
+    with _undo(surface):
         result = target(*args)
     return {"path": path, "function": fn, "result": jsonify(result)}
 
@@ -557,13 +562,17 @@ def _require_midi_clip(surface, path):
     return clip
 
 
+def _note_range(clip, params):
+    """Shared pitch/time window for the notes ops. Defaults cover the clip."""
+    return (int(params.get("from_pitch", 0)),
+            int(params.get("pitch_span", 128)),
+            float(params.get("from_time", 0.0)),
+            float(params.get("time_span", clip.length or 0.0)))
+
+
 def op_notes_get(surface, params):
     clip = _require_midi_clip(surface, params["path"])
-    from_pitch = int(params.get("from_pitch", 0))
-    pitch_span = int(params.get("pitch_span", 128))
-    from_time = float(params.get("from_time", 0.0))
-    time_span = float(params.get("time_span", clip.length or 0.0))
-    notes = clip.get_notes_extended(from_pitch, pitch_span, from_time, time_span)
+    notes = clip.get_notes_extended(*_note_range(clip, params))
     return {"path": params["path"], "count": len(notes),
             "notes": [_note_to_dict(n) for n in notes]}
 
@@ -581,21 +590,17 @@ def op_notes_add(surface, params):
             velocity=float(n.get("velocity", 100)),
             mute=bool(n.get("mute", False)),
         ))
-    with _undo(surface, "add notes"):
+    with _undo(surface):
         clip.add_new_notes(tuple(specs))
     return {"path": params["path"], "added": len(specs)}
 
 
 def op_notes_remove(surface, params):
     clip = _require_midi_clip(surface, params["path"])
-    from_pitch = int(params.get("from_pitch", 0))
-    pitch_span = int(params.get("pitch_span", 128))
-    from_time = float(params.get("from_time", 0.0))
-    time_span = float(params.get("time_span", clip.length or 0.0))
-    before = len(clip.get_notes_extended(from_pitch, pitch_span,
-                                         from_time, time_span))
-    with _undo(surface, "remove notes"):
-        clip.remove_notes_extended(from_pitch, pitch_span, from_time, time_span)
+    window = _note_range(clip, params)
+    before = len(clip.get_notes_extended(*window))
+    with _undo(surface):
+        clip.remove_notes_extended(*window)
     return {"path": params["path"], "removed": before}
 
 
@@ -620,7 +625,7 @@ def op_notes_modify(surface, params):
                 setattr(ln, f, spec[f])
         touched += 1
     if touched:
-        with _undo(surface, "modify notes"):
+        with _undo(surface):
             clip.apply_note_modifications(live_notes)
     missing = sorted(set(wanted) - set(getattr(n, "note_id", None)
                                        for n in live_notes))
@@ -652,6 +657,25 @@ BROWSER_ROOTS = ("instruments", "sounds", "drums", "audio_effects",
                  "user_library", "current_project", "max_for_live")
 
 
+def _browser_resolve(surface, rel):
+    """'plugins/VST3/Foo' -> the BrowserItem. Shared by list and load."""
+    parts = rel.split("/")
+    node = getattr(_browser(surface), parts[0], None)
+    if node is None:
+        raise ValueError("unknown browser root %r; expected one of %s"
+                         % (parts[0], list(BROWSER_ROOTS)))
+    for name in parts[1:]:
+        match = None
+        for child in (getattr(node, "children", []) or []):
+            if getattr(child, "name", None) == name:
+                match = child
+                break
+        if match is None:
+            raise ValueError("no browser child %r under %r" % (name, node.name))
+        node = match
+    return node
+
+
 def op_browser_list(surface, params):
     """path is browser-relative: '' for roots, or 'plugins/My Plugin/...'."""
     b = _browser(surface)
@@ -667,20 +691,7 @@ def op_browser_list(surface, params):
                 out.append(d)
         return {"path": "", "items": out}
 
-    parts = rel.split("/")
-    node = getattr(b, parts[0], None)
-    if node is None:
-        raise ValueError("unknown browser root %r; expected one of %s"
-                         % (parts[0], list(BROWSER_ROOTS)))
-    for p in parts[1:]:
-        match = None
-        for c in (getattr(node, "children", []) or []):
-            if getattr(c, "name", None) == p:
-                match = c
-                break
-        if match is None:
-            raise ValueError("no browser child %r under %r" % (p, node.name))
-        node = match
+    node = _browser_resolve(surface, rel)
     return {"path": rel, "item": _browser_item(node),
             "items": [_browser_item(c)
                       for c in (getattr(node, "children", []) or [])]}
@@ -691,19 +702,7 @@ def op_browser_load(surface, params):
     track index first if you need a specific destination."""
     b = _browser(surface)
     rel = params["path"].strip("/")
-    parts = rel.split("/")
-    node = getattr(b, parts[0], None)
-    if node is None:
-        raise ValueError("unknown browser root %r" % parts[0])
-    for p in parts[1:]:
-        match = None
-        for c in (getattr(node, "children", []) or []):
-            if getattr(c, "name", None) == p:
-                match = c
-                break
-        if match is None:
-            raise ValueError("no browser child %r under %r" % (p, node.name))
-        node = match
+    node = _browser_resolve(surface, rel)
     if not getattr(node, "is_loadable", False):
         raise ValueError("%r is not loadable" % rel)
 
@@ -711,7 +710,7 @@ def op_browser_load(surface, params):
     idx = params.get("track_index")
     if idx is not None:
         song.view.selected_track = song.tracks[int(idx)]
-    with _undo(surface, "load browser item"):
+    with _undo(surface):
         b.load_item(node)
     return {"loaded": rel,
             "track": getattr(song.view.selected_track, "name", None)}
@@ -757,7 +756,7 @@ def op_envelope_insert_step(surface, params):
     clip, param, env = _envelope(surface, params, create=True)
     if env is None:
         raise RuntimeError("could not create an envelope for that parameter")
-    with _undo(surface, "insert envelope step"):
+    with _undo(surface):
         env.insert_step(float(params["time"]), float(params["length"]),
                         float(params["value"]))
     return {"path": params["path"], "parameter": params["parameter"],
@@ -767,7 +766,7 @@ def op_envelope_insert_step(surface, params):
 
 def op_envelope_clear(surface, params):
     clip = resolve(surface, params["path"])
-    with _undo(surface, "clear envelope"):
+    with _undo(surface):
         if params.get("parameter"):
             clip.clear_envelope(resolve(surface, params["parameter"]))
             return {"cleared": params["parameter"]}
@@ -785,7 +784,7 @@ def op_arrangement_create_clip(surface, params):
     track = resolve(surface, params["path"])
     start = float(params["start_time"])
     kind = params.get("kind", "midi")
-    with _undo(surface, "create arrangement clip"):
+    with _undo(surface):
         if kind == "midi":
             clip = track.create_midi_clip(start, float(params["length"]))
         elif kind == "audio":
@@ -800,7 +799,7 @@ def op_arrangement_duplicate_clip(surface, params):
     """Copy a session clip into the Arrangement at a given time."""
     track = resolve(surface, params["path"])
     clip = resolve(surface, params["clip"])
-    with _undo(surface, "duplicate clip to arrangement"):
+    with _undo(surface):
         result = track.duplicate_clip_to_arrangement(
             clip, float(params["destination_time"]))
     return {"track": params["path"], "clip": params["clip"],
@@ -1037,55 +1036,43 @@ SINGULAR = (
 )
 
 
-def op_search(surface, params):
-    """Find LOM paths by name and/or type, breadth-first from a root.
+def _walk(surface, root, max_depth=6, max_nodes=4000, stats=None):
+    """Bounded breadth-first walk of the LOM graph, yielding (path, obj, ident).
 
-    query   substring, case-insensitive, matched against `name`
-    type    substring matched against the type, e.g. "Track" or "DeviceParameter"
+    Shared by search and canonical_path - they previously carried two copies of
+    this, which meant the _live_ptr identity fix had to be made twice.
 
-    Bounded by max_results and max_nodes because this runs on Live's main
-    thread - an unbounded graph walk would freeze the GUI.
+    Identity is _live_ptr, NOT id(): Live returns a fresh Python wrapper per
+    getattr, and a garbage-collected wrapper's address gets reused, so id()
+    makes the walk mistake new objects for visited ones and truncate silently.
+
+    Bounded because this runs on Live's main thread; stats["truncated"] records
+    whether the budget ran out.
     """
-    query = (params.get("query") or "").lower()
-    want_type = (params.get("type") or "").lower()
-    if not query and not want_type:
-        raise ValueError("give at least one of `query` or `type`")
-    max_results = int(params.get("max_results", 50))
-    max_nodes = int(params.get("max_nodes", 4000))
-    root = params.get("root", "live_set")
+    if stats is None:
+        stats = {}
+    stats.setdefault("nodes", 0)
+    stats.setdefault("truncated", False)
 
-    start = resolve(surface, root)
-    queue = [(root, start, 0)]
+    queue = [(root, resolve(surface, root), 0)]
     seen = set()
     keepalive = []          # holds refs so wrapper addresses cannot be recycled
-    results = []
-    nodes = 0
-    truncated = False
 
     while queue:
         path, obj, depth = queue.pop(0)
-        if nodes >= max_nodes or len(results) >= max_results:
-            truncated = True
-            break
-        nodes += 1
-        oid = _identity(obj)
-        if oid in seen:
+        if stats["nodes"] >= max_nodes:
+            stats["truncated"] = True
+            return
+        stats["nodes"] += 1
+        ident = _identity(obj)
+        if ident in seen:
             continue
-        seen.add(oid)
+        seen.add(ident)
         keepalive.append(obj)
 
-        tname = _type_name(obj)
-        name = getattr(obj, "name", None)
-        name = name if isinstance(name, str) else None
-        hit = True
-        if query:
-            hit = hit and name is not None and query in name.lower()
-        if want_type:
-            hit = hit and want_type in tname.lower()
-        if hit and path != root:
-            results.append({"path": path, "type": tname, "name": name})
+        yield path, obj, ident
 
-        if depth >= int(params.get("max_depth", 6)):
+        if depth >= max_depth:
             continue
         for attr in WALKABLE:
             try:
@@ -1107,64 +1094,68 @@ def op_search(surface, params):
             if child is not None and _is_lom_object(child):
                 queue.append(("%s %s" % (path, attr), child, depth + 1))
 
+
+def op_search(surface, params):
+    """Find LOM paths by name and/or type.
+
+    query   substring, case-insensitive, matched against `name`
+    type    substring matched against the type, e.g. "Track" or "DeviceParameter"
+    """
+    query = (params.get("query") or "").lower()
+    want_type = (params.get("type") or "").lower()
+    if not query and not want_type:
+        raise ValueError("give at least one of `query` or `type`")
+    max_results = int(params.get("max_results", 50))
+    root = params.get("root", "live_set")
+
+    stats = {}
+    results = []
+    for path, obj, _ident in _walk(surface, root,
+                                   max_depth=int(params.get("max_depth", 6)),
+                                   max_nodes=int(params.get("max_nodes", 4000)),
+                                   stats=stats):
+        if len(results) >= max_results:
+            stats["truncated"] = True
+            break
+        if path == root:
+            continue
+        tname = _type_name(obj)
+        name = getattr(obj, "name", None)
+        name = name if isinstance(name, str) else None
+        if query and (name is None or query not in name.lower()):
+            continue
+        if want_type and want_type not in tname.lower():
+            continue
+        results.append({"path": path, "type": tname, "name": name})
+
     return {"query": params.get("query"), "type": params.get("type"),
-            "root": root, "count": len(results), "nodes_visited": nodes,
-            "truncated": truncated, "results": results}
+            "root": root, "count": len(results),
+            "nodes_visited": stats["nodes"], "truncated": stats["truncated"],
+            "results": results}
 
 
 def op_canonical_path(surface, params):
     """Resolve an alias path to its canonical location.
 
-    Useful because many paths point at the same object: "live_set view
-    selected_track" is whichever track is selected right now, and the canonical
-    form ("live_set tracks 3") is what you want to store or reuse.
+    Many paths point at the same object: "live_set view selected_track" is
+    whichever track is selected right now; the canonical form
+    ("live_set tracks 3") is what you want to store or reuse.
     """
     path = params["path"]
-    obj = resolve(surface, path)
-    target = _identity(obj)
+    target = _identity(resolve(surface, path))
 
-    # Walk the same bounded graph and report where this object actually lives.
+    stats = {}
     found = None
-    queue = [("live_set", resolve(surface, "live_set"), 0)]
-    seen = set()
-    keepalive = []
-    nodes = 0
-    while queue and found is None and nodes < 6000:
-        p, o, d = queue.pop(0)
-        nodes += 1
-        oid = _identity(o)
-        if oid in seen:
-            continue
-        seen.add(oid)
-        keepalive.append(o)
-        if oid == target and p != path:
+    for p, _obj, ident in _walk(surface, "live_set", max_nodes=6000,
+                                stats=stats):
+        if ident == target and p != path:
             found = p
             break
-        if d >= 6:
-            continue
-        for attr in WALKABLE:
-            try:
-                coll = getattr(o, attr, None)
-            except Exception:
-                continue
-            if coll is not None and _is_vector(coll):
-                try:
-                    for i, c in enumerate(coll):
-                        queue.append(("%s %s %d" % (p, attr, i), c, d + 1))
-                except Exception:
-                    pass
-        for attr in SINGULAR:
-            try:
-                c = getattr(o, attr, None)
-            except Exception:
-                continue
-            if c is not None and _is_lom_object(c):
-                queue.append(("%s %s" % (p, attr), c, d + 1))
 
-    return {"path": path, "type": _type_name(obj),
+    return {"path": path, "type": _type_name(resolve(surface, path)),
             "canonical_path": found or path,
             "is_alias": bool(found and found != path),
-            "nodes_visited": nodes}
+            "nodes_visited": stats["nodes"]}
 
 
 OPS = {

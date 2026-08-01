@@ -106,8 +106,10 @@ raise on a given object — MIDI tracks have no `input_meter_left`, only the mai
 track has a `crossfader`. `lom_describe` reports these in an `unavailable` map
 rather than pretending the type list is uniformly gettable.
 
-**Destructive calls are guarded.** `delete_track`, `delete_scene`,
-`remove_all_notes` and friends refuse to run unless `confirm=true`.
+**Destructive calls are guarded.** Anything named `delete_*`, `remove_*` or
+`clear_*`, plus `crop`, refuses to run unless `confirm=true`. Derived from a
+pattern, not a hand-kept list — the list had drifted, guarding two names Live 12
+does not have while missing eleven it does.
 
 ## Development
 
