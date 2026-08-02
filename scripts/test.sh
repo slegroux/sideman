@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Run both suites.
 #
-#   tests/test_mcp.py  unit, no Live required     -> CI-able, ~1s
-#   tests/smoke.py     integration, needs Live    -> skipped if unreachable, ~70s
+#   tests/test_mcp.py  unit,  no Live required    -> CI-able, ~1s
+#   tests/test_e2e.py  e2e,   needs Live          -> MCP layer -> socket -> Live
+#   tests/smoke.py     engine, needs Live         -> raw socket, ~70s
+#
+# The three cover different seams. test_mcp stubs the socket so it never touches
+# Live; smoke uses a raw socket so it never loads the MCP layer. Only test_e2e
+# exercises the path Claude actually takes, where a response the tool cannot
+# serialise or an error escaping as the wrong type would finally show up.
 #
 # The integration suite is slow because it does real work: six scratch-track
 # create/delete cycles and a genuine device load through the browser. That is
@@ -23,10 +29,13 @@ echo "== unit: MCP layer (no Live needed) =="
 
 echo
 if "$REPO/scripts/lomcli.py" ping >/dev/null 2>&1; then
+  echo "== e2e: MCP layer -> Live =="
+  "$PY" "$REPO/tests/test_e2e.py" "$@" || rc=1
+  echo
   echo "== integration: engine against live Ableton =="
   "$PY" "$REPO/tests/smoke.py" "$@" || rc=1
 else
-  echo "== integration: SKIPPED (Live not reachable on :9878) =="
+  echo "== e2e + integration: SKIPPED (Live not reachable on :9878) =="
   echo "   Start Live with AbletonLOM enabled to run the engine tests."
 fi
 
