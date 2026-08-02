@@ -30,15 +30,12 @@ EPII_VERSION = (3, 0)
 # allowlist is worse than none, because it looks like coverage.
 _DESTRUCTIVE = re.compile(r"^(delete|remove|clear)_|^crop$")
 
-# Destructive but not matching the prefix pattern.
-_DESTRUCTIVE_EXTRA = frozenset(["crop"])
-
 
 def _is_destructive(fn):
     # add_x_listener / remove_x_listener are lifecycle plumbing, not edits.
     if fn.endswith("_listener"):
         return False
-    return fn in _DESTRUCTIVE_EXTRA or bool(_DESTRUCTIVE.match(fn))
+    return bool(_DESTRUCTIVE.match(fn))
 
 _MXD = {"types": None, "utils": None, "error": None}
 
@@ -775,9 +772,6 @@ def op_envelope_clear(surface, params):
 
 
 # ------------------------------------------------- PHASE 3: arrangement view
-#
-# The gap in jpoindexter's 128 tools: it can navigate the arrangement but not
-# author clips into it.
 
 def op_arrangement_create_clip(surface, params):
     """Create a clip directly in the Arrangement. kind: 'midi' | 'audio'."""
@@ -1012,10 +1006,8 @@ WALKABLE = (
     "drum_pads", "parameters", "arrangement_clips", "take_lanes", "cue_points",
     "sends",
 )
-# Mixer parameters are DeviceParameter objects hanging off singular attributes,
-# not off a `parameters` collection - so a collection-only walk silently misses
-# every track volume and pan. Some of these raise per instance (crossfader is
-# main-track only); the walk already guards getattr.
+
+
 def _identity(obj):
     """Stable identity for a Live object.
 
@@ -1028,6 +1020,10 @@ def _identity(obj):
     return ("ptr", ptr) if ptr is not None else ("id", id(obj))
 
 
+# Mixer parameters are DeviceParameter objects hanging off singular attributes,
+# not off a `parameters` collection - so a collection-only walk silently misses
+# every track volume and pan. Some of these raise per instance (crossfader is
+# main-track only); the walk already guards getattr.
 SINGULAR = (
     "master_track", "mixer_device", "clip", "view", "sample",
     "volume", "panning", "track_activator", "panning_mode",
