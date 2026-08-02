@@ -24,6 +24,10 @@ PY="$REPO/.venv/bin/python"
 [ -x "$PY" ] || PY=python3
 rc=0
 
+echo "== docs: generated reference up to date =="
+"$PY" "$REPO/scripts/gen_docs.py" --check || rc=1
+
+echo
 echo "== unit: MCP layer (no Live needed) =="
 "$PY" "$REPO/tests/test_mcp.py" "$@" || rc=1
 
