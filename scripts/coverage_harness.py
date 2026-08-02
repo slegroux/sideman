@@ -32,10 +32,11 @@ def _census_path():
 
 CENSUS = _census_path()
 
-SCRATCH = pathlib.Path(
-    "/private/tmp/claude-501/-Users-slegroux/"
-    "f6da4bf6-3332-49d3-9c2c-8776bc929239/scratchpad/abl"
-)
+# Competitor checkouts. Must be a stable location: this previously pointed into
+# a temp scratchpad, which meant the sources could vanish without warning - and
+# a vanished source produces no residue, so the harness would have reported its
+# strongest verdict having measured nothing. Missing sources are now fatal.
+VENDOR = pathlib.Path.home() / "Projects/vendor"
 
 # Only competitors that reach Live through a Python Remote Script are comparable
 # by this method: their source contains literal Live API attribute accesses.
@@ -49,12 +50,11 @@ SCRATCH = pathlib.Path(
 # Both are handled by the OSC/ableton-js note in the report instead.
 COMPETITORS = {
     "jpoindexter/ableton-mcp": [
-        SCRATCH / "jpoindexter_ableton-mcp/AbletonMCP_Remote_Script/__init__.py"],
+        VENDOR / "jpoindexter_ableton-mcp/AbletonMCP_Remote_Script/__init__.py"],
     "uisato/ableton-mcp-extended": [
-        pathlib.Path.home()
-        / "Projects/vendor/ableton-mcp-extended/AbletonMCP_Remote_Script/__init__.py"],
+        VENDOR / "ableton-mcp-extended/AbletonMCP_Remote_Script/__init__.py"],
     "ahujasid/ableton-mcp": [
-        SCRATCH / "ahujasid_ableton-mcp/AbletonMCP_Remote_Script/__init__.py"],
+        VENDOR / "ahujasid_ableton-mcp/AbletonMCP_Remote_Script/__init__.py"],
 }
 
 # Members of Browser / BrowserItem. These are genuinely reachable
@@ -115,6 +115,7 @@ tool resource prompt call_tool list_tools run_stdio_async
 info debug warning error critical exception setLevel addHandler
 value_error type_error key_error
 self cls args kwargs params kwargs_
+add namedtuple python
 """.split())
 
 ATTR_RE = re.compile(r"\.([a-z_][a-z_0-9]*)\b")
@@ -170,11 +171,15 @@ def main(verbose: bool = False) -> int:
     print()
 
     grand_residue: dict[str, set[str]] = {}
+    missing: list[str] = []
     rows = []
     for name, paths in COMPETITORS.items():
         attrs, nfiles = extract(paths)
         if not nfiles:
+            # A missing source contributes no residue, so counting it as a pass
+            # would let the harness claim a superset it never measured.
             rows.append((name, 0, 0, 0.0, "SOURCE MISSING"))
+            missing.append("%s -> %s" % (name, ", ".join(str(p) for p in paths)))
             continue
         covered = {a for a in attrs
                    if a in members or is_listener_of(a, members)}
@@ -229,7 +234,20 @@ def main(verbose: bool = False) -> int:
         print(f"      {a:32} used by: {', '.join(who)}")
     print()
 
+    if missing:
+        print(f"  [!] SOURCES MISSING ...................... {len(missing):>3}  CANNOT VERIFY")
+        for m in missing:
+            print(f"      {m}")
+        print()
+
     blocking = len(browser) + len(unexplained)
+    if missing:
+        print("VERDICT: UNVERIFIED - %d competitor source(s) could not be read."
+              % len(missing))
+        print("  A missing source yields no residue, so a clean result here would")
+        print("  mean nothing. Clone the missing repo(s) under ~/Projects/vendor")
+        print("  and re-run. Refusing to report a superset that was not measured.")
+        return 2
     if blocking == 0:
         print("VERDICT: SUPERSET PROVEN for the three Remote Script competitors.")
         print("  Every Live API member they touch is either in our census, their")
