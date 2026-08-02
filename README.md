@@ -8,7 +8,7 @@ Live Object Model itself — the same generic `path` / `get` / `set` / `call`
 contract Max for Live's `live.object` uses — so any property Live has is
 reachable without shipping new code.
 
-- **[docs/TOOLS.md](docs/TOOLS.md)** — all 29 tools with signatures (generated)
+- **[docs/TOOLS.md](docs/TOOLS.md)** — all 30 tools with signatures (generated)
 - **[docs/PROTOCOL.md](docs/PROTOCOL.md)** — wire protocol, threading contract, how to add an op
 - **[skills/ableton-lom/SKILL.md](skills/ableton-lom/SKILL.md)** — path grammar for the model
 
@@ -29,19 +29,21 @@ Live 12.2.7 exposes **47 reachable types / 922 members** by measurement (see
 
 Coverage is verified, not claimed: `scripts/coverage_harness.py` checks every
 Live API attribute the three Remote Script competitors touch against our census
-and **exits nonzero if any is unaccounted for**. Currently 0 unaccounted.
-Not verified for xiaolaa2 (ableton-js) or Simon-Kansara (OSC) — different
-bridges, out of scope for that method.
+and **exits nonzero if any is unaccounted for** (and exit 2 if a competitor
+source is missing, rather than reporting a superset it never measured).
+Currently 0 unaccounted. It reads the competitor checkouts from
+`~/Projects/vendor/`. Not verified for xiaolaa2 (ableton-js) or Simon-Kansara
+(OSC) — different bridges, out of scope for that method.
 
 ## Architecture
 
 ```
-Claude ──MCP──► mcp_server/server.py          29 tools
+Claude ──MCP──► mcp_server/server.py          30 tools
                     │ JSON/TCP :9878          (not 9877 — coexists with others)
                     ▼
                 remote_script/AbletonLOM/
                     ├── __init__.py    thin socket shell   (restart Live to change)
-                    └── handlers.py    LOM engine, 30 ops  (hot-reload, no restart)
+                    └── handlers.py    LOM engine, 29 ops  (hot-reload, no restart)
 ```
 
 **Threading contract:** accept-thread → client-thread → `schedule_message(0, task)`.
@@ -89,7 +91,7 @@ appear.
 
 ## Tools
 
-29 tools. Generic first — the typed ones exist only where generic access
+30 tools. Generic first — the typed ones exist only where generic access
 genuinely cannot work. Full signatures in **[docs/TOOLS.md](docs/TOOLS.md)**.
 
 | Tool | Purpose |
@@ -105,6 +107,7 @@ genuinely cannot work. Full signatures in **[docs/TOOLS.md](docs/TOOLS.md)**.
 | `browser_list` / `browser_load` | Library, incl. VST/AU/VST3 |
 | `clip_envelope_get` / `insert_step` / `clear` | Clip automation |
 | `arrangement_create_clip` / `duplicate_clip` / `list_clips` | Arrangement authoring |
+| `clip_set_warp_markers` | Audio warp map (typed — JSON cannot carry a WarpMarker) |
 | `lom_observe` / `lom_poll_events` / `lom_observers` / `lom_unobserve*` | Change notification |
 
 **Observers are unique to this server.** Nothing else in the field reports
@@ -152,7 +155,7 @@ does not have while missing eleven it does.
 |---|---|---|
 | `tests/test_mcp.py` | no | MCP layer with a **stubbed socket** — op mapping, optional params, safe destructive defaults, error translation |
 | `tests/test_e2e.py` | yes | **MCP layer → socket → Live** — the path Claude actually takes |
-| `tests/smoke.py` | yes | engine via a **raw socket** — all 30 ops (~70s; loads a real device and cycles scratch tracks) |
+| `tests/smoke.py` | yes | engine via a **raw socket** — all 29 engine ops (~70s; loads a real device, imports an audio file, cycles scratch tracks) |
 
 The three cover deliberately different seams: `test_mcp` never touches Live,
 `smoke` never loads the MCP layer, and only `test_e2e` exercises both together.
@@ -209,7 +212,7 @@ without the MCP layer in the way. See **[docs/PROTOCOL.md](docs/PROTOCOL.md)**
 for the protocol and how to add an op.
 
 Deliberately **no curated per-feature tool layer**. The plan called for ~30 sugar
-verbs; at 29 generic tools that would mean 59, and tool overload degrades
+verbs; at 30 generic tools that would mean 60, and tool overload degrades
 selection. The skill buys the same ergonomics at zero tool cost.
 
 ## Status
