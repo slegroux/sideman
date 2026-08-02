@@ -27,6 +27,19 @@ rc=0
 echo "== docs: generated reference up to date =="
 "$PY" "$REPO/scripts/gen_docs.py" --check || rc=1
 
+# The README's superset claim rests on this. It was previously never run by the
+# suite, which is how it drifted to a failing state unnoticed. Exit 2 means the
+# competitor checkouts are absent (a fresh clone) - that is a skip, not a
+# failure. Exit 1 means a real unresolved attribute.
+echo
+echo "== coverage: superset claim still holds =="
+"$PY" "$REPO/scripts/coverage_harness.py" >/dev/null 2>&1
+case $? in
+  0) echo "   superset claim verified" ;;
+  2) echo "   SKIPPED (competitor checkouts absent from ~/Projects/vendor)" ;;
+  *) echo "   FAILED - run scripts/coverage_harness.py --verbose"; rc=1 ;;
+esac
+
 echo
 echo "== unit: MCP layer (no Live needed) =="
 "$PY" "$REPO/tests/test_mcp.py" "$@" || rc=1
