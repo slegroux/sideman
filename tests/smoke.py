@@ -57,7 +57,7 @@ def test_describe():
 
 
 def test_per_instance_availability():
-    """The Phase 0 caveat: availability is per instance, not per type."""
+    """Availability is per instance, not per type."""
     r = ok(request("describe", {"path": "live_set tracks 0",
                                 "include_values": False}), "describe track")
     if not r:

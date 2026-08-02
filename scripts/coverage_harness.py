@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase 7 coverage harness.
+"""Coverage harness.
 
 Turns "superset" into a test instead of a claim.
 
@@ -57,8 +57,8 @@ COMPETITORS = {
         SCRATCH / "ahujasid_ableton-mcp/AbletonMCP_Remote_Script/__init__.py"],
 }
 
-# Members of Browser / BrowserItem. These are genuinely reachable (Phase 3's
-# browser_list/browser_load use them) but do NOT appear in the census, because
+# Members of Browser / BrowserItem. These are genuinely reachable
+# (browser_list/browser_load use them) but do NOT appear in the census, because
 # get_available_lom_types() registers 43 types and Browser is not one of them.
 # A real census gap, tracked rather than hidden.
 BROWSER_SURFACE = {
@@ -163,7 +163,7 @@ def main(verbose: bool = False) -> int:
         return 2
     members, data = census_universe()
     print("=" * 74)
-    print("PHASE 7 COVERAGE HARNESS")
+    print("COVERAGE HARNESS")
     print("=" * 74)
     print(f"Census: Live {CENSUS.stem.split('_')[-1]}  "
           f"{data['type_count']} types  {len(members)} substantive members")
@@ -205,7 +205,7 @@ def main(verbose: bool = False) -> int:
     print(f"RESIDUE: {len(allres)} attributes competitors touch that the census lacks")
     print()
     print(f"  [A] Browser/BrowserItem surface ......... {len(browser):>3}  REAL CENSUS GAP")
-    print("      Reachable today (Phase 3 browser_list/load use them) but absent")
+    print("      Reachable today (browser_list/browser_load use them) but absent")
     print("      from the census: get_available_lom_types() registers 43 types and")
     print("      Browser is not one. The census understates the reachable graph.")
     if browser:
