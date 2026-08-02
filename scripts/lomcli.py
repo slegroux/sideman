@@ -2,7 +2,7 @@
 """Raw socket client for the AbletonLOM remote script.
 
 Talks the wire protocol directly, so the engine can be exercised without the
-MCP layer in the way. This is the Phase 1 verification tool.
+MCP layer in the way.
 
   ./lomcli.py ping
   ./lomcli.py reload

@@ -3,7 +3,7 @@
 # Hot-reloadable: edit this file, send {"op":"reload"}, no Live restart needed.
 # Everything here runs ON LIVE'S MAIN THREAD (see __init__.py). Never block.
 #
-# Conventions verified by the Phase 0 probe against Live 12.2.7 / Python 3.11.6:
+# Conventions verified by probe against Live 12.2.7 / Python 3.11.6:
 #   * get_available_properties_for_type(type_, (3, 0)) -> [MFLProperty, ...]
 #   * MFLProperty = (name, format, to_json, from_json, min_epii_version, hidden)
 #   * that list mixes PROPERTIES AND FUNCTIONS - classify at runtime, not by name
@@ -191,7 +191,7 @@ def _member_names(obj):
     mxd = set(_mfl_index(type(obj)))
     raw = set(n for n in dir(obj) if not n.startswith("_"))
     both = mxd | raw
-    # Counts only. The full mxd_only/dir_only name lists were a Phase 3
+    # Counts only. The full mxd_only/dir_only name lists were a one-off
     # diagnostic; shipping them on every describe added ~120 redundant strings
     # per Clip to the most-called tool.
     meta = {
@@ -225,7 +225,7 @@ def describe(surface, path, include_values=True):
         try:
             val = getattr(obj, name)
         except Exception as e:
-            # This is the Phase 0 caveat: availability is per-instance.
+            # Availability is per-instance, not per-type.
             out["unavailable"][name] = "%s: %s" % (type(e).__name__, e)
             continue
         if callable(val):
@@ -290,7 +290,7 @@ def _undo(surface):
     return _Step()
 
 
-# ------------------------------------------------- PHASE 5: batch + transaction
+# ------------------------------------------------------- batch + transaction
 
 def op_get_batch(surface, params):
     """Read many properties in ONE round trip.
@@ -532,7 +532,7 @@ def op_describe(surface, params):
                     include_values=params.get("include_values", True))
 
 
-# ------------------------------------------------------------- PHASE 3: notes
+# --------------------------------------------------------------------- notes
 #
 # Generic get/set cannot express notes: get_notes_extended returns a
 # MidiNoteVector of MidiNote objects, and writes need MidiNoteSpecification.
@@ -630,7 +630,7 @@ def op_notes_modify(surface, params):
             "unmatched_note_ids": missing}
 
 
-# ----------------------------------------------------------- PHASE 3: browser
+# ------------------------------------------------------------------- browser
 
 def _browser(surface):
     app = Live.Application.get_application()
@@ -713,7 +713,7 @@ def op_browser_load(surface, params):
             "track": getattr(song.view.selected_track, "name", None)}
 
 
-# -------------------------------------------------- PHASE 3: automation envelopes
+# ------------------------------------------------------- automation envelopes
 #
 # Envelopes hang off a (clip, DeviceParameter) pair, so both must be addressed
 # by path. Parameter paths look like:
@@ -771,7 +771,7 @@ def op_envelope_clear(surface, params):
     return {"cleared": "all"}
 
 
-# ------------------------------------------------- PHASE 3: arrangement view
+# --------------------------------------------------------- arrangement view
 
 def op_arrangement_create_clip(surface, params):
     """Create a clip directly in the Arrangement. kind: 'midi' | 'audio'."""
@@ -812,7 +812,7 @@ def op_arrangement_list(surface, params):
                       for i, c in enumerate(clips)]}
 
 
-# ------------------------------------------------------ PHASE 6: observers
+# ----------------------------------------------------------------- observers
 #
 # Live's listener API is add_<prop>_listener / remove_<prop>_listener /
 # <prop>_has_listener. Callbacks take NO arguments - they are bare
@@ -993,7 +993,7 @@ def op_observe_poll(surface, params):
             "events": out}
 
 
-# ------------------------------------------- PHASE 2: search + canonical path
+# --------------------------------------------------- search + canonical path
 #
 # The generic API is complete but not discoverable: knowing tempo lives at
 # "live_set tempo" is easy, knowing which index holds the track called "bass"
