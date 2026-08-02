@@ -65,6 +65,7 @@ EXPECTED_OP = {
     "arrangement_list_clips": "arrangement_list",
     "arrangement_create_clip": "arrangement_create_clip",
     "arrangement_duplicate_clip": "arrangement_duplicate_clip",
+    "clip_set_warp_markers": "warp_markers_set",
     "lom_observe": "observe_add", "lom_unobserve": "observe_remove",
     "lom_observers": "observe_list", "lom_unobserve_all": "observe_clear",
     "lom_poll_events": "observe_poll",
@@ -89,6 +90,7 @@ MINIMAL_ARGS = {
     "arrangement_list_clips": ("live_set tracks 0",),
     "arrangement_create_clip": ("live_set tracks 0", 0.0),
     "arrangement_duplicate_clip": ("live_set tracks 0", "clip", 0.0),
+    "clip_set_warp_markers": ("clip", [[0.0, 0.0], [4.0, 2.0]]),
     "lom_observe": ("live_set", "tempo"),
     "lom_unobserve": ("live_set", "tempo"),
     "lom_observers": (), "lom_unobserve_all": (), "lom_poll_events": (),
@@ -137,6 +139,12 @@ def test_optional_params_omitted_when_none():
     check("lom_poll_events omits since when unset", "since" not in p, p)
     _, p = call(S.lom_poll_events, since=7)
     check("lom_poll_events forwards since", p.get("since") == 7, p)
+
+    _, p = call(S.clip_set_warp_markers, "clip", [[0.0, 0.0], [4.0, 2.0]])
+    check("warp_markers omits warp_mode when unset", "warp_mode" not in p, p)
+    _, p = call(S.clip_set_warp_markers, "clip", [[0.0, 0.0], [4.0, 2.0]],
+                warp_mode=1)
+    check("warp_markers forwards warp_mode", p.get("warp_mode") == 1, p)
 
     _, p = call(S.clip_envelope_clear, "clip")
     check("envelope_clear omits parameter -> clears all",

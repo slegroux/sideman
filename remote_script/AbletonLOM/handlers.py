@@ -1154,115 +1154,43 @@ def op_canonical_path(surface, params):
             "nodes_visited": stats["nodes"]}
 
 
-OPS = {
-    "describe": op_describe,
-    "search": op_search,
-    "canonical_path": op_canonical_path,
-    "get_batch": op_get_batch,
-    "set_batch": op_set_batch,
-    "transaction": op_transaction,
-    "observe_add": op_observe_add,
-    "observe_remove": op_observe_remove,
-    "observe_clear": op_observe_clear,
-    "observe_list": op_observe_list,
-    "observe_poll": op_observe_poll,
-    "get": op_get,
-    "set": op_set,
-    "call": op_call,
-    "count": op_count,
-    "types": op_types,
-    "envelope_get": op_envelope_get,
-    "envelope_insert_step": op_envelope_insert_step,
-    "envelope_clear": op_envelope_clear,
-    "arrangement_create_clip": op_arrangement_create_clip,
-    "arrangement_duplicate_clip": op_arrangement_duplicate_clip,
-    "arrangement_list": op_arrangement_list,
-    "notes_get": op_notes_get,
-    "notes_add": op_notes_add,
-    "notes_remove": op_notes_remove,
-    "notes_modify": op_notes_modify,
-    "browser_list": op_browser_list,
-    "browser_load": op_browser_load,
-}
-
-
-_WARP_STRATEGY = {}
-
+# ------------------------------------------------------------- warp markers
 
 def _add_one_warp_marker(clip, beat_time, sample_time):
-    """Add one warp marker, discovering the accepted argument shape once.
+    """Add one warp marker.
 
-    Which Python shape boost.python's from-python converter accepts is
-    undocumented and version dependent, so this probes rather than assumes and
-    caches the winner. On Live 12.2.7 the answer is
-    Live.Clip.WarpMarker(beat_time=..., sample_time=...). Raises with every
-    attempt listed if none work: a silent no-op would look like a successful
-    warp and leave the clip subtly out of time.
+    add_warp_marker takes a C++ TWarpMarker; the only Python value that
+    converts is a Live.Clip.WarpMarker. Non-WarpMarker shapes (dict, list,
+    tuple, int) are all rejected by boost.python's converter, so the only open
+    question is the constructor's call shape - keywords on Live 12.2.7, with
+    positional kept as the one plausible cross-version variant.
+
+    Raises rather than returning quietly if neither shape works: a silent
+    no-op would look like a successful warp and leave the clip out of time.
     """
     bt, st = float(beat_time), float(sample_time)
-
-    def s_kwargs():
-        import Live
-        return Live.Clip.WarpMarker(beat_time=bt, sample_time=st)
-
-    def s_positional():
-        import Live
-        return Live.Clip.WarpMarker(bt, st)
-
-    def s_namedtuple():
-        import collections
-        return collections.namedtuple(
-            "WarpMarker", ["beat_time", "sample_time"])(bt, st)
-
-    def s_duck():
-        class WM(object):
-            pass
-        m = WM()
-        m.beat_time, m.sample_time = bt, st
-        return m
-
-    strategies = [("Live.Clip.WarpMarker(kwargs)", s_kwargs),
-                  ("Live.Clip.WarpMarker(positional)", s_positional),
-                  ("namedtuple", s_namedtuple),
-                  ("duck-typed object", s_duck),
-                  ("plain tuple", lambda: (bt, st))]
-
-    cached = _WARP_STRATEGY.get("name")
-    if cached:
-        for name, build in strategies:
-            if name == cached:
-                try:
-                    clip.add_warp_marker(build())
-                    return name
-                except Exception:
-                    _WARP_STRATEGY.pop("name", None)
-                break
-
-    errors = []
-    for name, build in strategies:
+    try:
+        marker = Live.Clip.WarpMarker(beat_time=bt, sample_time=st)
+        shape = "kwargs"
+    except Exception as kw_error:
         try:
-            clip.add_warp_marker(build())
-        except Exception as e:
-            errors.append("%s: %s" % (name, e))
-            continue
-        _WARP_STRATEGY["name"] = name
-        return name
-    raise RuntimeError("add_warp_marker rejected every known shape. Tried -- "
-                       + " | ".join(errors))
+            marker = Live.Clip.WarpMarker(bt, st)
+            shape = "positional"
+        except Exception as pos_error:
+            raise RuntimeError(
+                "Live.Clip.WarpMarker rejected both call shapes -- "
+                "kwargs: %s | positional: %s" % (kw_error, pos_error))
+    clip.add_warp_marker(marker)
+    return shape
 
 
 def op_warp_markers_set(surface, params):
     """Replace an audio clip's warp map. params: path, markers, [warp_mode].
 
-    WHY THIS CANNOT BE `op_call`. Clip.add_warp_marker() takes a C++
-    TWarpMarker. `op_call` forwards JSON args untouched (`target(*args)`), and
-    JSON cannot express a Live API object — measured on Live 12.2.7, dict, list,
-    tuple AND int are all rejected with "No registered converter ...
-    NApiHelpers::TWarpMarker from this Python object of type X". The object must
-    be built by Python running INSIDE Live, which is what a remote script is.
-
-    Unlike the equivalent AbletonMCP patch, this file is hot-reloadable — send
-    {"op":"reload"} — so adding it costs no Live restart.
+    WHY THIS CANNOT BE `op_call`. add_warp_marker takes a C++ TWarpMarker, and
+    `op_call` forwards JSON args untouched (`target(*args)`). JSON cannot
+    express a Live API object, so the marker has to be constructed by Python
+    running inside Live - which is what a remote script is.
 
     Units: beat_time is beats from the sample start; sample_time is SECONDS from
     the sample start, NOT frames. Do not scale by the sample rate.
@@ -1293,10 +1221,10 @@ def op_warp_markers_set(surface, params):
         # Snapshot BEFORE adding, or we iterate over our own new markers.
         old = [wm.beat_time for wm in obj.warp_markers]
 
-        strategy = None
+        shape = None
         added = 0
         for bt, st in parsed:
-            strategy = _add_one_warp_marker(obj, bt, st)
+            shape = _add_one_warp_marker(obj, bt, st)
             added += 1
 
         # Remove only old markers the new map does not occupy: removal addresses
@@ -1316,10 +1244,40 @@ def op_warp_markers_set(surface, params):
 
     return {"path": params["path"], "marker_count": len(obj.warp_markers),
             "added": added, "removed": removed, "remove_failed": failed,
-            "warping": obj.warping, "marker_strategy": strategy}
+            "warping": obj.warping, "marker_shape": shape}
 
 
-OPS["warp_markers_set"] = op_warp_markers_set
+OPS = {
+    "describe": op_describe,
+    "search": op_search,
+    "canonical_path": op_canonical_path,
+    "get_batch": op_get_batch,
+    "set_batch": op_set_batch,
+    "transaction": op_transaction,
+    "observe_add": op_observe_add,
+    "observe_remove": op_observe_remove,
+    "observe_clear": op_observe_clear,
+    "observe_list": op_observe_list,
+    "observe_poll": op_observe_poll,
+    "get": op_get,
+    "set": op_set,
+    "call": op_call,
+    "count": op_count,
+    "types": op_types,
+    "envelope_get": op_envelope_get,
+    "envelope_insert_step": op_envelope_insert_step,
+    "envelope_clear": op_envelope_clear,
+    "arrangement_create_clip": op_arrangement_create_clip,
+    "arrangement_duplicate_clip": op_arrangement_duplicate_clip,
+    "arrangement_list": op_arrangement_list,
+    "notes_get": op_notes_get,
+    "notes_add": op_notes_add,
+    "notes_remove": op_notes_remove,
+    "notes_modify": op_notes_modify,
+    "browser_list": op_browser_list,
+    "browser_load": op_browser_load,
+    "warp_markers_set": op_warp_markers_set,
+}
 
 
 def dispatch(surface, op, params):

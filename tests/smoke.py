@@ -209,12 +209,16 @@ def test_observers():
 # suite makes its own track and removes it. It never touches existing tracks.
 
 class Scratch:
-    """Creates a MIDI track at the end of the Set; deletes it on exit."""
+    """Creates a track at the end of the Set; deletes it on exit."""
+
+    def __init__(self, kind="midi"):
+        self.kind = kind
 
     def __enter__(self):
         n = request("count", {"path": "live_set", "child": "tracks"})
         self.index = n["result"]["count"] if n.get("ok") else None
-        r = request("call", {"path": "live_set", "function": "create_midi_track",
+        fn = "create_audio_track" if self.kind == "audio" else "create_midi_track"
+        r = request("call", {"path": "live_set", "function": fn,
                              "args": [-1], "confirm": True})
         if not r.get("ok"):
             raise RuntimeError("could not create scratch track: %s" % r.get("error"))
@@ -222,6 +226,15 @@ class Scratch:
         request("set", {"path": self.track, "property": "name",
                         "value": "__lomtest"})
         return self
+
+    def audio_clip(self, file_path, start=0.0):
+        """Import an audio file into the Arrangement; return its clip path."""
+        r = request("arrangement_create_clip",
+                    {"path": self.track, "start_time": start, "kind": "audio",
+                     "file_path": file_path})
+        if not r.get("ok"):
+            raise RuntimeError("could not create audio clip: %s" % r.get("error"))
+        return "%s arrangement_clips 0" % self.track
 
     def clip(self, length=4.0):
         slot = "%s clip_slots 0" % self.track
@@ -385,6 +398,54 @@ def test_arrangement_duplicate_clip():
         if lst and lst["clips"]:
             check("landed at the requested time",
                   lst["clips"][0]["start_time"] == 4.0, lst["clips"][0])
+
+
+def _core_library_sample():
+    """A .wav that ships with Live, so the warp test needs no fixture of ours."""
+    roots = sorted(pathlib.Path("/Applications").glob(
+        "Ableton Live *.app/Contents/App-Resources/Core Library/Samples/Loops"))
+    for root in roots:
+        for wav in sorted(root.rglob("*.wav")):
+            return str(wav)
+    return None
+
+
+def test_warp_markers():
+    """Warp markers cannot go through generic `call` - Live wants a C++
+    WarpMarker that JSON cannot express - so this is the only cover for the
+    typed path."""
+    sample = _core_library_sample()
+    if sample is None:
+        check("found a Core Library sample to warp", False,
+              "no .wav under Live's Core Library Loops")
+        return
+
+    with Scratch(kind="audio") as s:
+        clip = s.audio_clip(sample)
+        r = ok(request("warp_markers_set",
+                       {"path": clip, "markers": [[0.0, 0.0], [4.0, 2.0]]}),
+               "warp_markers_set")
+        if not r:
+            return
+        check("warping turned on", r.get("warping") is True, r)
+        check("markers added", r.get("added") == 2, r.get("added"))
+        check("clip reports at least the new markers",
+              r.get("marker_count", 0) >= 2, r.get("marker_count"))
+        check("reports which constructor shape Live accepted",
+              r.get("marker_shape") in ("kwargs", "positional"),
+              r.get("marker_shape"))
+
+        bad = request("warp_markers_set", {"path": clip,
+                                           "markers": [[0.0, 0.0]]})
+        check("fewer than 2 markers refused", not bad.get("ok"),
+              bad.get("result"))
+        dup = request("warp_markers_set",
+                      {"path": clip, "markers": [[1.0, 0.5], [1.0, 0.9]]})
+        check("non-increasing beat_times refused", not dup.get("ok"),
+              dup.get("result"))
+        neg = request("warp_markers_set",
+                      {"path": clip, "markers": [[0.0, 0.0], [-1.0, 2.0]]})
+        check("negative times refused", not neg.get("ok"), neg.get("result"))
 
 
 def test_set_batch():
