@@ -320,6 +320,32 @@ def arrangement_duplicate_clip(path: str, clip: str,
                                 "destination_time": destination_time}), indent=2)
 
 
+# ------------------------------------------------------------- warp markers
+
+
+@mcp.tool()
+def clip_set_warp_markers(path: str, markers: list[list[float]],
+                          warp_mode: int | None = None) -> str:
+    """Replace an audio clip's warp map, turning warping on. Undoable.
+
+    path    - audio clip path, e.g. "live_set tracks 0 clip_slots 0 clip"
+    markers - [[beat_time, sample_time], ...], at least 2, beat_times strictly
+              increasing. beat_time is beats from the sample start;
+              sample_time is SECONDS from the sample start, NOT frames -
+              do not scale by the sample rate.
+
+    Cannot be done with lom_call: Live wants a C++ WarpMarker object, which
+    JSON cannot express, so it must be built inside Live.
+
+    Existing markers the new map does not occupy are removed. A fresh clip
+    carries a marker Live refuses to delete, so `remove_failed` may be 1.
+    """
+    p: dict[str, Any] = {"path": path, "markers": markers}
+    if warp_mode is not None:
+        p["warp_mode"] = warp_mode
+    return json.dumps(_request("warp_markers_set", p), indent=2)
+
+
 @mcp.tool()
 def lom_search(query: str | None = None, type: str | None = None,
                root: str = "live_set", max_results: int = 50,
