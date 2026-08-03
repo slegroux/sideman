@@ -148,13 +148,49 @@ def jsonify(v, depth=0):
 
 
 def _coerce(obj, prop, value):
-    """Use Ableton's own from_json for this property when it ships one."""
+    """Use Ableton's own from_json for this property when it ships one, then
+    repair stringified scalars.
+
+    `value` is deliberately untyped in the MCP tool schema, since a LOM property
+    can hold anything. Some MCP clients serialise an untyped 122 as "122", and
+    Live's C++ setters reject that outright ("Python argument types (Song, str)
+    did not match C++ signature (TPyHandle<ASong>, float)") rather than
+    converting. That made lom_set unusable for every numeric property from
+    those clients while every test suite stayed green, because none of them
+    crosses the client/stdio boundary where the retyping happens.
+
+    Conversion is driven by the property's CURRENT value, not by guessing at
+    the string: a str going into a str property stays exactly as sent, so
+    setting a track name to "128" still gives the name "128".
+    """
     info = _mfl_index(type(obj)).get(prop)
     if info is not None and getattr(info, "from_json", None):
         try:
             return info.from_json(value)
         except Exception:
             pass
+    if isinstance(value, str):
+        try:
+            current = getattr(obj, prop)
+        except Exception:
+            return value
+        # bool first: bool is a subclass of int.
+        if isinstance(current, bool):
+            low = value.strip().lower()
+            if low in ("true", "1"):
+                return True
+            if low in ("false", "0"):
+                return False
+        elif isinstance(current, float):
+            try:
+                return float(value)
+            except ValueError:
+                pass
+        elif isinstance(current, int):
+            try:
+                return int(value)
+            except ValueError:
+                pass
     return value
 
 

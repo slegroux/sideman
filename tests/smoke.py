@@ -86,6 +86,53 @@ def test_get_set_roundtrip():
     check("tempo restored", restored and abs(restored["value"] - original) < 0.01)
 
 
+def test_stringified_scalars_are_coerced():
+    """`value` is untyped in the tool schema, so some MCP clients send 122 as
+    "122". Live's C++ setters reject that outright, which made lom_set unusable
+    for every numeric property from those clients. No other suite sees it: they
+    all call the tool function directly and never cross the client boundary
+    where the retyping happens."""
+    before = ok(request("get", {"path": "live_set", "property": "tempo"}),
+                "get tempo")
+    if not before:
+        return
+    original = before["value"]
+    target = round(original + 1.0, 3)
+
+    r = request("set", {"path": "live_set", "property": "tempo",
+                        "value": str(target)})
+    check("stringified float accepted for a float property", r.get("ok"),
+          (r.get("error") or {}).get("type"))
+    after = ok(request("get", {"path": "live_set", "property": "tempo"}),
+               "get tempo back")
+    check("stringified float lands as a number",
+          after and abs(after["value"] - target) < 0.01,
+          after and after["value"])
+    request("set", {"path": "live_set", "property": "tempo",
+                    "value": original})
+
+    with Scratch() as s:
+        # A str going into a str property must stay exactly as sent.
+        ok(request("set", {"path": s.track, "property": "name",
+                           "value": "128"}), "set numeric-looking name")
+        nm = ok(request("get", {"path": s.track, "property": "name"}),
+                "get name")
+        check("numeric-looking string stays a string on a str property",
+              nm and nm["value"] == "128", nm and nm["value"])
+        request("set", {"path": s.track, "property": "name",
+                        "value": "__lomtest"})
+
+        ci = request("set", {"path": s.track, "property": "color_index",
+                             "value": "3"})
+        check("stringified int accepted for an int property", ci.get("ok"),
+              (ci.get("error") or {}).get("type"))
+
+    bad = request("set", {"path": "live_set", "property": "tempo",
+                          "value": "not_a_number"})
+    check("non-numeric string still refused", not bad.get("ok"),
+          bad.get("result"))
+
+
 def test_get_batch_partial_failure():
     """One unavailable property must not lose the other reads."""
     r = ok(request("get_batch", {"specs": [
