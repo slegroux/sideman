@@ -236,14 +236,32 @@ def test_plain_strings_are_never_treated_as_paths():
 
     Guards the reason markers are explicit: silently coercing path-shaped
     strings would corrupt free-form text (names, set_data) on a guess.
+
+    Writes to a scratch track it creates, never an existing one. Renaming a
+    user's track and relying on a restore that a killed run never reaches is
+    how smoke.py once stranded tracks called __smoke_a in a real Set.
     """
-    before = jcall(S.lom_get, "live_set tracks 0", "name")["value"]
-    jcall(S.lom_set, "live_set tracks 0", "name", "live_set tracks 0")
-    after = jcall(S.lom_get, "live_set tracks 0", "name")["value"]
-    check("path-shaped name stored verbatim", after == "live_set tracks 0", after)
-    jcall(S.lom_set, "live_set tracks 0", "name", before)
-    check("name restored",
-          jcall(S.lom_get, "live_set tracks 0", "name")["value"] == before)
+    index = jcall(S.lom_count, "live_set", "tracks")["count"]
+    jcall(S.lom_call, "live_set", "create_midi_track", [-1], confirm=True)
+    track = "live_set tracks %d" % index
+    try:
+        jcall(S.lom_set, track, "name", "__e2etest")
+        jcall(S.lom_set, track, "name", "live_set tracks 0")
+        after = jcall(S.lom_get, track, "name")["value"]
+        check("path-shaped name stored verbatim",
+              after == "live_set tracks 0", after)
+    finally:
+        # Locate by name, not by the index it was made at: the Set can change
+        # underneath the run, and a stale index is what strands scratch state.
+        jcall(S.lom_set, track, "name", "__e2etest")
+        found = None
+        for i in range(jcall(S.lom_count, "live_set", "tracks")["count"]):
+            if jcall(S.lom_get, "live_set tracks %d" % i,
+                     "name")["value"] == "__e2etest":
+                found = i
+        check("scratch track located for cleanup", found is not None)
+        if found is not None:
+            jcall(S.lom_call, "live_set", "delete_track", [found], confirm=True)
 
 
 def test_observer_roundtrip_via_mcp():

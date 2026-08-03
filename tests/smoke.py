@@ -206,26 +206,34 @@ def test_transaction_groups():
     """Groupable ops must collapse into ONE undo step."""
     g = lambda p, a: (request("get", {"path": p, "property": a})
                       .get("result", {}) or {}).get("value")
-    n0, n1 = g("live_set tracks 0", "name"), g("live_set tracks 1", "name")
-    if n0 is None or n1 is None:
-        check("transaction test needs 2 tracks", False)
-        return
-    r = ok(request("transaction", {"ops": [
-        {"op": "set", "path": "live_set tracks 0", "property": "name",
-         "value": "__smoke_a"},
-        {"op": "set", "path": "live_set tracks 1", "property": "name",
-         "value": "__smoke_b"},
-    ]}), "transaction")
-    if not r:
-        return
-    check("transaction applied both", r["applied"] == 2, r.get("applied"))
-    check("transaction states the undo caveat", "undo" in r)
-    request("call", {"path": "live_set", "function": "undo", "args": []})
-    check("ONE undo reverted both (grouping)",
-          g("live_set tracks 0", "name") == n0
-          and g("live_set tracks 1", "name") == n1,
-          "names now %r/%r" % (g("live_set tracks 0", "name"),
-                               g("live_set tracks 1", "name")))
+    with Scratch() as a, Scratch() as b:
+        # Two scratch tracks, never the user's. This test used to rename
+        # live_set tracks 0 and 1 and rely on undo to put them back; a run
+        # killed between the rename and the undo left a user's tracks called
+        # __smoke_a/__smoke_b, with nothing to restore them from.
+        #
+        # color_index rather than name, for the same reason: the scratch
+        # tracks keep the name cleanup identifies them by, whatever undo does.
+        # Colour groups under one undo step exactly as name does.
+        c0, c1 = g(a.track, "color_index"), g(b.track, "color_index")
+        if c0 is None or c1 is None:
+            check("transaction test could read both colours", False)
+            return
+        r = ok(request("transaction", {"ops": [
+            {"op": "set", "path": a.track, "property": "color_index",
+             "value": (c0 + 1) % 70},
+            {"op": "set", "path": b.track, "property": "color_index",
+             "value": (c1 + 2) % 70},
+        ]}), "transaction")
+        if not r:
+            return
+        check("transaction applied both", r["applied"] == 2, r.get("applied"))
+        check("transaction states the undo caveat", "undo" in r)
+        request("call", {"path": "live_set", "function": "undo", "args": []})
+        check("ONE undo reverted both (grouping)",
+              g(a.track, "color_index") == c0 and g(b.track, "color_index") == c1,
+              "colours now %r/%r" % (g(a.track, "color_index"),
+                                     g(b.track, "color_index")))
 
 
 def test_observers():
@@ -256,6 +264,9 @@ def test_observers():
 # The remaining ops need a MIDI clip. A user's Set may be all-audio, so the
 # suite makes its own track and removes it. It never touches existing tracks.
 
+SCRATCH_NAME = "__lomtest"
+
+
 class Scratch:
     """Creates a track at the end of the Set; deletes it on exit."""
 
@@ -272,7 +283,7 @@ class Scratch:
             raise RuntimeError("could not create scratch track: %s" % r.get("error"))
         self.track = "live_set tracks %d" % self.index
         request("set", {"path": self.track, "property": "name",
-                        "value": "__lomtest"})
+                        "value": SCRATCH_NAME})
         return self
 
     def audio_clip(self, file_path, start=0.0):
@@ -292,15 +303,40 @@ class Scratch:
             raise RuntimeError("could not create scratch clip: %s" % r.get("error"))
         return slot + " clip"
 
-    def __exit__(self, *exc):
-        # Verify we are deleting OUR track, never a user's.
+    def _locate(self):
+        """Index of this scratch track, identified by name rather than by the
+        index it was created at.
+
+        The pinned index goes stale whenever the Set changes underneath the
+        run - a killed earlier run leaving tracks behind, or the user editing
+        while it runs. Refusing to delete on a stale index was safe but
+        strands the track, and stranded tracks shift the index for the next
+        run, so one interruption compounds into a Set full of __lomtest.
+        """
         nm = request("get", {"path": self.track, "property": "name"})
-        if nm.get("ok") and nm["result"]["value"] == "__lomtest":
-            request("call", {"path": "live_set", "function": "delete_track",
-                             "args": [self.index], "confirm": True})
-        else:
-            FAILURES.append("scratch track moved; NOT deleting index %s"
-                            % self.index)
+        if nm.get("ok") and nm["result"]["value"] == SCRATCH_NAME:
+            return self.index
+        n = request("count", {"path": "live_set", "child": "tracks"})
+        if not n.get("ok"):
+            return None
+        found = None
+        for i in range(n["result"]["count"]):
+            r = request("get", {"path": "live_set tracks %d" % i,
+                                "property": "name"})
+            if r.get("ok") and r["result"]["value"] == SCRATCH_NAME:
+                found = i  # last match: ours was created at the end
+        return found
+
+    def __exit__(self, *exc):
+        # Delete OUR track, never a user's. The name is the identity here, and
+        # it is one no user Set has; the index is only a hint.
+        index = self._locate()
+        if index is None:
+            FAILURES.append("scratch track %r not found; nothing deleted"
+                            % SCRATCH_NAME)
+            return False
+        request("call", {"path": "live_set", "function": "delete_track",
+                         "args": [index], "confirm": True})
         return False
 
 
