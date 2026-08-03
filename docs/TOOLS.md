@@ -100,13 +100,23 @@ Check the connection to Ableton Live and whether the engine loaded.
 ### `lom_get`
 
 ```python
-lom_get(path: str, property: str)
+lom_get(path: str, property: str, offset: int | None = None, limit: int | None = None)
 ```
 
 Read one property from a Live object.
 
 Example: lom_get("live_set", "tempo") -> 120.0
          lom_get("live_set tracks 0", "name") -> "1-MIDI"
+
+A list longer than 64 reports only {"__vector__": true, "count": N}, which
+hides exactly the long lists worth reading. Pass offset/limit to page
+through one - Drift's 66 parameters, a rack's chains:
+
+    lom_get("live_set tracks 0 devices 0", "parameters", limit=25)
+    lom_get("live_set tracks 0 devices 0", "parameters", offset=25, limit=25)
+
+The window returns `items` plus `count`, `returned` and `truncated`.
+Max 512 per page; a limit above that is clamped, not refused.
 
 Use lom_describe first to discover valid member names; do not guess.
 
@@ -133,7 +143,7 @@ Use lom_describe first to discover valid member names; do not guess.
 ### `lom_call`
 
 ```python
-lom_call(path: str, function: str, args: list[Any] | None = None, confirm: bool = False)
+lom_call(path: str, function: str, args: list[Any] | None = None, confirm: bool = False, offset: int | None = None, limit: int | None = None)
 ```
 
 Call a function on a Live object. Wrapped in a native undo step.
@@ -151,6 +161,12 @@ as a str and Live rejects the call ("did not match C++ signature"). Pass
 
 Markers work anywhere in args, including nested in lists/dicts. A plain
 string is never reinterpreted as a path, so ordinary string args are safe.
+
+When the return value is a long list it reports only its count. Page it
+with offset/limit - this is how you read a plugin's real parameter list,
+which Live knows even while `parameters` exposes one entry:
+
+    lom_call(dev, "get_parameter_names", limit=50)   -> 50 of 2362 names
 
 Destructive functions refuse to run unless confirm=True - anything named
 delete_*, remove_* or clear_*, plus crop. Ask the user before setting it.

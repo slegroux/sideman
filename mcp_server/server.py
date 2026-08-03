@@ -92,16 +92,31 @@ def lom_describe(path: str = "live_set", include_values: bool = True) -> str:
 
 
 @mcp.tool()
-def lom_get(path: str, property: str) -> str:
+def lom_get(path: str, property: str, offset: int | None = None,
+            limit: int | None = None) -> str:
     """Read one property from a Live object.
 
     Example: lom_get("live_set", "tempo") -> 120.0
              lom_get("live_set tracks 0", "name") -> "1-MIDI"
 
+    A list longer than 64 reports only {"__vector__": true, "count": N}, which
+    hides exactly the long lists worth reading. Pass offset/limit to page
+    through one - Drift's 66 parameters, a rack's chains:
+
+        lom_get("live_set tracks 0 devices 0", "parameters", limit=25)
+        lom_get("live_set tracks 0 devices 0", "parameters", offset=25, limit=25)
+
+    The window returns `items` plus `count`, `returned` and `truncated`.
+    Max 512 per page; a limit above that is clamped, not refused.
+
     Use lom_describe first to discover valid member names; do not guess.
     """
-    return json.dumps(_request("get", {"path": path, "property": property}),
-                      indent=2)
+    p: dict[str, Any] = {"path": path, "property": property}
+    if offset is not None:
+        p["offset"] = offset
+    if limit is not None:
+        p["limit"] = limit
+    return json.dumps(_request("get", p), indent=2)
 
 
 @mcp.tool()
@@ -126,7 +141,8 @@ def lom_set(path: str, property: str, value: Any) -> str:
 
 @mcp.tool()
 def lom_call(path: str, function: str, args: list[Any] | None = None,
-             confirm: bool = False) -> str:
+             confirm: bool = False, offset: int | None = None,
+             limit: int | None = None) -> str:
     """Call a function on a Live object. Wrapped in a native undo step.
 
     Example: lom_call("live_set", "create_midi_track", [-1])
@@ -143,12 +159,22 @@ def lom_call(path: str, function: str, args: list[Any] | None = None,
     Markers work anywhere in args, including nested in lists/dicts. A plain
     string is never reinterpreted as a path, so ordinary string args are safe.
 
+    When the return value is a long list it reports only its count. Page it
+    with offset/limit - this is how you read a plugin's real parameter list,
+    which Live knows even while `parameters` exposes one entry:
+
+        lom_call(dev, "get_parameter_names", limit=50)   -> 50 of 2362 names
+
     Destructive functions refuse to run unless confirm=True - anything named
     delete_*, remove_* or clear_*, plus crop. Ask the user before setting it.
     """
-    return json.dumps(_request("call", {"path": path, "function": function,
-                                        "args": args or [],
-                                        "confirm": confirm}), indent=2)
+    p: dict[str, Any] = {"path": path, "function": function,
+                         "args": args or [], "confirm": confirm}
+    if offset is not None:
+        p["offset"] = offset
+    if limit is not None:
+        p["limit"] = limit
+    return json.dumps(_request("call", p), indent=2)
 
 
 @mcp.tool()

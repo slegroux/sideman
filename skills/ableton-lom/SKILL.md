@@ -108,6 +108,21 @@ This catches changes made in the GUI, not just your own writes.
 
 **Many reads** — `lom_get_batch([...])` is one round trip instead of N.
 
+**Long lists** — a vector over 64 entries returns `{"__vector__": true, "count":
+N}` and nothing else. Page it with `offset`/`limit` (max 512 per page), on
+`lom_get` or `lom_call`:
+```
+lom_get("live_set tracks 0 devices 0", "parameters", limit=25)
+lom_call(dev, "get_parameter_names", limit=50)   # a plugin's real param list
+```
+
+**Third-party plugins expose one parameter** — a VST/AU device's `parameters`
+holds only `Device On` until the user exposes controls via Live's **Configure**
+button, which is GUI-only and has no API. `get_parameter_names` still reports
+every name the plugin advertises, so use it to tell the user what to Configure.
+Configure state is saved inside a rack/device preset, so a saved `.adg` reloads
+already exposed. Rack macros are native parameters and never need any of this.
+
 ## Safety
 
 - Destructive functions refuse to run without `confirm=true` — anything named

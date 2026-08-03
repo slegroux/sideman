@@ -161,6 +161,60 @@ def test_path_marker_resolves_to_a_live_object():
     check("selection restored", selected() == before, selected())
 
 
+def test_vector_window_reads_past_the_inline_cap():
+    """Long vectors report only a count unless a window is asked for.
+
+    That cap hides the lists worth reading - a plugin's get_parameter_names
+    runs to thousands, and even Drift's 66 parameters clear it. Read-only, so
+    it runs against whatever Set is open.
+    """
+    count = jcall(S.lom_count, "live_set", "tracks")["count"]
+    if count < 2:
+        check("needs 2+ tracks to window", False, count)
+        return
+
+    plain = jcall(S.lom_get, "live_set", "tracks")["value"]
+    check("unwindowed shape unchanged",
+          isinstance(plain, list) or plain.get("__vector__") is True, plain)
+
+    w = jcall(S.lom_get, "live_set", "tracks", offset=1, limit=1)["value"]
+    check("window reports the full count", w.get("count") == count, w)
+    check("window returns the asked-for slice", w.get("returned") == 1, w)
+    check("window carries items", len(w.get("items", [])) == 1, w)
+    check("truncated flags the remainder",
+          w.get("truncated") is (count > 2), w.get("truncated"))
+
+    # offset=0 is falsy but meaningful; it must not be dropped en route.
+    first = jcall(S.lom_get, "live_set", "tracks", offset=0, limit=1)["value"]
+    check("offset=0 is honoured, not treated as unset",
+          first.get("offset") == 0 and first.get("returned") == 1, first)
+
+    past = jcall(S.lom_get, "live_set", "tracks", offset=count + 10, limit=5)
+    check("offset past the end returns nothing, not an error",
+          past["value"].get("returned") == 0, past["value"])
+
+    big = jcall(S.lom_get, "live_set", "tracks", limit=10 ** 6)["value"]
+    check("oversized limit clamps rather than refusing",
+          big.get("returned") == min(count, 512), big.get("returned"))
+
+
+def test_vector_window_rejects_bad_input():
+    for label, kw in [
+        ("window on a non-vector", {"limit": 5}),
+        ("negative offset", {"offset": -1}),
+        ("zero limit", {"limit": 0}),
+    ]:
+        path, prop = ("live_set", "tempo") if "non-vector" in label \
+            else ("live_set", "tracks")
+        try:
+            S.lom_get(path, prop, **kw)
+            check("%s rejected" % label, False, "no exception")
+        except S.LiveError:
+            check("%s rejected" % label, True)
+        except Exception as e:
+            check("%s raises LiveError" % label, False, type(e).__name__)
+
+
 def test_path_marker_rejects_malformed_input():
     """A bad marker must fail loudly, not resolve to something arbitrary."""
     for label, bad in [
