@@ -8,6 +8,7 @@ Live Object Model itself — the same generic `path` / `get` / `set` / `call`
 contract Max for Live's `live.object` uses — so any property Live has is
 reachable without shipping new code.
 
+- **[docs/TUTORIAL.md](docs/TUTORIAL.md)** — build a 4-bar house loop from an empty Set. **Start here.**
 - **[docs/TOOLS.md](docs/TOOLS.md)** — all 30 tools with signatures (generated)
 - **[docs/PROTOCOL.md](docs/PROTOCOL.md)** — wire protocol, threading contract, how to add an op
 - **[skills/ableton-lom/SKILL.md](skills/ableton-lom/SKILL.md)** — path grammar for the model
