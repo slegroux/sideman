@@ -195,6 +195,45 @@ def jsonify(v, depth=0):
     return {"__repr__": str(v), "type": _type_name(v)}
 
 
+# The 64-element cap above keeps a Song-sized response from being built on
+# Live's main thread, but it also means a long vector reports nothing except its
+# own length - and the long ones are the interesting ones. get_parameter_names
+# on a plugin returns thousands (Diva 2362, Pigments 4139), and even a native
+# Drift's 66 parameters clear the cap, so `parameters` on it read as a bare
+# count. An explicit window makes those readable a page at a time.
+#
+# Opt-in, so an unwindowed call returns exactly what it always did: raising the
+# default would enlarge every response that happens to contain a long list.
+VECTOR_PAGE_MAX = 512
+
+
+def _jsonify_windowed(value, params):
+    """jsonify, honouring an offset/limit window when the value is a vector."""
+    offset, limit = params.get("offset"), params.get("limit")
+    if offset is None and limit is None:
+        return jsonify(value)
+    if not _is_vector(value):
+        raise TypeError("offset/limit given, but this value is a %s, not a list"
+                        % _type_name(value))
+
+    offset = 0 if offset is None else int(offset)
+    if offset < 0:
+        raise ValueError("offset must be >= 0, got %d" % offset)
+    limit = VECTOR_PAGE_MAX if limit is None else int(limit)
+    if limit < 1:
+        raise ValueError("limit must be >= 1, got %d" % limit)
+    limit = min(limit, VECTOR_PAGE_MAX)
+
+    count = len(value)
+    stop = min(offset + limit, count)
+    # depth 1, matching jsonify's own recursion: a vector nested inside this
+    # page still summarises rather than expanding the graph underneath it.
+    items = [jsonify(value[i], 1) for i in range(offset, stop)]
+    return {"__vector__": True, "count": count, "offset": offset,
+            "returned": len(items), "items": items,
+            "truncated": stop < count}
+
+
 def _coerce(obj, prop, value):
     """Use Ableton's own from_json for this property when it ships one, then
     repair stringified scalars.
@@ -484,7 +523,7 @@ def op_get(surface, params):
     if callable(val):
         raise TypeError("%r is a function; use op 'call'" % prop)
     return {"path": params["path"], "property": prop,
-            "value": jsonify(val), "type": _type_name(val)}
+            "value": _jsonify_windowed(val, params), "type": _type_name(val)}
 
 
 def op_set(surface, params):
@@ -520,7 +559,8 @@ def op_call(surface, params):
             "%r is destructive; re-send with confirm=true to proceed" % fn)
     with _undo(surface):
         result = target(*args)
-    return {"path": path, "function": fn, "result": jsonify(result)}
+    return {"path": path, "function": fn,
+            "result": _jsonify_windowed(result, params)}
 
 
 def op_count(surface, params):

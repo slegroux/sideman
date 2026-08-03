@@ -146,6 +146,18 @@ def test_optional_params_omitted_when_none():
                 warp_mode=1)
     check("warp_markers forwards warp_mode", p.get("warp_mode") == 1, p)
 
+    # offset=0 is falsy but meaningful - a truthiness test would drop it and
+    # silently return the unwindowed summary instead of the first page.
+    _, p = call(S.lom_get, "live_set", "tracks")
+    check("lom_get omits offset/limit when unset",
+          "offset" not in p and "limit" not in p, p)
+    _, p = call(S.lom_get, "live_set", "tracks", offset=0, limit=10)
+    check("lom_get forwards offset=0", p.get("offset") == 0, p)
+    check("lom_get forwards limit", p.get("limit") == 10, p)
+    _, p = call(S.lom_call, "live_set tracks 0 devices 0",
+                "get_parameter_names", offset=0)
+    check("lom_call forwards offset=0", p.get("offset") == 0, p)
+
     _, p = call(S.clip_envelope_clear, "clip")
     check("envelope_clear omits parameter -> clears all",
           "parameter" not in p, p)
