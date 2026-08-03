@@ -69,6 +69,19 @@ Don't promise the user "one undo" when the batch touches tempo or volume.
 **Rename a track** — `lom_search(query="old")` then
 `lom_set("live_set tracks N", "name", "new")`
 
+**Arguments that are Live objects** — some APIs take an object, not a scalar. A
+path sent as a bare string arrives as `str` and Live rejects the call with *"did
+not match C++ signature"*. Wrap it in `{"__path__": "..."}` instead:
+```
+lom_call("live_set", "move_device",
+         [{"__path__": "live_set tracks 5 devices 0"},
+          {"__path__": "live_set return_tracks 0"}, 0])
+lom_set("live_set view", "selected_track", {"__path__": "live_set tracks 3"})
+```
+Markers work nested inside lists/dicts. A plain string is never reinterpreted as
+a path, so ordinary string arguments stay safe. `move_device` targets a **Track
+or Chain**, never a rack device — an empty rack has no chain to move into.
+
 **Create things** — creation is a *function call* on the parent:
 ```
 lom_call("live_set", "create_midi_track", [-1])

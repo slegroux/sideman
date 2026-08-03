@@ -112,6 +112,12 @@ def lom_set(path: str, property: str, value: Any) -> str:
     Example: lom_set("live_set", "tempo", 128)
              lom_set("live_set tracks 0", "name", "Drums")
 
+    For a property that holds a Live OBJECT rather than a scalar, name it by
+    path with {"__path__": "<lom path>"}:
+
+        lom_set("live_set view", "selected_track",
+                {"__path__": "live_set tracks 3"})
+
     Use lom_describe first to discover valid member names; do not guess.
     """
     return json.dumps(_request("set", {"path": path, "property": property,
@@ -125,6 +131,17 @@ def lom_call(path: str, function: str, args: list[Any] | None = None,
 
     Example: lom_call("live_set", "create_midi_track", [-1])
              lom_call("live_set tracks 0 clip_slots 0", "fire")
+
+    Some functions take a Live OBJECT, not a scalar - a path string reaches them
+    as a str and Live rejects the call ("did not match C++ signature"). Pass
+    {"__path__": "<lom path>"} for those and it is resolved inside Live:
+
+        lom_call("live_set", "move_device",
+                 [{"__path__": "live_set tracks 5 devices 0"},
+                  {"__path__": "live_set tracks 7"}, 0])
+
+    Markers work anywhere in args, including nested in lists/dicts. A plain
+    string is never reinterpreted as a path, so ordinary string args are safe.
 
     Destructive functions refuse to run unless confirm=True - anything named
     delete_*, remove_* or clear_*, plus crop. Ask the user before setting it.

@@ -96,6 +96,54 @@ def resolve(surface, path):
     return cur
 
 
+# JSON cannot express a Live object, so any function whose C++ signature demands
+# a handle was unreachable through op_call. Song.move_device wants
+# TPyHandle<ADevice>; a path string reaches it as str and boost.python rejects
+# the call outright. The marker below lets a caller name an object by LOM path
+# and have it resolved HERE, inside Live, where handles exist.
+#
+# A marker rather than auto-detection of path-shaped strings: a bare string that
+# reads like a path can be a legitimate argument. set_data stores arbitrary text
+# and clip names are free-form, so coercing on appearance would corrupt data on a
+# guess, silently and only for the unlucky. Callers opt in per argument.
+ARG_PATH_KEY = "__path__"
+
+# Guards against a self-referential structure sent by a buggy client. Live's own
+# calls nest far shallower than this; the depth only has to stop runaway
+# recursion on Live's main thread, where a hang freezes the UI.
+_ARG_MAX_DEPTH = 16
+
+
+def _is_path_marker(value):
+    return isinstance(value, dict) and ARG_PATH_KEY in value
+
+
+def _resolve_args(surface, value, _depth=0):
+    """Replace {"__path__": "live_set tracks 0"} markers with live objects.
+
+    Recurses through lists and dicts so a marker nested inside a structured
+    argument resolves too. Non-marker values pass through untouched.
+    """
+    if _depth > _ARG_MAX_DEPTH:
+        raise ValueError("argument nesting deeper than %d; refusing to recurse"
+                         % _ARG_MAX_DEPTH)
+    if _is_path_marker(value):
+        if len(value) != 1:
+            raise ValueError("%r must be the only key in its object, got %s"
+                             % (ARG_PATH_KEY, sorted(value)))
+        target = value[ARG_PATH_KEY]
+        if not isinstance(target, str):
+            raise ValueError("%r must be a path string, got %s"
+                             % (ARG_PATH_KEY, _type_name(target)))
+        return resolve(surface, target)
+    if isinstance(value, dict):
+        return dict((k, _resolve_args(surface, v, _depth + 1))
+                    for k, v in value.items())
+    if isinstance(value, list):
+        return [_resolve_args(surface, v, _depth + 1) for v in value]
+    return value
+
+
 # ------------------------------------------------------------- json marshalling
 
 def _type_name(obj):
@@ -446,7 +494,13 @@ def op_set(surface, params):
         raise AttributeError("%s has no member %r" % (_type_name(obj), prop))
     if callable(getattr(obj, prop)):
         raise TypeError("%r is a function; use op 'call'" % prop)
-    value = _coerce(obj, prop, params["value"])
+    # A marker resolves to a live object, which _coerce must not touch: its
+    # repair pass is built for JSON scalars and would mangle a handle. Object-
+    # valued properties are real (view.selected_track, song.appointed_device).
+    if _is_path_marker(params["value"]):
+        value = _resolve_args(surface, params["value"])
+    else:
+        value = _coerce(obj, prop, params["value"])
     with _undo(surface):
         setattr(obj, prop, value)
     return {"path": path, "property": prop, "value": jsonify(getattr(obj, prop))}
@@ -454,7 +508,7 @@ def op_set(surface, params):
 
 def op_call(surface, params):
     path, fn = params["path"], params["function"]
-    args = params.get("args") or []
+    args = _resolve_args(surface, params.get("args") or [])
     obj = resolve(surface, path)
     target = getattr(obj, fn, None)
     if target is None:

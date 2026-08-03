@@ -126,6 +126,72 @@ def test_write_path_roundtrip():
     check("tempo restored", abs(restored - before) < 0.01, restored)
 
 
+def test_path_marker_resolves_to_a_live_object():
+    """{"__path__": ...} args become real handles inside Live.
+
+    Without this, every API taking an object - move_device, selected_track -
+    is unreachable: a path arrives as a str and boost.python rejects the call
+    with "did not match C++ signature". Selection is used as the probe because
+    it is observable and costs the user nothing to restore.
+    """
+    def selected():
+        # canonical_path, not path: `path` echoes the alias back verbatim.
+        return jcall(S.lom_canonical_path,
+                     "live_set view selected_track")["canonical_path"]
+
+    before = selected()
+    check("selected_track resolves to a stable path",
+          isinstance(before, str) and before.startswith("live_set tracks"),
+          before)
+
+    count = jcall(S.lom_count, "live_set", "tracks")["count"]
+    if count < 2:
+        check("needs 2+ tracks to swap selection", False, count)
+        return
+    # Any track that is not the current one, so the write is observable.
+    target = "live_set tracks 1" if before == "live_set tracks 0" \
+        else "live_set tracks 0"
+
+    jcall(S.lom_set, "live_set view", "selected_track", {"__path__": target})
+    after = selected()
+    check("marker resolved to the named object", after == target,
+          "%s vs %s" % (after, target))
+
+    jcall(S.lom_set, "live_set view", "selected_track", {"__path__": before})
+    check("selection restored", selected() == before, selected())
+
+
+def test_path_marker_rejects_malformed_input():
+    """A bad marker must fail loudly, not resolve to something arbitrary."""
+    for label, bad in [
+        ("extra keys", {"__path__": "live_set", "junk": 1}),
+        ("non-string target", {"__path__": 7}),
+        ("unknown root", {"__path__": "not_a_root tracks 0"}),
+    ]:
+        try:
+            S.lom_set("live_set view", "selected_track", bad)
+            check("%s rejected" % label, False, "no exception")
+        except S.LiveError:
+            check("%s rejected" % label, True)
+        except Exception as e:
+            check("%s raises LiveError" % label, False, type(e).__name__)
+
+
+def test_plain_strings_are_never_treated_as_paths():
+    """A string arg that reads like a path stays a string.
+
+    Guards the reason markers are explicit: silently coercing path-shaped
+    strings would corrupt free-form text (names, set_data) on a guess.
+    """
+    before = jcall(S.lom_get, "live_set tracks 0", "name")["value"]
+    jcall(S.lom_set, "live_set tracks 0", "name", "live_set tracks 0")
+    after = jcall(S.lom_get, "live_set tracks 0", "name")["value"]
+    check("path-shaped name stored verbatim", after == "live_set tracks 0", after)
+    jcall(S.lom_set, "live_set tracks 0", "name", before)
+    check("name restored",
+          jcall(S.lom_get, "live_set tracks 0", "name")["value"] == before)
+
+
 def test_observer_roundtrip_via_mcp():
     jcall(S.lom_unobserve_all)
     o = jcall(S.lom_observe, "live_set", "tempo")
