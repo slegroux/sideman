@@ -112,15 +112,16 @@ def test_stringified_scalars_are_coerced():
                     "value": original})
 
     with Scratch() as s:
-        # A str going into a str property must stay exactly as sent.
-        ok(request("set", {"path": s.track, "property": "name",
-                           "value": "128"}), "set numeric-looking name")
-        nm = ok(request("get", {"path": s.track, "property": "name"}),
-                "get name")
+        # A str going into a str property must stay exactly as sent. Uses the
+        # CLIP's name, never the track's: Scratch.__exit__ refuses to delete a
+        # track whose name is not __lomtest, so renaming the track here would
+        # strand it in the user's Set if the restore did not run.
+        clip = s.clip()
+        ok(request("set", {"path": clip, "property": "name",
+                           "value": "128"}), "set numeric-looking clip name")
+        nm = ok(request("get", {"path": clip, "property": "name"}), "get name")
         check("numeric-looking string stays a string on a str property",
               nm and nm["value"] == "128", nm and nm["value"])
-        request("set", {"path": s.track, "property": "name",
-                        "value": "__lomtest"})
 
         ci = request("set", {"path": s.track, "property": "color_index",
                              "value": "3"})
@@ -463,8 +464,8 @@ def test_warp_markers():
     typed path."""
     sample = _core_library_sample()
     if sample is None:
-        check("found a Core Library sample to warp", False,
-              "no .wav under Live's Core Library Loops")
+        # Live installed outside /Applications is a valid setup, not a failure.
+        print("  skip test_warp_markers (no Core Library .wav found)")
         return
 
     with Scratch(kind="audio") as s:

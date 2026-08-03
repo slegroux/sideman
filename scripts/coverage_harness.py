@@ -158,10 +158,20 @@ def extract(paths: list[pathlib.Path]) -> tuple[set[str], int]:
     return attrs, seen
 
 
+# Exit codes are load-bearing: scripts/test.sh routes on them, and two
+# different "could not measure" reasons must not share one, or a broken setup
+# reports as the benign one.
+EXIT_OK = 0
+EXIT_UNRESOLVED = 1      # a real attribute we cannot account for
+EXIT_NO_SOURCES = 2      # competitor checkouts absent - a fresh clone
+EXIT_NO_CENSUS = 3       # census missing - the setup itself is broken
+
+
 def main(verbose: bool = False) -> int:
     if not CENSUS.exists():
-        print(f"missing census at {CENSUS}; run: lomcli.py types", file=sys.stderr)
-        return 2
+        print(f"missing census at {CENSUS}; run: scripts/census.py",
+              file=sys.stderr)
+        return EXIT_NO_CENSUS
     members, data = census_universe()
     print("=" * 74)
     print("COVERAGE HARNESS")
@@ -247,7 +257,7 @@ def main(verbose: bool = False) -> int:
         print("  A missing source yields no residue, so a clean result here would")
         print("  mean nothing. Clone the missing repo(s) under ~/Projects/vendor")
         print("  and re-run. Refusing to report a superset that was not measured.")
-        return 2
+        return EXIT_NO_SOURCES
     if blocking == 0:
         print("VERDICT: SUPERSET PROVEN for the three Remote Script competitors.")
         print("  Every Live API member they touch is either in our census, their")
@@ -256,7 +266,7 @@ def main(verbose: bool = False) -> int:
         print("  excluded from this method by construction, not yet tested.")
     else:
         print(f"VERDICT: CONDITIONAL - {blocking} attribute(s) unresolved.")
-    return 0 if blocking == 0 else 1
+    return EXIT_OK if blocking == 0 else EXIT_UNRESOLVED
 
 
 if __name__ == "__main__":

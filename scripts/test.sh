@@ -33,10 +33,13 @@ echo "== docs: generated reference up to date =="
 # failure. Exit 1 means a real unresolved attribute.
 echo
 echo "== coverage: superset claim still holds =="
-"$PY" "$REPO/scripts/coverage_harness.py" >/dev/null 2>&1
+# stderr is kept: the harness explains its own refusals there, and swallowing it
+# is how a broken setup gets reported as a benign skip.
+"$PY" "$REPO/scripts/coverage_harness.py" >/dev/null
 case $? in
   0) echo "   superset claim verified" ;;
   2) echo "   SKIPPED (competitor checkouts absent from ~/Projects/vendor)" ;;
+  3) echo "   FAILED - no census; run scripts/census.py"; rc=1 ;;
   *) echo "   FAILED - run scripts/coverage_harness.py --verbose"; rc=1 ;;
 esac
 
