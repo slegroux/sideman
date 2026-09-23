@@ -75,6 +75,13 @@ BROWSER_SURFACE = {
 # These are members jpoindexter references that Live 12.2.7 does not have. Some
 # are hasattr-guarded in its source; several are NOT, so those tools raise on
 # Live 12. There is nothing here for us to cover - the API is gone.
+#
+# Second probe 2026-09-23, same method, against ahujasid's August additions.
+# Controls: DeviceParameter.display_value -> 0.0, RackDevice.macros_mapped ->
+# 16 bools. All four below raised AttributeError. ahujasid hasattr-guards every
+# one of them, so it does not know they exist either - Live 12 exposes
+# display_value / str_for_value / automation_state and add_macro /
+# has_macro_mappings / macros_mapped under the modern names instead.
 ABSENT_IN_12_2_7 = {
     "clear_automation_envelope", "create_group_track", "fade_in_end",
     "fade_in_start", "fade_out_end", "fade_out_start", "follow_action_a",
@@ -82,6 +89,8 @@ ABSENT_IN_12_2_7 = {
     "get_cpu_load", "insert_value", "insert_warp_marker", "is_modified",
     "selected_chain_index", "track_delay", "track_height", "track_width",
     "ungroup", "zoom",
+    # probed 2026-09-23
+    "is_automated", "macro_map", "rename_macro", "value_string",
 }
 
 # Infrastructure of the competitor's own server, plus stdlib the attribute
@@ -90,6 +99,9 @@ INFRA = {
     "client_threads", "format_exc", "environ", "choice", "g", "flatten",
     "server", "server_thread", "socket", "sleep", "timeout", "running",
     "random", "randint", "pow", "isabs", "py", "x", "samples",
+    # `except Exception as e` - the attribute regex cannot tell a bound
+    # exception name from a Live member.
+    "e",
 }
 
 # Attributes that look like LOM members but belong to Python, the MCP/asyncio
@@ -234,9 +246,9 @@ def main(verbose: bool = False) -> int:
         print("      " + ", ".join(infra))
     print()
     print(f"  [C] Verified ABSENT from Live 12.2.7 ..... {len(absent):>3}  nothing to cover")
-    print("      Probed live 2026-08-01, controls 9/9. Direct get/call returns")
+    print("      Probed live 2026-08-01 and 2026-09-23. Direct get/call returns")
     print("      AttributeError, e.g. \"'Clip' object has no attribute")
-    print("      'follow_action_a'\". jpoindexter references members Live 12")
+    print("      'follow_action_a'\". Competitors reference members Live 12")
     print("      removed; several unguarded, so those tools RAISE on Live 12.")
     if absent:
         print("      " + ", ".join(absent))
