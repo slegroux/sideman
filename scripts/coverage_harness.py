@@ -167,10 +167,13 @@ EXIT_NO_SOURCES = 2      # competitor checkouts absent - a fresh clone
 EXIT_NO_CENSUS = 3       # census missing - the setup itself is broken
 
 
+def err(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
 def main(verbose: bool = False) -> int:
     if not CENSUS.exists():
-        print(f"missing census at {CENSUS}; run: scripts/census.py",
-              file=sys.stderr)
+        err(f"missing census at {CENSUS}; run: scripts/census.py")
         return EXIT_NO_CENSUS
     members, data = census_universe()
     print("=" * 74)
@@ -244,19 +247,22 @@ def main(verbose: bool = False) -> int:
         print(f"      {a:32} used by: {', '.join(who)}")
     print()
 
+    # Both refusals go to stderr, not stdout: test.sh discards stdout, so an
+    # operator on a fresh clone would otherwise see a bare "SKIPPED" with no
+    # hint of which repos to clone.
     if missing:
-        print(f"  [!] SOURCES MISSING ...................... {len(missing):>3}  CANNOT VERIFY")
+        err(f"  [!] SOURCES MISSING ...................... {len(missing):>3}  CANNOT VERIFY")
         for m in missing:
-            print(f"      {m}")
-        print()
+            err(f"      {m}")
+        err("")
 
     blocking = len(browser) + len(unexplained)
     if missing:
-        print("VERDICT: UNVERIFIED - %d competitor source(s) could not be read."
-              % len(missing))
-        print("  A missing source yields no residue, so a clean result here would")
-        print("  mean nothing. Clone the missing repo(s) under ~/Projects/vendor")
-        print("  and re-run. Refusing to report a superset that was not measured.")
+        err("VERDICT: UNVERIFIED - %d competitor source(s) could not be read."
+            % len(missing))
+        err("  A missing source yields no residue, so a clean result here would")
+        err("  mean nothing. Clone the missing repo(s) under ~/Projects/vendor")
+        err("  and re-run. Refusing to report a superset that was not measured.")
         return EXIT_NO_SOURCES
     if blocking == 0:
         print("VERDICT: SUPERSET PROVEN for the three Remote Script competitors.")

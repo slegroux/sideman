@@ -20,6 +20,14 @@ from lomcli import request  # noqa: E402
 
 VERBOSE = "-v" in sys.argv
 FAILURES = []
+SKIPS = []
+
+
+def skip(name, reason):
+    """A skipped group is not a passed group. Recording it here keeps the
+    final summary from reading as full coverage when part of it never ran."""
+    SKIPS.append("%s (%s)" % (name, reason))
+    print("  skip %s (%s)" % (name, reason))
 
 
 def check(name, cond, detail=""):
@@ -415,7 +423,7 @@ def test_browser_load():
         target = next((i for i in (listing or {}).get("items", [])
                        if i.get("is_loadable")), None)
         if target is None:
-            print("  skip browser_load (no loadable instrument found)")
+            skip("browser_load", "no loadable instrument found")
             return
 
         r = ok(request("browser_load", {"path": "instruments/%s" % target["name"],
@@ -465,7 +473,8 @@ def test_warp_markers():
     sample = _core_library_sample()
     if sample is None:
         # Live installed outside /Applications is a valid setup, not a failure.
-        print("  skip test_warp_markers (no Core Library .wav found)")
+        # It does mean the typed warp path went untested, hence the record.
+        skip("test_warp_markers", "no Core Library .wav found")
         return
 
     with Scratch(kind="audio") as s:
@@ -554,12 +563,17 @@ def main():
             FAILURES.append("%s raised %s: %s" % (t.__name__, type(e).__name__, e))
             print("  ERROR %s: %s" % (type(e).__name__, e))
     print()
+    if SKIPS:
+        print("SKIPPED (%d):" % len(SKIPS))
+        for s in SKIPS:
+            print("  -", s)
+        print()
     if FAILURES:
         print("FAILED (%d):" % len(FAILURES))
         for f in FAILURES:
             print("  -", f)
         return 1
-    print("ALL PASS")
+    print("ALL PASS" if not SKIPS else "PASS, %d SKIPPED" % len(SKIPS))
     return 0
 
 

@@ -28,20 +28,31 @@ echo "== docs: generated reference up to date =="
 "$PY" "$REPO/scripts/gen_docs.py" --check || rc=1
 
 # The README's superset claim rests on this. It was previously never run by the
-# suite, which is how it drifted to a failing state unnoticed. Exit 2 means the
-# competitor checkouts are absent (a fresh clone) - that is a skip, not a
-# failure. Exit 1 means a real unresolved attribute.
+# suite, which is how it drifted to a failing state unnoticed. The harness exit
+# codes are the contract:
+#   0  superset verified
+#   1  a real unresolved attribute
+#   2  competitor checkouts absent (a fresh clone) - a skip, not a failure
+#   3  no census - the setup itself is broken
 echo
 echo "== coverage: superset claim still holds =="
-# stderr is kept: the harness explains its own refusals there, and swallowing it
-# is how a broken setup gets reported as a benign skip.
-"$PY" "$REPO/scripts/coverage_harness.py" >/dev/null
-case $? in
-  0) echo "   superset claim verified" ;;
-  2) echo "   SKIPPED (competitor checkouts absent from ~/Projects/vendor)" ;;
-  3) echo "   FAILED - no census; run scripts/census.py"; rc=1 ;;
-  *) echo "   FAILED - run scripts/coverage_harness.py --verbose"; rc=1 ;;
-esac
+HARNESS="$REPO/scripts/coverage_harness.py"
+# Checked before running because CPython also exits 2 when it cannot open the
+# script, which is indistinguishable from the harness's own "sources absent"
+# 2 - i.e. a missing harness would report as a benign skip.
+if [ ! -f "$HARNESS" ]; then
+  echo "   FAILED - harness missing at $HARNESS"; rc=1
+else
+  # stderr is kept: the harness explains both of its refusals there, and
+  # swallowing it is how a broken setup gets reported as a benign skip.
+  "$PY" "$HARNESS" >/dev/null
+  case $? in
+    0) echo "   superset claim verified" ;;
+    2) echo "   SKIPPED (competitor checkouts absent from ~/Projects/vendor)" ;;
+    3) echo "   FAILED - no census; run scripts/census.py"; rc=1 ;;
+    *) echo "   FAILED - run scripts/coverage_harness.py --verbose"; rc=1 ;;
+  esac
+fi
 
 echo
 echo "== unit: MCP layer (no Live needed) =="
