@@ -3,6 +3,10 @@
   3,
   0
  ],
+ "mxd_api": {
+  "lom_types": "get_available_lom_types",
+  "props_for_type": "get_available_properties_for_type"
+ },
  "type_count": 47,
  "totals": {
   "mxd": 785,

@@ -37,7 +37,17 @@ def _is_destructive(fn):
         return False
     return bool(_DESTRUCTIVE.match(fn))
 
-_MXD = {"types": None, "utils": None, "error": None}
+_MXD = {"types": None, "utils": None, "error": None,
+        "lom_types": None, "props_for_type": None, "api_names": {}}
+
+# Ableton renamed both of these inside the 12.x line - get_exposed_* became
+# get_available_* somewhere between 12.0 and 12.2.7 - and they are private,
+# undocumented internals with no compatibility promise. The census stands
+# entirely on them, so try each spelling rather than pinning the one this Live
+# happens to ship. Newest first.
+_LOM_TYPES_NAMES = ("get_available_lom_types", "get_exposed_lom_types")
+_PROPS_NAMES = ("get_available_properties_for_type",
+                "get_exposed_properties_for_type")
 
 
 def _mxd():
@@ -47,6 +57,13 @@ def _mxd():
             from _MxDCore import LomTypes, LomUtils
             _MXD["types"] = LomTypes
             _MXD["utils"] = LomUtils
+            for key, names in (("lom_types", _LOM_TYPES_NAMES),
+                               ("props_for_type", _PROPS_NAMES)):
+                for n in names:
+                    fn = getattr(LomTypes, n, None)
+                    if fn is not None:
+                        _MXD[key], _MXD["api_names"][key] = fn, n
+                        break
         except Exception:
             _MXD["error"] = traceback.format_exc()
     return _MXD
@@ -292,10 +309,10 @@ def _mfl_index(type_):
     if key in _MFL_CACHE:
         return _MFL_CACHE[key]
     out = {}
-    m = _mxd()
-    if m["types"] is not None:
+    fn = _mxd()["props_for_type"]
+    if fn is not None:
         try:
-            for p in m["types"].get_available_properties_for_type(type_, EPII_VERSION):
+            for p in fn(type_, EPII_VERSION):
                 out[p.name] = p
         except Exception:
             out = {}
@@ -595,8 +612,16 @@ def op_types(surface, params):
     m = _mxd()
     if m["types"] is None:
         raise RuntimeError("_MxDCore unavailable: %s" % m["error"])
+    # Loud on purpose. _mfl_props degrades to dir() when these go missing,
+    # which is survivable for a read but would let a census silently record a
+    # smaller Live than the one running.
+    for key, names in (("lom_types", _LOM_TYPES_NAMES),
+                       ("props_for_type", _PROPS_NAMES)):
+        if m[key] is None:
+            raise RuntimeError("_MxDCore.LomTypes has none of %s; Live renamed "
+                               "it again - add the new spelling" % (names,))
 
-    # get_available_lom_types() registers 43 types, but the reachable object
+    # The registry reports 43 types, but the reachable object
     # graph is larger: Browser/BrowserItem are navigable (live_app browser ...)
     # yet unregistered. Probe known-reachable paths and fold their types in,
     # otherwise the census understates what the server can actually address.
@@ -614,7 +639,7 @@ def op_types(surface, params):
             pass
 
     types, totals = {}, {"mxd": 0, "union": 0, "substantive": 0, "listeners": 0}
-    registered = list(m["types"].get_available_lom_types())
+    registered = list(m["lom_types"]())
     seen_ids = set(id(t) for t in registered)
     unregistered = [t for t in extra if id(t) not in seen_ids
                     and not seen_ids.add(id(t))]
@@ -625,7 +650,7 @@ def op_types(surface, params):
         name = _type_name_of_class(t)
         try:
             mxd_names = set(p.name for p in
-                            m["types"].get_available_properties_for_type(t, EPII_VERSION))
+                            m["props_for_type"](t, EPII_VERSION))
         except Exception:
             mxd_names = set()
         raw_names = set(n for n in dir(t) if not n.startswith("_"))
@@ -647,6 +672,7 @@ def op_types(surface, params):
         totals["listeners"] += len(listeners)
 
     return {"epii_version": list(EPII_VERSION),
+            "mxd_api": dict(m["api_names"]),
             "type_count": len(types),
             "totals": totals,
             "types": types}

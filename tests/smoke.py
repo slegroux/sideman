@@ -563,6 +563,12 @@ def test_types_census():
     check("census includes unregistered types (Browser et al)",
           r["totals"].get("unregistered_types", 0) > 0,
           r["totals"].get("unregistered_types"))
+    # Ableton renamed these private _MxDCore getters once already inside 12.x.
+    # If a future Live renames them again, op_types raises rather than quietly
+    # censusing a smaller Live - this asserts the resolver actually bound them.
+    api = r.get("mxd_api") or {}
+    check("census records which _MxDCore spelling resolved",
+          all(api.get(k) for k in ("lom_types", "props_for_type")), api)
 
 
 def test_observer_list_and_remove():
