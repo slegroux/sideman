@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Generate docs/TOOLS.md from the live MCP tool registry.
+"""Generate docs/TOOLS.md from the live MCP tool registry, and check the
+README's counts against it.
 
 Hand-written API tables drift. This project has been bitten by exactly that
 three times already - a write guard listing functions Live had removed, a census
@@ -7,12 +8,20 @@ filename pinned to a version, a README claiming two test suites when there were
 three. So the tool reference is generated from the registry itself and checked
 in CI-style with --check.
 
+Generation fixes TOOLS.md but not the README, which is prose and stays
+hand-written - and drifted anyway (836a3bb corrects its tool and op counts).
+So --check also asserts every number the README states about the tool registry
+and the census. See CLAIMS.
+
   ./scripts/gen_docs.py           write docs/TOOLS.md
-  ./scripts/gen_docs.py --check   exit 1 if it is out of date
+  ./scripts/gen_docs.py --check   exit 1 if TOOLS.md is stale or a README
+                                  count disagrees with the registry/census
 """
 import asyncio
 import inspect
+import json
 import pathlib
+import re
 import sys
 import textwrap
 
@@ -21,6 +30,7 @@ sys.path.insert(0, str(REPO))
 import mcp_server.server as S  # noqa: E402
 
 OUT = REPO / "docs" / "TOOLS.md"
+README = REPO / "README.md"
 
 # Grouping is editorial - the registry has no notion of it. Any tool not
 # matched falls into "Other", which is the signal to update this list.
@@ -111,6 +121,58 @@ def render():
     return "\n".join(L).rstrip() + "\n"
 
 
+# The README's counts, and what each must equal. TOOLS.md cannot drift because
+# it is generated; the README is hand-written and has drifted - 836a3bb exists
+# only to correct these numbers. Every occurrence is checked, so two copies of
+# the tool count cannot disagree with each other either.
+#
+# Regenerating the README is not the answer: it is prose, and prose is worth
+# writing by hand. Asserting its numbers is.
+CLAIMS = [
+    (r"\b(\d+) (?:generic )?tools\b", "tool count"),
+    (r"Live ([\d.]+) exposes", "census version"),
+    (r"exposes \*\*(\d+) reachable types", "type count"),
+    (r"reachable types / (\d+) members", "member count"),
+]
+
+
+def check_readme():
+    """Assert the README's hand-written numbers against registry and census."""
+    census = sorted((REPO / "baseline").glob("lom_census_*.json"))
+    if not census:
+        print("README: no census in baseline/; run scripts/census.py")
+        return 1
+    data = json.loads(census[-1].read_text())
+    actual = {
+        "tool count": len(asyncio.run(S.mcp.list_tools())),
+        "census version": census[-1].stem[len("lom_census_"):],
+        "type count": data["type_count"],
+        "member count": data["totals"]["substantive"],
+    }
+
+    text = README.read_text()
+    bad = []
+    for pattern, label in CLAIMS:
+        want = actual[label]
+        found = re.findall(pattern, text)
+        if not found:
+            bad.append("%s: README makes no claim matching %s" % (label, pattern))
+            continue
+        wrong = sorted(set(f for f in found if str(f) != str(want)))
+        if wrong:
+            bad.append("%s: README says %s, actual is %s"
+                       % (label, " and ".join(wrong), want))
+    if bad:
+        print("README is STALE:")
+        for b in bad:
+            print("  %s" % b)
+        return 1
+    print("README counts match (%d tools, Live %s: %d types / %d members)"
+          % (actual["tool count"], actual["census version"],
+             actual["type count"], actual["member count"]))
+    return 0
+
+
 def main():
     text = render()
     check = "--check" in sys.argv
@@ -122,7 +184,7 @@ def main():
             print("docs/TOOLS.md is STALE; run scripts/gen_docs.py")
             return 1
         print("docs/TOOLS.md up to date")
-        return 0
+        return check_readme()
     OUT.parent.mkdir(exist_ok=True)
     OUT.write_text(text)
     print("wrote %s (%d lines)" % (OUT.relative_to(REPO),
