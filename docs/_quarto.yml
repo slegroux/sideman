@@ -26,9 +26,7 @@ book:
 
 format:
   html:
-    theme:
-      light: [cosmo, sideman.scss]
-      dark: [cosmo, sideman-dark.scss]
+    theme: cosmo
     toc: true
     code-fold: false
     code-tools: false
