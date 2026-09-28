@@ -15,27 +15,11 @@ reachable without shipping new code.
 
 ## Why
 
-Measured tool counts of the field, 2026-08-01 — actual wired registrations, not
-README claims. Competitors ship; re-measure before citing these.
-
-| Server | Tools | Bridge |
-|---|---|---|
-| jpoindexter/ableton-mcp | 128 | Remote Script |
-| uisato/ableton-mcp-extended | 46 | Remote Script |
-| xiaolaa2/ableton-copilot-mcp | 42 | ableton-js |
-| ahujasid/ableton-mcp | ~21 | Remote Script |
-| Simon-Kansara/ableton-live-mcp-server | 1 | AbletonOSC |
-
 Live 12.2.7 exposes **47 reachable types / 922 members** by measurement (see
-`baseline/`). Nobody covers that by enumeration.
-
-Coverage is verified, not claimed: `scripts/coverage_harness.py` checks every
-Live API attribute the three Remote Script competitors touch against our census
-and **exits nonzero if any is unaccounted for** (and exit 2 if a competitor
-source is missing, rather than reporting a superset it never measured).
-Currently 0 unaccounted. It reads the competitor checkouts from
-`~/Projects/vendor/`. Not verified for xiaolaa2 (ableton-js) or Simon-Kansara
-(OSC) — different bridges, out of scope for that method.
+`baseline/`). Coverage is measured, not claimed: a census of the running Live,
+and a harness that checks every Live API attribute the Remote Script
+competitors touch against it and exits nonzero if any is unaccounted for.
+Method, numbers and what is out of scope: **[docs/COVERAGE.md](docs/COVERAGE.md)**.
 
 ## Architecture
 

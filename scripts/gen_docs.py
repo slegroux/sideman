@@ -13,7 +13,8 @@ their numbers instead.
 
   ./scripts/gen_docs.py           write docs/TOOLS.md
   ./scripts/gen_docs.py --check   exit 1 if TOOLS.md is stale or a count in
-                                  README.md or site/index.html disagrees with
+                                  README.md, site/index.html or docs/COVERAGE.md
+                                  disagrees with
                                   the registry/census
 """
 import asyncio
@@ -31,6 +32,7 @@ import mcp_server.server as S  # noqa: E402
 OUT = REPO / "docs" / "TOOLS.md"
 README = REPO / "README.md"
 SITE = REPO / "site" / "index.html"
+COVERAGE = REPO / "docs" / "COVERAGE.md"
 
 # Grouping is editorial - the registry has no notion of it. Any tool not
 # matched falls into "Other", which is the signal to update this list.
@@ -122,7 +124,7 @@ def render():
 
 
 # Hand-written counts and what each must equal. TOOLS.md is generated and cannot
-# drift; the README and the landing page are prose and did - 836a3bb corrects
+# drift; the README, the landing page and docs/COVERAGE.md are prose and did - 836a3bb corrects
 # the README's numbers. Every occurrence is matched, so two copies of a count
 # cannot disagree with each other either.
 CLAIMS = {
@@ -139,6 +141,11 @@ CLAIMS = {
         (r"and (\d+) reachable members on Live", "member count"),
         (r"reachable members on Live (\d+(?:\.\d+)*)", "census version"),
         (r"[Mm]easured on (?:Live )?(\d+(?:\.\d+)*)", "census version"),
+    ],
+    COVERAGE: [
+        (r"Live (\d+(?:\.\d+)*) exposes", "census version"),
+        (r"exposes \*\*(\d+) reachable types", "type count"),
+        (r"reachable types / (\d+) substantive members", "member count"),
     ],
 }
 
