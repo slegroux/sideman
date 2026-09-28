@@ -9,7 +9,7 @@ An Ableton Live MCP server with complete Live Object Model coverage — 47 types
 - Every Live 12 edition — a Remote Script, no Max for Live, no Suite requirement
 - Real undo steps; destructive calls guarded behind `confirm=true`
 
-**Requirements:** macOS 12+, Ableton Live 12, Claude Code or any MCP client.
+**Requirements:** macOS 11+, Ableton Live 12, Claude Code or any MCP client.
 
 **Known limits:** unsigned package (right-click → Open once); VST/AU parameters need Live's Configure button; measured on Live 12.2.7.
 

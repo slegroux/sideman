@@ -690,7 +690,7 @@ VIRTUAL_ENV=.venv uv pip install -e .   <span class="c"># explicit, or uv may ta
           <h3>Introduce it to Claude</h3>
           <p><code class="inline">--scope user</code> matters — without it the server only exists inside this folder. The second line is optional and teaches Claude how Live's paths work; it's worth it.</p>
           <pre>claude mcp add --scope user sideman -- "$PWD/.venv/bin/python" -m mcp_server.server
-ln -s "$PWD/skills/sideman" ~/.claude/skills/sideman</pre>
+./scripts/install.sh --skills   <span class="c"># links the skill into ~/.claude/skills (and ~/.codex/skills)</span></pre>
         </div>
       </div>
       <div class="step">
