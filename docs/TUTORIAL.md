@@ -8,6 +8,22 @@ The point is not the loop. It is that no tool in this server knows what a
 "chord" or a "hi-hat" is. You navigate the Live Object Model and it does what
 you say.
 
+## Who types this?
+
+Not you. `lom_call(...)` is what **the model** sends over MCP; you say
+*"make me a four-bar house loop"* and Claude issues these calls on its own —
+the installed skill teaches it the path grammar. Read the calls here the way
+you would read a wire capture: to understand what is possible, what actually
+happened, and what to ask for.
+
+Where this pays off in conversation:
+
+- *"What can you see in my Set?"* → the model runs `lom_describe` / `lom_search`.
+- *"Nothing works"* → ask it to run `lom_ping`; that is the real health check.
+- If it asks to confirm a delete, that is the destructive guard doing its job.
+
+The rest of this page is the same session from the model's side.
+
 ## Before you start
 
 Live running, `AbletonLOM` selected as a Control Surface, and an **empty Set**
