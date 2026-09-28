@@ -237,6 +237,15 @@
     grid-template-columns: repeat(5, minmax(0, 1fr)) 34px;
     gap: 5px;
   }
+  /* the demo recording sits where the grid did; .grid stays for the CSS above */
+  .set .demo {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 3px;
+    background: var(--slot);
+    border: 1px solid var(--slot-edge);
+  }
   .th, .scene {
     font-family: var(--mono);
     font-size: 0.7rem;
@@ -489,42 +498,11 @@
         <span class="who">you</span>
         <span>4-bar house loop at 124 — kick, hats, a Drift bass, and a pad that breathes<span class="caret" aria-hidden="true"></span></span>
       </div>
-      <div class="grid" role="img" aria-label="Five tracks — Kick, Hats, Drift Bass, Pad, Perc — with clips landing across four scenes">
-        <div class="th on" style="--c: var(--c-coral)">1 Kick</div>
-        <div class="th on" style="--c: var(--c-amber)">2 Hats</div>
-        <div class="th on" style="--c: var(--c-lime)">3 Drift Bass</div>
-        <div class="th on" style="--c: var(--c-sky)">4 Pad</div>
-        <div class="th" >5 Perc</div>
-        <div class="scene">—</div>
-
-        <div class="clip playing" style="--c: var(--c-coral); --d: .15s">Kick 4x4</div>
-        <div class="clip playing" style="--c: var(--c-amber); --d: .35s">Hats off</div>
-        <div class="clip playing" style="--c: var(--c-lime);  --d: .55s">Bass A</div>
-        <div class="clip playing" style="--c: var(--c-sky);   --d: .75s">Pad LP</div>
-        <div class="slot"></div>
-        <div class="scene">1</div>
-
-        <div class="clip" style="--c: var(--c-coral); --d: .95s">Kick 4x4</div>
-        <div class="clip" style="--c: var(--c-amber); --d: 1.05s">Hats 16th</div>
-        <div class="clip" style="--c: var(--c-lime);  --d: 1.15s">Bass B</div>
-        <div class="slot"></div>
-        <div class="slot"></div>
-        <div class="scene">2</div>
-
-        <div class="slot"></div>
-        <div class="slot"></div>
-        <div class="clip" style="--c: var(--c-lime);  --d: 1.3s">Bass A</div>
-        <div class="clip" style="--c: var(--c-sky);   --d: 1.4s">Pad open</div>
-        <div class="slot"></div>
-        <div class="scene">3</div>
-
-        <div class="slot"></div>
-        <div class="slot"></div>
-        <div class="slot"></div>
-        <div class="slot"></div>
-        <div class="slot"></div>
-        <div class="scene">4</div>
-      </div>
+      <video class="demo" controls muted playsinline preload="metadata"
+             poster="demo-poster.jpg"
+             aria-label="Screen recording: Sideman building a 4-bar loop, writing a filter sweep, and reporting a fader move">
+        <source src="demo.mp4" type="video/mp4">
+      </video>
       <div class="legend">
         <span>124.00 BPM · 4/4 · 1.1.1</span>
         <span>Drift · LP Freq 0.35 → 0.95, one step a bar</span>
@@ -632,7 +610,7 @@
       <tr><th>Ableton Live</th><td>Live 12, any edition<span class="note">It's a Remote Script — Max for Live isn't required. Measured on 12.2.7.</span></td></tr>
       <tr><th>Computer</th><td>macOS<span class="note">Windows untested.</span></td></tr>
       <tr><th>Assistant</th><td>Claude Code, or any MCP client</td></tr>
-      <tr><th>Runtime</th><td>Python 3.11, installed with <code class="inline">uv</code></td></tr>
+      <tr><th>Runtime</th><td>Python 3.11 — the installer brings its own; from source, <code class="inline">uv</code> makes one</td></tr>
       <tr><th>Native devices &amp; racks</th><td>Every parameter, every macro</td></tr>
       <tr><th>VST / AU / VST3</th><td>Parameters you've exposed with Live's <span class="ui">Configure</span> button<span class="note">Live only shows a plugin's controls to scripts once you've configured them. Claude can still read the plugin's full parameter list and tell you what to expose.</span></td></tr>
       <tr><th>Network</th><td>None. Talks to Live on <code class="inline">127.0.0.1:9878</code><span class="note">Local only, and a different port from other Ableton MCP servers, so they coexist.</span></td></tr>
@@ -653,7 +631,7 @@
         <div class="num">&#9654;</div>
         <div>
           <h3>Musicians: download the installer</h3>
-          <p>Get <code class="inline">Sideman-0.1.0.pkg</code> from the <a href="https://github.com/slegroux/sideman/releases">releases page</a>. It installs into your home folder, needs no password, and brings its own Python. It isn't notarized yet, so the first time macOS will refuse a double-click: <span class="ui">right-click the .pkg → Open → Open</span>. Then follow the last screen — it ends with the one step no installer can do for you: <span class="ui">Preferences → Link, Tempo &amp; MIDI → Control Surface → AbletonLOM</span>.</p>
+          <p>Get <code class="inline">Sideman-0.1.0.pkg</code> from the <a href="https://github.com/slegroux/sideman/releases">releases page</a>. It installs into your home folder, needs no password, and brings its own Python. It isn't notarized yet, so the first time macOS will refuse a double-click: <span class="ui">right-click the .pkg → Open → Open</span>. On macOS 15 and later that menu may not appear — open it once, then <span class="ui">System Settings → Privacy &amp; Security → Open Anyway</span>. Then follow the last screen — it ends with the one step no installer can do for you: <span class="ui">Preferences → Link, Tempo &amp; MIDI → Control Surface → AbletonLOM</span>.</p>
         </div>
       </div>
     </div>
