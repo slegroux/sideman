@@ -15,7 +15,8 @@ reachable without shipping new code.
 
 ## Why
 
-Measured tool counts of the field (actual wired registrations, not README claims):
+Measured tool counts of the field, 2026-08-01 — actual wired registrations, not
+README claims. Competitors ship; re-measure before citing these.
 
 | Server | Tools | Bridge |
 |---|---|---|
@@ -215,8 +216,3 @@ for the protocol and how to add an op.
 Deliberately **no curated per-feature tool layer**. The plan called for ~30 sugar
 verbs; at 30 generic tools that would mean 60, and tool overload degrades
 selection. The skill buys the same ergonomics at zero tool cost.
-
-## Status
-
-Phases 0–8 complete. Plan and full build log:
-`~/.omc/plans/2026-08-01-ableton-mcp-superset.md`.

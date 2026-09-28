@@ -8,10 +8,7 @@ filename pinned to a version, a README claiming two test suites when there were
 three. So the tool reference is generated from the registry itself and checked
 in CI-style with --check.
 
-Generation fixes TOOLS.md but not the README, which is prose and stays
-hand-written - and drifted anyway (836a3bb corrects its tool and op counts).
-So --check also asserts every number the README states about the tool registry
-and the census. See CLAIMS.
+The README stays hand-written prose, so --check asserts its numbers instead.
 
   ./scripts/gen_docs.py           write docs/TOOLS.md
   ./scripts/gen_docs.py --check   exit 1 if TOOLS.md is stale or a README
@@ -121,13 +118,9 @@ def render():
     return "\n".join(L).rstrip() + "\n"
 
 
-# The README's counts, and what each must equal. TOOLS.md cannot drift because
-# it is generated; the README is hand-written and has drifted - 836a3bb exists
-# only to correct these numbers. Every occurrence is checked, so two copies of
-# the tool count cannot disagree with each other either.
-#
-# Regenerating the README is not the answer: it is prose, and prose is worth
-# writing by hand. Asserting its numbers is.
+# The README's counts and what each must equal. TOOLS.md is generated and cannot
+# drift; the README is hand-written and did - 836a3bb corrects these numbers.
+# Every occurrence is matched, so two copies cannot disagree with each other.
 CLAIMS = [
     (r"\b(\d+) (?:generic )?tools\b", "tool count"),
     (r"Live ([\d.]+) exposes", "census version"),

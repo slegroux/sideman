@@ -1,22 +1,14 @@
 #!/usr/bin/env bash
-# Run both suites.
+# Run all three suites. Which seam each one covers: see README.
 #
 #   tests/test_mcp.py  unit,  no Live required    -> CI-able, ~1s
 #   tests/test_e2e.py  e2e,   needs Live          -> MCP layer -> socket -> Live
 #   tests/smoke.py     engine, needs Live         -> raw socket, ~70s
 #
-# The three cover different seams. test_mcp stubs the socket so it never touches
-# Live; smoke uses a raw socket so it never loads the MCP layer. Only test_e2e
-# exercises the path Claude actually takes, where a response the tool cannot
-# serialise or an error escaping as the wrong type would finally show up.
-#
-# The integration suite is slow because it does real work: six scratch-track
-# create/delete cycles and a genuine device load through the browser. That is
-# the point - it exercises Live, not a mock. Do not mistake it for a hang.
-#
-# The integration suite creates a scratch MIDI track named __lomtest and
-# deletes it. It refuses to delete a track whose name changed underneath it,
-# so a rename mid-run leaves the track rather than removing the wrong one.
+# The Live-dependent suites are slow because they do real work: six scratch-track
+# create/delete cycles and a genuine device load through the browser. Do not
+# mistake it for a hang. They create a MIDI track named __lomtest and delete it,
+# refusing to delete one whose name changed underneath them.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

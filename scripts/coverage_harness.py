@@ -59,7 +59,7 @@ COMPETITORS = {
 
 # Members of Browser / BrowserItem. These are genuinely reachable
 # (browser_list/browser_load use them) but do NOT appear in the census, because
-# get_available_lom_types() registers 43 types and Browser is not one of them.
+# the type registry covers only a subset, and Browser is not in it.
 # A real census gap, tracked rather than hidden.
 BROWSER_SURFACE = {
     "children", "is_device", "is_folder", "is_loadable", "display_name",
@@ -68,20 +68,18 @@ BROWSER_SURFACE = {
     "user_library", "current_project", "max_for_live", "source",
 }
 
-# VERIFIED ABSENT from Live 12.2.7 (probed 2026-08-01 against a running Live;
-# positive controls passed 9/9, and direct `get`/`call` returned AttributeError,
-# e.g. "'Clip' object has no attribute 'follow_action_a'").
+# VERIFIED ABSENT from Live 12.2.7. Probed against a running Live by direct
+# get/call returning AttributeError, positive controls passing: 2026-08-01, and
+# 2026-09-23 for the four marked below.
 #
-# These are members jpoindexter references that Live 12.2.7 does not have. Some
-# are hasattr-guarded in its source; several are NOT, so those tools raise on
-# Live 12. There is nothing here for us to cover - the API is gone.
+# jpoindexter names members Live 12 removed and leaves several unguarded, so
+# those tools raise. ahujasid hasattr-guards its four, which are legacy or
+# M4L-only spellings of ground Live 12 does expose - display_value,
+# str_for_value, automation_state on DeviceParameter; add_macro,
+# has_macro_mappings, macros_mapped on RackDevice. Details in 9b34139.
 #
-# Second probe 2026-09-23, same method, against ahujasid's August additions.
-# Controls: DeviceParameter.display_value -> 0.0, RackDevice.macros_mapped ->
-# 16 bools. All four below raised AttributeError. ahujasid hasattr-guards every
-# one of them, so it does not know they exist either - Live 12 exposes
-# display_value / str_for_value / automation_state and add_macro /
-# has_macro_mappings / macros_mapped under the modern names instead.
+# Never add a member without probing it: an unprobed entry silently excuses a
+# real gap, which is the one thing this harness exists to prevent.
 ABSENT_IN_12_2_7 = {
     "clear_automation_envelope", "create_group_track", "fade_in_end",
     "fade_in_start", "fade_out_end", "fade_out_start", "follow_action_a",
@@ -236,8 +234,9 @@ def main(verbose: bool = False) -> int:
     print()
     print(f"  [A] Browser/BrowserItem surface ......... {len(browser):>3}  REAL CENSUS GAP")
     print("      Reachable today (browser_list/browser_load use them) but absent")
-    print("      from the census: get_available_lom_types() registers 43 types and")
-    print("      Browser is not one. The census understates the reachable graph.")
+    print("      from the census: the type registry covers %d types and Browser"
+          % data["totals"]["registered_types"])
+    print("      is not one. The census understates the reachable graph.")
     if browser:
         print("      " + ", ".join(browser))
     print()
@@ -248,8 +247,10 @@ def main(verbose: bool = False) -> int:
     print(f"  [C] Verified ABSENT from Live 12.2.7 ..... {len(absent):>3}  nothing to cover")
     print("      Probed live 2026-08-01 and 2026-09-23. Direct get/call returns")
     print("      AttributeError, e.g. \"'Clip' object has no attribute")
-    print("      'follow_action_a'\". Competitors reference members Live 12")
-    print("      removed; several unguarded, so those tools RAISE on Live 12.")
+    print("      'follow_action_a'\". jpoindexter names members Live 12 removed")
+    print("      and leaves several unguarded, so those tools RAISE on Live 12.")
+    print("      ahujasid's four are legacy/M4L-only spellings, guarded - see")
+    print("      ABSENT_IN_12_2_7 for what Live 12 exposes instead.")
     if absent:
         print("      " + ", ".join(absent))
     print()

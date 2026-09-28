@@ -40,11 +40,9 @@ def _is_destructive(fn):
 _MXD = {"types": None, "utils": None, "error": None,
         "lom_types": None, "props_for_type": None, "api_names": {}}
 
-# Ableton renamed both of these inside the 12.x line - get_exposed_* became
-# get_available_* somewhere between 12.0 and 12.2.7 - and they are private,
-# undocumented internals with no compatibility promise. The census stands
-# entirely on them, so try each spelling rather than pinning the one this Live
-# happens to ship. Newest first.
+# Private _MxDCore internals, already renamed once inside 12.x: 12.0 shipped
+# get_exposed_*, 12.2.7 ships get_available_*. Try each spelling, newest first,
+# rather than pinning whichever one this Live happens to have.
 _LOM_TYPES_NAMES = ("get_available_lom_types", "get_exposed_lom_types")
 _PROPS_NAMES = ("get_available_properties_for_type",
                 "get_exposed_properties_for_type")
@@ -612,17 +610,16 @@ def op_types(surface, params):
     m = _mxd()
     if m["types"] is None:
         raise RuntimeError("_MxDCore unavailable: %s" % m["error"])
-    # Loud on purpose. _mfl_props degrades to dir() when these go missing,
-    # which is survivable for a read but would let a census silently record a
-    # smaller Live than the one running.
+    # Loud on purpose: _mfl_index degrades to dir() when these vanish, which a
+    # read survives but a census must not - it would record a smaller Live.
     for key, names in (("lom_types", _LOM_TYPES_NAMES),
                        ("props_for_type", _PROPS_NAMES)):
         if m[key] is None:
             raise RuntimeError("_MxDCore.LomTypes has none of %s; Live renamed "
                                "it again - add the new spelling" % (names,))
 
-    # The registry reports 43 types, but the reachable object
-    # graph is larger: Browser/BrowserItem are navigable (live_app browser ...)
+    # The registry reports fewer types than the reachable object graph holds:
+    # Browser/BrowserItem are navigable (live_app browser ...)
     # yet unregistered. Probe known-reachable paths and fold their types in,
     # otherwise the census understates what the server can actually address.
     extra = []
