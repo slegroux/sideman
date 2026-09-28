@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="116" viewBox="0 0 400 116" role="img" aria-label="Sideman">
+  <!-- mark: a Session View clip grid, four clips landed, one playing -->
+  <g transform="translate(8 14)">
+    <rect x="0"  y="0"  width="28" height="26" rx="4" fill="#F27059"/>
+    <rect x="32" y="0"  width="28" height="26" rx="4" fill="#F2B134"/>
+    <rect x="64" y="0"  width="28" height="26" rx="4" fill="#A5A5A0" opacity="0.25"/>
+    <rect x="0"  y="32" width="28" height="26" rx="4" fill="#A9D041"/>
+    <rect x="32" y="32" width="28" height="26" rx="4" fill="#A5A5A0" opacity="0.25"/>
+    <rect x="64" y="32" width="28" height="26" rx="4" fill="#5BA8E0"/>
+    <rect x="0"  y="64" width="28" height="26" rx="4" fill="#A5A5A0" opacity="0.25"/>
+    <rect x="32" y="64" width="28" height="26" rx="4" fill="#A5A5A0" opacity="0.25"/>
+    <rect x="64" y="64" width="28" height="26" rx="4" fill="#A5A5A0" opacity="0.25"/>
+    <polygon points="10,8 10,18 19,13" fill="#E8E8E4" opacity="0.85"/>
+  </g>
+  <text x="120" y="66" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="54" font-weight="800" letter-spacing="-1.5" fill="#E8E8E4">Sideman</text>
+  <text x="122" y="96" font-family="'IBM Plex Mono', Menlo, Consolas, monospace" font-size="16" fill="#A5A5A0">an Ableton Live MCP server</text>
+</svg>

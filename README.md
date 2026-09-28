@@ -1,4 +1,26 @@
-# Sideman
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img alt="Sideman — an Ableton Live MCP server" src="assets/logo-light.svg" width="480">
+  </picture>
+</p>
+
+<p align="center">
+  <a href="https://github.com/slegroux/sideman/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/slegroux/sideman/ci.yml?branch=main&label=CI"></a>
+  <a href="LICENSE"><img alt="Licence: GPL-3.0" src="https://img.shields.io/github/license/slegroux/sideman"></a>
+  <img alt="Ableton Live 12, any edition" src="https://img.shields.io/badge/Ableton%20Live-12%20%C2%B7%20any%20edition-1F1F22">
+  <img alt="MCP server" src="https://img.shields.io/badge/MCP-server-1F6FEB">
+  <img alt="Python 3.11" src="https://img.shields.io/badge/Python-3.11-3776AB">
+  <a href="https://slegroux.github.io/sideman/"><img alt="Landing page" src="https://img.shields.io/badge/site-slegroux.github.io%2Fsideman-D9432B"></a>
+</p>
+
+<p align="center">
+  <a href="https://slegroux.github.io/sideman/">Landing page</a> ·
+  <a href="docs/TUTORIAL.md">Tutorial</a> ·
+  <a href="docs/TOOLS.md">Tools</a> ·
+  <a href="docs/PROTOCOL.md">Protocol</a> ·
+  <a href="docs/COVERAGE.md">Coverage</a>
+</p>
 
 An **Ableton Live MCP server** with complete Live Object Model coverage.
 
