@@ -1,0 +1,29 @@
+<html>
+<body style="font-family:-apple-system,sans-serif;font-size:13px">
+<p><b>Almost done &mdash; two steps.</b></p>
+<p><b>1. Turn it on in Live.</b> If Ableton Live was open, quit and reopen it
+(Live only looks for new scripts when it starts). Then:</p>
+<blockquote>Settings (or Preferences) &rarr; <b>Link, Tempo &amp; MIDI</b> &rarr;
+<b>Control Surface</b> &rarr; pick <b>AbletonLOM</b> in any empty slot.</blockquote>
+<p style="color:#666">AbletonLOM is the name of the script inside Sideman.
+There is no entry called &ldquo;Sideman&rdquo; in that list.</p>
+<p><b>2. Restart Claude.</b> Quit your Claude session and start a new one, then
+ask it:</p>
+<blockquote><b>What's in my Set?</b></blockquote>
+<p style="color:#666">If Claude says it has no Ableton tools, it was not
+registered automatically &mdash; the <code>claude</code> command was not found on
+this Mac. Install Claude Code, then run this once in Terminal:</p>
+<pre style="color:#666;font-size:11px">claude mcp add --scope user sideman -- \
+  "$HOME/Library/Application Support/Sideman/python/bin/python3" -m mcp_server.server</pre>
+<p style="color:#666">If macOS refused to open this installer at all and you
+had to hunt for it: Sideman is not signed yet. Open it once, then go to
+<b>System Settings &rarr; Privacy &amp; Security</b> and click
+<b>Open Anyway</b>.</p>
+<p style="color:#666">If a file called <b>CONFLICT.txt</b> has appeared in
+<code>~/Library/Application Support/Sideman/</code>, something you already had
+was in one of the places Sideman needed &mdash; it was left untouched, so step 1
+above still has to be done by hand. Open that file; it says exactly what to do.</p>
+<p style="color:#666">To remove Sideman later, run
+<code>~/Library/Application\ Support/Sideman/uninstall.sh</code></p>
+</body>
+</html>

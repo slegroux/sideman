@@ -41,6 +41,14 @@ engine changes need no Live restart. Only the socket shell does.
 
 ## Install
 
+**Musicians:** download the `.pkg` from
+[Releases](https://github.com/slegroux/sideman/releases), open it, and follow the
+last screen. It installs into your home folder, needs no password, and brings its
+own Python. It is not yet notarized, so the first time macOS will refuse a
+double-click: right-click the `.pkg` → **Open** → **Open**. On macOS 15 and later
+that prompt is often not offered — open it once, then go to **System Settings →
+Privacy & Security** and click **Open Anyway**. **Developers:** the steps below.
+
 ```bash
 git clone <repo> && cd sideman
 uv venv --python 3.11 .venv

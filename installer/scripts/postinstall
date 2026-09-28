@@ -1,0 +1,195 @@
+#!/bin/bash
+# Wire up a payload that Installer.app has just laid down in the user's home:
+# private Python, MCP registration, skill symlink, Remote Script symlink.
+#
+# Installer.app gives scripts a sparse environment - PATH may have no Homebrew,
+# $HOME can be /var/root on a home-domain install - so nothing here assumes a
+# shell profile. Runnable directly for testing:
+#
+#   HOME=/tmp/fakehome SIDEMAN_PAYLOAD=/path/to/payload installer/scripts/postinstall
+#
+# Nothing here aborts on a conflict with something the user already had. A
+# half-installed Sideman the user cannot diagnose is worse than a fully
+# installed one with a CONFLICT.txt telling them the one thing left to do.
+set -euo pipefail
+
+REL="Library/Application Support/Sideman"
+
+say() { echo "sideman: $*"; }
+
+CONFLICTS=""
+note_conflict() { CONFLICTS="${CONFLICTS}$1"$'\n\n'; }
+
+# --- where is the payload, and whose home is it in? -------------------------
+# Installer passes the install destination as $2; prefer it over $HOME. It is
+# trusted only when it actually resolves to the payload - the documented
+# meaning is loose enough that "/" and the home directory are both plausible.
+PAYLOAD="${SIDEMAN_PAYLOAD:-}"
+if [ -z "$PAYLOAD" ] && [ -n "${2:-}" ]; then
+  if [ -f "$2/pyproject.toml" ]; then
+    PAYLOAD="$2"
+  elif [ -f "$2/$REL/pyproject.toml" ]; then
+    PAYLOAD="$2/$REL"
+  fi
+fi
+
+# The payload path contains the home directory, so it is better evidence than a
+# $HOME the installer may have set to /var/root. dscl is the last resort and is
+# not allowed to be fatal: a direct run may have no $USER at all.
+if [ -z "${HOME:-}" ] || [ "$HOME" = /var/root ]; then
+  if [ -n "$PAYLOAD" ] && [ "$PAYLOAD" != "${PAYLOAD%/"$REL"}" ]; then
+    HOME="${PAYLOAD%/"$REL"}"
+  elif [ -n "${USER:-}" ]; then
+    HOME="$(dscl . -read "/Users/$USER" NFSHomeDirectory 2>/dev/null | cut -d' ' -f2)" || true
+  fi
+  export HOME
+fi
+if [ -z "${HOME:-}" ] || [ ! -d "$HOME" ]; then
+  echo "sideman: cannot determine your home directory (HOME=${HOME:-unset}, USER=${USER:-unset})" >&2
+  exit 1
+fi
+
+PAYLOAD="${PAYLOAD:-$HOME/$REL}"
+[ -d "$PAYLOAD" ] || { echo "sideman: no payload at $PAYLOAD" >&2; exit 1; }
+say "payload: $PAYLOAD"
+
+# Replace a symlink, never a real directory. A real directory predates us: the
+# user keeps it, and gets told in CONFLICT.txt what to move.
+link_or_note() {
+  local link="$1" target="$2" label="$3" hint="$4"
+  if [ -L "$link" ]; then
+    rm "$link"
+  elif [ -e "$link" ]; then
+    note_conflict "$label was NOT linked.
+
+  $link
+already exists and is a real file or directory, not a symlink, so Sideman left
+it alone. To finish by hand, in Terminal:
+
+  mv \"$link\" \"$link.bak\"
+  ln -s \"$target\" \"$link\"
+
+$hint"
+    say "$label: SKIPPED - $link is not a symlink (see CONFLICT.txt)"
+    return 0
+  fi
+  ln -s "$target" "$link"
+  say "$label: $link -> $target"
+}
+
+# --- 1. private Python ------------------------------------------------------
+case "$(uname -m)" in
+  arm64)  ARCH=aarch64 ;;
+  x86_64) ARCH=x86_64 ;;
+  *) echo "sideman: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+esac
+# Under Rosetta uname reports x86_64, but the interpreter we pick is launched
+# later by Claude Code, natively - so the machine's real architecture is what
+# matters, not this process's.
+if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ]; then
+  ARCH=aarch64
+  say "running translated under Rosetta; using the arm64 runtime"
+fi
+# Keyed off the directory the installer just delivered, not the one that
+# survived an earlier run: on a reinstall the freshly delivered interpreter has
+# to replace the old one, or the user keeps last version's Python and - because
+# pip would find sideman already installed in it - last version's server code.
+if [ -d "$PAYLOAD/python-$ARCH-apple-darwin" ]; then
+  rm -rf "$PAYLOAD/python"
+  mv "$PAYLOAD/python-$ARCH-apple-darwin" "$PAYLOAD/python"
+fi
+PY="$PAYLOAD/python/bin/python3"
+[ -x "$PY" ] || { echo "sideman: payload has no interpreter for $ARCH" >&2; exit 1; }
+say "python: $("$PY" -V 2>&1) ($ARCH)"
+# The other architecture is 71 MB of dead weight on this machine.
+for d in "$PAYLOAD"/python-*-apple-darwin; do
+  if [ -d "$d" ]; then
+    rm -rf "$d"
+    say "pruned unused runtime $(basename "$d")"
+  fi
+done
+
+# --- 2. install the server into it ------------------------------------------
+# build.sh froze sideman and every dependency into wheels/, so this never
+# touches the network - the one place a failure would be undebuggable. A
+# payload without wheels/ is a broken build, not a reason to reach for PyPI.
+[ -d "$PAYLOAD/wheels" ] || { echo "sideman: wheels/ missing from payload; refusing to install from the network" >&2; exit 1; }
+"$PY" -m pip install --quiet --no-index --find-links "$PAYLOAD/wheels" sideman
+say "installed the MCP server into the private Python (offline)"
+
+# --- 3. register with Claude Code -------------------------------------------
+find_claude() {
+  command -v claude 2>/dev/null && return 0
+  local c
+  for c in "$HOME/.local/bin/claude" /usr/local/bin/claude \
+           /opt/homebrew/bin/claude "$HOME/.npm-global/bin/claude"; do
+    if [ -x "$c" ]; then echo "$c"; return 0; fi
+  done
+  return 1
+}
+if CLAUDE="$(find_claude)"; then
+  # remove-then-add so a reinstall repoints an existing entry instead of failing
+  "$CLAUDE" mcp remove sideman -s user >/dev/null 2>&1 || true
+  "$CLAUDE" mcp add --scope user sideman -- "$PY" -m mcp_server.server
+  say "registered with Claude Code as 'sideman'"
+else
+  say "no 'claude' command found - register it later with:"
+  say "  claude mcp add --scope user sideman -- \"$PY\" -m mcp_server.server"
+fi
+
+# --- 4. skill ---------------------------------------------------------------
+# Teaches the model the path grammar, which the tool docstrings cannot carry.
+SKILL_LINK=""
+if [ -d "$HOME/.claude" ]; then
+  mkdir -p "$HOME/.claude/skills"
+  # Leftover from the ableton-lom -> sideman rename. Only a dangling symlink:
+  # a live one or a real directory is someone else's.
+  OLD="$HOME/.claude/skills/ableton-lom"
+  if [ -L "$OLD" ] && [ ! -e "$OLD" ]; then
+    rm "$OLD"
+    say "removed dangling $OLD"
+  fi
+  SKILL_LINK="$HOME/.claude/skills/sideman"
+  link_or_note "$SKILL_LINK" "$PAYLOAD/skills/sideman" "skill" \
+    "Without it Claude still works, but has to guess the LOM path grammar."
+else
+  say "skill: skipped (no ~/.claude - Claude Code is not installed)"
+fi
+
+# --- 5. Remote Script -------------------------------------------------------
+# Last, so that a pre-existing directory here costs the user nothing else: by
+# now the server is installed and registered. Live's default User Library
+# location; a user who moved it in Live's preferences has to link by hand.
+RS_LINK="$HOME/Music/Ableton/User Library/Remote Scripts/AbletonLOM"
+mkdir -p "$(dirname "$RS_LINK")"
+link_or_note "$RS_LINK" "$PAYLOAD/remote_script/AbletonLOM" "remote script" \
+  "Until this is done Live cannot see Sideman, and the Control Surface list
+will not offer AbletonLOM. Restart Live after linking."
+
+# --- report -----------------------------------------------------------------
+CONFLICT_FILE="$PAYLOAD/CONFLICT.txt"
+rm -f "$CONFLICT_FILE"
+if [ -n "$CONFLICTS" ]; then
+  {
+    echo "Sideman is installed, but could not finish every step by itself."
+    echo "Each item below was left alone because something of yours is already"
+    echo "there. Nothing of yours was moved or deleted."
+    echo
+    printf '%s' "$CONFLICTS"
+  } > "$CONFLICT_FILE"
+  echo
+  cat "$CONFLICT_FILE"
+  say "the above is saved at $CONFLICT_FILE"
+fi
+
+# A home-domain install can still run its scripts as root; without this the
+# user cannot later uninstall what was just put in their own home.
+if [ "$(id -u)" = 0 ] && [ -n "${USER:-}" ] && [ "$USER" != root ]; then
+  chown -R "$USER" "$PAYLOAD"
+  if [ -L "$RS_LINK" ]; then chown -h "$USER" "$RS_LINK"; fi
+  if [ -n "$SKILL_LINK" ] && [ -L "$SKILL_LINK" ]; then chown -h "$USER" "$SKILL_LINK"; fi
+  say "ownership: $USER"
+fi
+
+say "done - next, pick AbletonLOM as a Control Surface in Live's preferences"
+exit 0
