@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 cp learn.md index.md
-cp ../assets/logo-light.svg ../assets/logo-dark.svg img/
+mkdir -p img && cp ../assets/logo-light.svg ../assets/logo-dark.svg img/
 trap 'rm -f index.md' EXIT
 quarto render . "$@"
 # Quarto copies the directory's other markdown files as resources; they are
