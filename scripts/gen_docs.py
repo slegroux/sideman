@@ -8,11 +8,13 @@ filename pinned to a version, a README claiming two test suites when there were
 three. So the tool reference is generated from the registry itself and checked
 in CI-style with --check.
 
-The README stays hand-written prose, so --check asserts its numbers instead.
+The README and the landing page stay hand-written prose, so --check asserts
+their numbers instead.
 
   ./scripts/gen_docs.py           write docs/TOOLS.md
-  ./scripts/gen_docs.py --check   exit 1 if TOOLS.md is stale or a README
-                                  count disagrees with the registry/census
+  ./scripts/gen_docs.py --check   exit 1 if TOOLS.md is stale or a count in
+                                  README.md or site/index.html disagrees with
+                                  the registry/census
 """
 import asyncio
 import inspect
@@ -28,6 +30,7 @@ import mcp_server.server as S  # noqa: E402
 
 OUT = REPO / "docs" / "TOOLS.md"
 README = REPO / "README.md"
+SITE = REPO / "site" / "index.html"
 
 # Grouping is editorial - the registry has no notion of it. Any tool not
 # matched falls into "Other", which is the signal to update this list.
@@ -118,22 +121,33 @@ def render():
     return "\n".join(L).rstrip() + "\n"
 
 
-# The README's counts and what each must equal. TOOLS.md is generated and cannot
-# drift; the README is hand-written and did - 836a3bb corrects these numbers.
-# Every occurrence is matched, so two copies cannot disagree with each other.
-CLAIMS = [
-    (r"\b(\d+) (?:generic )?tools\b", "tool count"),
-    (r"Live ([\d.]+) exposes", "census version"),
-    (r"exposes \*\*(\d+) reachable types", "type count"),
-    (r"reachable types / (\d+) members", "member count"),
-]
+# Hand-written counts and what each must equal. TOOLS.md is generated and cannot
+# drift; the README and the landing page are prose and did - 836a3bb corrects
+# the README's numbers. Every occurrence is matched, so two copies of a count
+# cannot disagree with each other either.
+CLAIMS = {
+    README: [
+        (r"\b(\d+) (?:generic )?tools\b", "tool count"),
+        (r"Live (\d+(?:\.\d+)*) exposes", "census version"),
+        (r"exposes \*\*(\d+) reachable types", "type count"),
+        (r"reachable types / (\d+) members", "member count"),
+    ],
+    SITE: [
+        (r"<b>(\d+)</b> reachable members", "member count"),
+        (r"<b>(\d+)</b> object types", "type count"),
+        (r"\b(\d+) object types and", "type count"),
+        (r"and (\d+) reachable members on Live", "member count"),
+        (r"reachable members on Live (\d+(?:\.\d+)*)", "census version"),
+        (r"[Mm]easured on (?:Live )?(\d+(?:\.\d+)*)", "census version"),
+    ],
+}
 
 
-def check_readme():
-    """Assert the README's hand-written numbers against registry and census."""
+def check_counts():
+    """Assert every hand-written count against the registry and the census."""
     census = sorted((REPO / "baseline").glob("lom_census_*.json"))
     if not census:
-        print("README: no census in baseline/; run scripts/census.py")
+        print("no census in baseline/; run scripts/census.py")
         return 1
     data = json.loads(census[-1].read_text())
     actual = {
@@ -143,27 +157,37 @@ def check_readme():
         "member count": data["totals"]["substantive"],
     }
 
-    text = README.read_text()
-    bad = []
-    for pattern, label in CLAIMS:
-        want = actual[label]
-        found = re.findall(pattern, text)
-        if not found:
-            bad.append("%s: README makes no claim matching %s" % (label, pattern))
+    rc = 0
+    for path, claims in CLAIMS.items():
+        name = path.relative_to(REPO)
+        if not path.exists():
+            print("%s missing" % name)
+            rc = 1
             continue
-        wrong = sorted(set(f for f in found if str(f) != str(want)))
-        if wrong:
-            bad.append("%s: README says %s, actual is %s"
-                       % (label, " and ".join(wrong), want))
-    if bad:
-        print("README is STALE:")
-        for b in bad:
-            print("  %s" % b)
-        return 1
-    print("README counts match (%d tools, Live %s: %d types / %d members)"
-          % (actual["tool count"], actual["census version"],
-             actual["type count"], actual["member count"]))
-    return 0
+        text = path.read_text()
+        bad = []
+        for pattern, label in claims:
+            want = actual[label]
+            found = re.findall(pattern, text)
+            if not found:
+                bad.append("%s: no claim matching %s" % (label, pattern))
+                continue
+            wrong = sorted(set(f for f in found if str(f) != str(want)))
+            if wrong:
+                bad.append("%s: says %s, actual is %s"
+                           % (label, " and ".join(wrong), want))
+        if bad:
+            print("%s is STALE:" % name)
+            for b in bad:
+                print("  %s" % b)
+            rc = 1
+        else:
+            print("%s counts match" % name)
+    if rc == 0:
+        print("  (%d tools, Live %s: %d types / %d members)"
+              % (actual["tool count"], actual["census version"],
+                 actual["type count"], actual["member count"]))
+    return rc
 
 
 def main():
@@ -177,7 +201,7 @@ def main():
             print("docs/TOOLS.md is STALE; run scripts/gen_docs.py")
             return 1
         print("docs/TOOLS.md up to date")
-        return check_readme()
+        return check_counts()
     OUT.parent.mkdir(exist_ok=True)
     OUT.write_text(text)
     print("wrote %s (%d lines)" % (OUT.relative_to(REPO),
