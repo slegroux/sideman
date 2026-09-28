@@ -104,6 +104,9 @@ mkdir -p "$TMP/bin"
 cat > "$TMP/bin/claude" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$*" >> "$CLAUDE_STUB_LOG"
+# CLAUDE_STUB_FAIL=1 makes `mcp add` fail, the way a corrupt ~/.claude.json does.
+[ "${CLAUDE_STUB_FAIL:-}" = 1 ] && [ "$1" = mcp ] && [ "$2" = add ] && exit 1
+exit 0
 STUB
 chmod +x "$TMP/bin/claude"
 STUB_LOG="$TMP/claude-argv.txt"
@@ -115,7 +118,7 @@ run_postinstall() {
   local home="$1" payload="${2:-}" arg2="${3:-}"
   local -a e=(USER="${USER:-tester}" TMPDIR="$TMP"
               PATH="$TMP/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-              CLAUDE_STUB_LOG="$STUB_LOG")
+              CLAUDE_STUB_LOG="$STUB_LOG" CLAUDE_STUB_FAIL="${CLAUDE_STUB_FAIL:-}")
   e+=(HOME="$home")
   if [ -n "$payload" ]; then e+=(SIDEMAN_PAYLOAD="$payload"); fi
   env -i "${e[@]}" /bin/bash "$REPO/installer/scripts/postinstall" /dev/null "$arg2"
@@ -287,6 +290,32 @@ assert "the user's ~/.claude/skills is left in place" test -d "$FAKE/.claude/ski
 # Only the Sideman directory goes; Application Support is the user's.
 assert "the enclosing Application Support directory is left in place" \
   test -d "$FAKE/Library/Application Support"
+
+# ------------------------------------- (h) claude registration fails --
+# A corrupt ~/.claude.json makes `claude mcp add` exit non-zero. That must
+# cost the user a CONFLICT.txt line, never the Remote Script or the server.
+echo
+echo "== h. a failing claude mcp add does not abort the install =="
+HOMEH="$TMP/homeh"
+PAYLOADH="$HOMEH/$REL"
+RSH="$HOMEH/Music/Ableton/User Library/Remote Scripts/AbletonLOM"
+mkdir -p "$HOMEH/Music/Ableton/User Library" "$HOMEH/.claude"
+deliver "$PAYLOADH"
+if CLAUDE_STUB_FAIL=1 run_postinstall "$HOMEH" "$PAYLOADH" >"$TMP/post_h.log" 2>&1; then
+  ok "postinstall exited 0 despite the registration failure"
+else
+  nope "postinstall exited 0 despite the registration failure"; cat "$TMP/post_h.log"
+fi
+assert "CONFLICT.txt names the failed registration" \
+  grep -q "Registration with Claude Code FAILED" "$PAYLOADH/CONFLICT.txt"
+assert "CONFLICT.txt carries the command to run by hand" \
+  grep -q "claude mcp add --scope user sideman" "$PAYLOADH/CONFLICT.txt"
+assert "remote script still linked" \
+  bash -c "[ -L '$RSH' ] && [ \"\$(readlink '$RSH')\" = '$PAYLOADH/remote_script/AbletonLOM' ]"
+assert "skill still linked" test -L "$HOMEH/.claude/skills/sideman"
+assert "server still installed" test -x "$PAYLOADH/python/bin/python3"
+assert "the failure was printed" grep -q "registration: FAILED" "$TMP/post_h.log"
+rm -rf "$HOMEH"
 
 echo
 if [ "$fails" -eq 0 ]; then echo "INSTALLER PASS"; else echo "INSTALLER FAILED ($fails)"; fi

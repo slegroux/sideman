@@ -24,6 +24,7 @@ import pathlib
 import re
 import sys
 import textwrap
+import tomllib
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -141,6 +142,7 @@ CLAIMS = {
         (r"and (\d+) reachable members on Live", "member count"),
         (r"reachable members on Live (\d+(?:\.\d+)*)", "census version"),
         (r"[Mm]easured on (?:Live )?(\d+(?:\.\d+)*)", "census version"),
+        (r"Sideman-(\d+(?:\.\d+)*)\.pkg", "package version"),
     ],
     COVERAGE: [
         (r"Live (\d+(?:\.\d+)*) exposes", "census version"),
@@ -152,7 +154,8 @@ CLAIMS = {
 
 def check_counts():
     """Assert every hand-written count against the registry and the census."""
-    census = sorted((REPO / "baseline").glob("lom_census_*.json"))
+    census = sorted((REPO / "baseline").glob("lom_census_*.json"),
+                    key=lambda p: tuple(int(x) for x in p.stem[len("lom_census_"):].split(".")))
     if not census:
         print("no census in baseline/; run scripts/census.py")
         return 1
@@ -162,6 +165,7 @@ def check_counts():
         "census version": census[-1].stem[len("lom_census_"):],
         "type count": data["type_count"],
         "member count": data["totals"]["substantive"],
+        "package version": tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["version"],
     }
 
     rc = 0
