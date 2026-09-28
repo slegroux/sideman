@@ -156,6 +156,7 @@ assert_eq "claude was called to register the server" \
 assert "private python imports mcp_server.server" pyrun "$PAYLOAD" -c "import mcp_server.server"
 assert "private python imports the sideman client" pyrun "$PAYLOAD" -c "import sideman.client"
 DEV_TOOLS="$(cd / && "$REPO/.venv/bin/python" -P -c "$TOOLS" 2>/dev/null)"
+assert "the dev venv reports a tool count at all" test -n "$DEV_TOOLS"
 assert_eq "bundled server exposes the same tools as the dev venv ($DEV_TOOLS)" \
   "$(pyrun "$PAYLOAD" -c "$TOOLS" 2>/dev/null)" "$DEV_TOOLS"
 
@@ -273,6 +274,7 @@ echo "== g. uninstall =="
 : > "$STUB_LOG"   # so the remove below is the stub call being asserted
 if env -i HOME="$FAKE" USER="${USER:-tester}" TMPDIR="$TMP" \
        PATH="$TMP/bin:/usr/bin:/bin:/usr/sbin:/sbin" CLAUDE_STUB_LOG="$STUB_LOG" \
+       SIDEMAN_PAYLOAD="$PAYLOAD" \
        /bin/bash "$PAYLOAD/uninstall.sh" >"$TMP/uninstall.log" 2>&1; then
   ok "uninstall.sh exited 0"
 else
@@ -284,6 +286,10 @@ assert "payload directory removed" bash -c "[ ! -d '$PAYLOAD' ]"
 assert "claude was asked to unregister" grep -qxF "mcp remove sideman -s user" "$STUB_LOG"
 assert "no installer receipt is left behind" \
   bash -c "! pkgutil --pkg-info com.sideman.payload >/dev/null 2>&1"
+# Receipts are not HOME-scoped; under the harness the forget step must not run
+# at all, or a developer's real receipt would go with the throwaway one.
+assert "the harness did not touch the receipt database" \
+  bash -c "! grep -q 'forgot the installer receipt' '$TMP/uninstall.log'"
 assert "the user's Remote Scripts directory is left in place" \
   test -d "$FAKE/Music/Ableton/User Library/Remote Scripts"
 assert "the user's ~/.claude/skills is left in place" test -d "$FAKE/.claude/skills"

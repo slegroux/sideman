@@ -39,8 +39,12 @@ done
 # A receipt that outlives the files makes the next install look like an upgrade
 # of something that is no longer there. Non-fatal: a per-user install may have
 # left no receipt at all.
-pkgutil --forget com.sideman.payload >/dev/null 2>&1 \
-  && say "forgot the installer receipt" || true
+# Skipped under the test harness (SIDEMAN_PAYLOAD set): receipts are not
+# HOME-scoped, and a developer with a real install must keep theirs.
+if [ -z "${SIDEMAN_PAYLOAD:-}" ]; then
+  pkgutil --forget com.sideman.payload >/dev/null 2>&1 \
+    && say "forgot the installer receipt" || true
+fi
 
 say "Live will still list AbletonLOM until you restart it - deselect it in"
 say "Settings > Link, Tempo & MIDI if it is still in a Control Surface slot."

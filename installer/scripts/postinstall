@@ -149,7 +149,7 @@ fi
 # --- 4. skill ---------------------------------------------------------------
 # Teaches the model the path grammar, which the tool docstrings cannot carry.
 SKILL_LINK=""
-if [ -d "$HOME/.claude" ]; then
+if [ -n "${CLAUDE:-}" ] || [ -d "$HOME/.claude" ]; then
   mkdir -p "$HOME/.claude/skills" || note_conflict "Could not create $HOME/.claude/skills; the skill was not linked."
   # Leftover from the ableton-lom -> sideman rename. Only a dangling symlink:
   # a live one or a real directory is someone else's.

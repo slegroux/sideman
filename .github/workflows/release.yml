@@ -38,9 +38,6 @@ jobs:
           ver="$(.venv/bin/python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
           [ "$tag" = "$ver" ] || { echo "tag v$tag != pyproject $ver" >&2; exit 1; }
 
-      - name: Build
-        run: installer/build.sh
-
       - name: Installer harness
         run: installer/test.sh
 

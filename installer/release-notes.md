@@ -2,10 +2,10 @@ An Ableton Live MCP server with complete Live Object Model coverage — 47 types
 
 **Install (macOS, any Live 12 edition).** Download the `.pkg`, right-click → **Open** (it is not notarized yet), and follow the last screen. It installs into your home folder, needs no password, and brings its own Python. The one manual step: Live → Settings → Link, Tempo & MIDI → Control Surface → **AbletonLOM**. Then restart your Claude session and ask "What's in my Set?".
 
-**What it does that other Ableton MCP servers don't**
+**What sets it apart**
 
-- Clip automation envelopes — write a filter sweep as automation, not just set a knob
-- Observers — it sees changes you make by hand in Live's GUI
+- Clip automation envelopes — write a filter sweep as automation, not just set a knob (the Max for Live object model cannot reach these)
+- Observers — it sees changes you make by hand in Live's GUI; none of the servers measured in docs/COVERAGE.md report them
 - Every Live 12 edition — a Remote Script, no Max for Live, no Suite requirement
 - Real undo steps; destructive calls guarded behind `confirm=true`
 

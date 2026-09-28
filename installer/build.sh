@@ -64,7 +64,7 @@ for arch in aarch64 x86_64; do
   expected="SHA_$arch"
   actual="$(shasum -a 256 "$tarball" | cut -d' ' -f1)"
   [ "$actual" = "${!expected}" ] || {
-    echo "checksum mismatch for $(basename "$tarball")" >&2; exit 1; }
+    echo "checksum mismatch for $tarball - delete it and re-run" >&2; exit 1; }
 done
 
 # --- 2. stage the payload tree ---------------------------------------------
