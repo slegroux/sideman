@@ -16,6 +16,7 @@
 
 <p align="center">
   <a href="https://slegroux.github.io/sideman/">Landing page</a> ·
+  <a href="https://sideman-course.sideman-course.workers.dev/">Course</a> ·
   <a href="docs/TUTORIAL.md">Tutorial</a> ·
   <a href="docs/TOOLS.md">Tools</a> ·
   <a href="docs/PROTOCOL.md">Protocol</a> ·
@@ -31,6 +32,7 @@ contract Max for Live's `live.object` uses — so any property Live has is
 reachable without shipping new code.
 
 - **[docs/TUTORIAL.md](docs/TUTORIAL.md)** — build a 4-bar house loop from an empty Set. **Start here.**
+- **[The course](https://sideman-course.sideman-course.workers.dev/)** — a melodic house track from an empty Set in ten lessons; one path for musicians (prompts only), one for programmers (executed notebooks).
 - **[docs/TOOLS.md](docs/TOOLS.md)** — all 30 tools with signatures (generated)
 - **[docs/PROTOCOL.md](docs/PROTOCOL.md)** — wire protocol, threading contract, how to add an op
 - **[skills/sideman/SKILL.md](skills/sideman/SKILL.md)** — path grammar for the model
