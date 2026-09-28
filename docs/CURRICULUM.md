@@ -6,10 +6,13 @@ touch every one of Sideman's 30 tools where a producer would actually reach
 for it. Each lesson leaves a checkable state in the Set, so you can verify
 where you are with a query rather than a feeling.
 
-Every lesson has two voices: **the ask**, what a musician types into Claude,
-and **underneath**, the calls Claude makes. Read the first if you produce,
-the second if you build on the server. [docs/TUTORIAL.md](TUTORIAL.md) is the
-short version of lessons 1–4; start there if you have ten minutes.
+The course has two parts for two readers. **Make a track with Claude** is
+for musicians: what to say, what happens in Live, how to check — no code,
+starting with three prompts you can try in ten minutes. **Under the hood** is
+for technical readers: the same lessons as executed notebooks driving the
+Python client, every cell's output frozen from a real Set. The syllabus below
+serves both; each lesson lists **the ask** and, for the second part,
+**underneath** — the calls behind it.
 
 Prerequisites: Sideman installed, Live open on a **fresh Set** (⌘N), Claude
 Code with the `sideman` skill. Nothing in a lesson touches a Set you did not
