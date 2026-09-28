@@ -1,12 +1,12 @@
 [project]
-name = "ableton-mcp-lom"
+name = "sideman"
 version = "0.1.0"
 description = "Ableton Live MCP server with complete Live Object Model coverage"
 requires-python = ">=3.10"
 dependencies = ["mcp>=1.2.0"]
 
 [project.scripts]
-ableton-mcp-lom = "mcp_server.server:main"
+sideman = "mcp_server.server:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,6 +1,6 @@
 ---
-name: ableton-lom
-description: Control Ableton Live through the ableton-lom MCP server, which exposes the whole Live Object Model generically instead of one tool per feature. Use whenever the task involves Ableton Live - tracks, clips, MIDI notes, devices, mixing, arrangement, browser, tempo, automation - or when a lom_* / clip_* / browser_* / arrangement_* tool is available. Teaches the path grammar, which is the one thing the tools cannot infer.
+name: sideman
+description: Control Ableton Live through Sideman, the Ableton Live MCP server, which exposes the whole Live Object Model generically instead of one tool per feature. Use whenever the task involves Ableton Live - tracks, clips, MIDI notes, devices, mixing, arrangement, browser, tempo, automation - or when a lom_* / clip_* / browser_* / arrangement_* tool is available. Teaches the path grammar, which is the one thing the tools cannot infer.
 ---
 
 # Ableton Live via the LOM

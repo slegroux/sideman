@@ -26,7 +26,7 @@ Use `lom_describe` to discover what exists at any path - never guess member name
 """.strip()
 
 mcp = MCPServer(
-    "ableton-lom",
+    "sideman",
     instructions=(
         "Generic access to Ableton Live's Object Model. There is no fixed tool "
         "per feature - navigate the object graph instead.\n\n"

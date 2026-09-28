@@ -1,6 +1,6 @@
-# ableton-mcp-lom
+# Sideman
 
-An Ableton Live MCP server with **complete Live Object Model coverage**.
+An **Ableton Live MCP server** with complete Live Object Model coverage.
 
 Every other Ableton MCP server hand-writes one tool per property, so coverage is
 bounded by human labour and goes stale each Live release. This one exposes the
@@ -11,7 +11,7 @@ reachable without shipping new code.
 - **[docs/TUTORIAL.md](docs/TUTORIAL.md)** — build a 4-bar house loop from an empty Set. **Start here.**
 - **[docs/TOOLS.md](docs/TOOLS.md)** — all 30 tools with signatures (generated)
 - **[docs/PROTOCOL.md](docs/PROTOCOL.md)** — wire protocol, threading contract, how to add an op
-- **[skills/ableton-lom/SKILL.md](skills/ableton-lom/SKILL.md)** — path grammar for the model
+- **[skills/sideman/SKILL.md](skills/sideman/SKILL.md)** — path grammar for the model
 
 ## Why
 
@@ -58,7 +58,7 @@ engine changes need no Live restart. Only the socket shell does.
 ## Install
 
 ```bash
-git clone <repo> && cd ableton-mcp-lom
+git clone <repo> && cd sideman
 uv venv --python 3.11 .venv
 VIRTUAL_ENV=.venv uv pip install -e .     # note: explicit, or uv may target a conda env
 ./scripts/install.sh                       # symlinks into Ableton's User Library
@@ -79,13 +79,24 @@ Register with Claude Code — **`--scope user`** matters, or the server is only
 visible from this directory:
 
 ```bash
-claude mcp add --scope user ableton-lom -- "$PWD/.venv/bin/python" -m mcp_server.server
+claude mcp add --scope user sideman -- "$PWD/.venv/bin/python" -m mcp_server.server
 ```
 
-Optionally install the skill, which teaches the model the path grammar:
+Or with Codex (the CLI or the ChatGPT desktop app), in `~/.codex/config.toml` —
+absolute repo path, and keep the entry outside any managed block:
+
+```toml
+[mcp_servers.sideman]
+command = "/absolute/path/to/repo/.venv/bin/python"
+args = ["-m", "mcp_server.server"]
+type = "stdio"
+```
+
+Optionally install the skill, which teaches the model the path grammar — the
+one thing per-tool docstrings cannot carry:
 
 ```bash
-ln -s "$PWD/skills/ableton-lom" ~/.claude/skills/ableton-lom
+./scripts/install.sh --skills   # symlinks into ~/.claude/skills and ~/.codex/skills
 ```
 
 MCP servers load at client startup — **restart your session** before the tools

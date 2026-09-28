@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>ableton-mcp-lom</title>
+<title>Sideman</title>
 <meta name="description" content="An MCP server that gives Claude the whole of Ableton Live 12 — every track, clip, device and parameter — so you can build, tweak and undo by talking.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -454,12 +454,12 @@
 
 <header class="top">
   <div class="wrap">
-    <a class="wordmark" href="#"><span class="dot" aria-hidden="true"></span>ableton-mcp-lom</a>
+    <a class="wordmark" href="#"><span class="dot" aria-hidden="true"></span>Sideman</a>
     <nav class="links" aria-label="Sections">
       <a href="#feel">What it feels like</a>
       <a href="#why">Why this one</a>
       <a href="#install">Install</a>
-      <a href="https://github.com/slegroux/ableton-mcp-lom">GitHub</a>
+      <a href="https://github.com/slegroux/sideman">GitHub</a>
     </nav>
   </div>
 </header>
@@ -571,7 +571,7 @@
           <ul>
             <li>Observers were already watching: tempo 123.5 → 122.5 → 123.5 …, and a fader on track 1 moved to 0.72</li>
             <li>Those exact events are in the tutorial — a human dragging Live's tempo while it was being written</li>
-            <li>No other Ableton MCP server sees this. The rest only know what they changed themselves</li>
+            <li>Nothing else in the field sees this.</li>
           </ul>
         </div>
       </article>
@@ -597,7 +597,7 @@
       <div class="reason">
         <h3>It sees what you do</h3>
         <div>
-          <p>Nudge a fader, rename a track, drop a clip — in Live, with your hands — and Claude knows. This is the only Ableton MCP server with observers. Everyone else is blind to anything they didn't do themselves.</p>
+          <p>Nudge a fader, rename a track, drop a clip — in Live, with your hands — and Claude knows. Nothing else in the field reports changes you make by hand — the rest only know what they changed themselves.</p>
         </div>
       </div>
       <div class="reason">
@@ -653,7 +653,7 @@
         <div class="num">1</div>
         <div>
           <h3>Get the code and set up Python</h3>
-          <pre>git clone https://github.com/slegroux/ableton-mcp-lom &amp;&amp; cd ableton-mcp-lom
+          <pre>git clone https://github.com/slegroux/sideman &amp;&amp; cd sideman
 uv venv --python 3.11 .venv
 VIRTUAL_ENV=.venv uv pip install -e .   <span class="c"># explicit, or uv may target a conda env</span></pre>
         </div>
@@ -678,8 +678,8 @@ VIRTUAL_ENV=.venv uv pip install -e .   <span class="c"># explicit, or uv may ta
         <div>
           <h3>Introduce it to Claude</h3>
           <p><code class="inline">--scope user</code> matters — without it the server only exists inside this folder. The second line is optional and teaches Claude how Live's paths work; it's worth it.</p>
-          <pre>claude mcp add --scope user ableton-lom -- "$PWD/.venv/bin/python" -m mcp_server.server
-ln -s "$PWD/skills/ableton-lom" ~/.claude/skills/ableton-lom</pre>
+          <pre>claude mcp add --scope user sideman -- "$PWD/.venv/bin/python" -m mcp_server.server
+ln -s "$PWD/skills/sideman" ~/.claude/skills/sideman</pre>
         </div>
       </div>
       <div class="step">
@@ -700,20 +700,20 @@ ln -s "$PWD/skills/ableton-lom" ~/.claude/skills/ableton-lom</pre>
       <h2>For the curious and the technical</h2>
     </div>
     <div class="docs">
-      <a class="doc" href="https://github.com/slegroux/ableton-mcp-lom/blob/main/docs/TUTORIAL.md">
+      <a class="doc" href="https://github.com/slegroux/sideman/blob/main/docs/TUTORIAL.md">
         <span class="t">docs/TUTORIAL.md</span>
         <span class="s">Build a 4-bar house loop from an empty Set. Start here.</span>
       </a>
-      <a class="doc" href="https://github.com/slegroux/ableton-mcp-lom/blob/main/docs/TOOLS.md">
+      <a class="doc" href="https://github.com/slegroux/sideman/blob/main/docs/TOOLS.md">
         <span class="t">docs/TOOLS.md</span>
         <span class="s">All 30 tools with signatures, generated from the code so it can't drift.</span>
       </a>
-      <a class="doc" href="https://github.com/slegroux/ableton-mcp-lom/blob/main/docs/PROTOCOL.md">
+      <a class="doc" href="https://github.com/slegroux/sideman/blob/main/docs/PROTOCOL.md">
         <span class="t">docs/PROTOCOL.md</span>
         <span class="s">The wire protocol, the threading contract, and how to add an op.</span>
       </a>
-      <a class="doc" href="https://github.com/slegroux/ableton-mcp-lom/blob/main/skills/ableton-lom/SKILL.md">
-        <span class="t">skills/ableton-lom</span>
+      <a class="doc" href="https://github.com/slegroux/sideman/blob/main/skills/sideman/SKILL.md">
+        <span class="t">skills/sideman</span>
         <span class="s">What the model reads: the path grammar and the safety rules.</span>
       </a>
     </div>
@@ -724,7 +724,7 @@ ln -s "$PWD/skills/ableton-lom" ~/.claude/skills/ableton-lom</pre>
 
 <footer>
   <div class="wrap">
-    <span>ableton-mcp-lom · Not affiliated with or endorsed by Ableton AG. Ableton and Live are trademarks of Ableton AG.</span>
+    <span>Sideman · Not affiliated with or endorsed by Ableton AG. Ableton and Live are trademarks of Ableton AG.</span>
     <span>Numbers on this page are measured on Live 12.2.7 and checked by the test suite.</span>
   </div>
 </footer>
