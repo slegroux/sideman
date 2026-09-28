@@ -60,8 +60,8 @@ div.sourceCode { background: $panel; }
 .sidebar-navigation .sidebar-item .active { color: $accent; font-weight: 500; }
 .sidebar .sidebar-part { font-family: $font-family-monospace; font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: $ink-3; }
 #quarto-sidebar { border-right: 1px solid $rule; }
-// The wordmark has dark text; swap in the dark variant. Relative to the
-// compiled stylesheet in site_libs/bootstrap/.
-.sidebar-logo { max-width: 200px; content: url("../../img/logo-dark.svg"); }
+// The wordmark has dark text; swap in the dark variant. Quarto resolves the
+// url against the project directory and copies the file into the output.
+.sidebar-logo { max-width: 200px; content: url("img/logo-dark.svg"); }
 .nav-page .nav-page-text { font-family: $font-family-monospace; font-size: 0.85rem; }
 table { font-variant-numeric: tabular-nums; }
