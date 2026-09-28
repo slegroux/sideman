@@ -34,6 +34,7 @@ OUT = REPO / "docs" / "TOOLS.md"
 README = REPO / "README.md"
 SITE = REPO / "site" / "index.html"
 COVERAGE = REPO / "docs" / "COVERAGE.md"
+CURRICULUM = REPO / "docs" / "CURRICULUM.md"
 
 # Grouping is editorial - the registry has no notion of it. Any tool not
 # matched falls into "Other", which is the signal to update this list.
@@ -148,6 +149,10 @@ CLAIMS = {
         (r"Live (\d+(?:\.\d+)*) exposes", "census version"),
         (r"exposes \*\*(\d+) reachable types", "type count"),
         (r"reachable types / (\d+) substantive members", "member count"),
+    ],
+    CURRICULUM: [
+        (r"every one of Sideman's (\d+) tools", "tool count"),
+        (r"the (\d+) types the census measured", "type count"),
     ],
 }
 

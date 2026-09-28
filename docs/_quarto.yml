@@ -1,0 +1,33 @@
+project:
+  type: book
+  output-dir: ../site/learn
+  # Only the book's own inputs; the other markdown files in docs/ are the
+  # repository's reference docs and are not chapters.
+  render:
+    - index.md
+    - tutorial.ipynb
+    - "lessons/*.ipynb"
+
+book:
+  title: "Sideman"
+  subtitle: "A melodic house track, start to finish"
+  chapters:
+    - index.md
+    - tutorial.ipynb
+  page-navigation: true
+  repo-url: https://github.com/slegroux/sideman
+  sidebar:
+    logo: ../assets/logo-light.svg
+
+format:
+  html:
+    theme: [cosmo]
+    toc: true
+    code-fold: false
+    code-tools: false
+
+# Never execute on render: the cells talk to a running Ableton Live. Outputs
+# are frozen by the author when a lesson is written, and re-executing the
+# notebook against a fresh Set is how a lesson is verified.
+execute:
+  enabled: false
