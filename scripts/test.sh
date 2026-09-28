@@ -55,6 +55,9 @@ if "$REPO/scripts/lomcli.py" ping >/dev/null 2>&1; then
   echo "== e2e: MCP layer -> Live =="
   "$PY" "$REPO/tests/test_e2e.py" "$@" || rc=1
   echo
+  echo "== client: sideman.client -> Live =="
+  "$PY" "$REPO/tests/test_client.py" "$@" || rc=1
+  echo
   echo "== integration: engine against live Ableton =="
   "$PY" "$REPO/tests/smoke.py" "$@" || rc=1
 else
