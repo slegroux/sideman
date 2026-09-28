@@ -5,39 +5,30 @@ project:
   # repository's reference docs and are not chapters.
   render:
     - index.md
-    - "make/*.md"
+    - make/00-start-here.md
     - tutorial.ipynb
-    - "lessons/*.ipynb"
 
 book:
   title: "Sideman"
   subtitle: "A melodic house track, start to finish"
   chapters:
     - index.md
-    - part: "Make a track with Claude"
-      chapters:
-        - make/00-start-here.md
-        - make/01-orientation.md
-        - make/02-drums.md
-        - make/03-bass.md
-        - make/04-harmony.md
-        - make/05-melody-and-arp.md
-        - make/06-sound-design.md
-        - make/07-movement.md
-        - make/08-arrangement.md
-        - make/09-audio.md
-        - make/10-mixing.md
-    - part: "Under the hood"
-      chapters:
-        - tutorial.ipynb
+    - make/00-start-here.md
+    - tutorial.ipynb
   page-navigation: true
   repo-url: https://github.com/slegroux/sideman
   sidebar:
-    logo: ../assets/logo-light.svg
+    logo: img/logo-light.svg
+    tools:
+      - icon: house
+        href: ../
+        text: Sideman
 
 format:
   html:
-    theme: [cosmo]
+    theme:
+      light: [cosmo, sideman.scss]
+      dark: [cosmo, sideman-dark.scss]
     toc: true
     code-fold: false
     code-tools: false
