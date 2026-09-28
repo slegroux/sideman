@@ -7,7 +7,7 @@ name: Pages
 on:
   push:
     branches: [main]
-    paths: ["site/**", ".github/workflows/pages.yml"]
+    paths: ["site/**", "docs/**", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 permissions:
@@ -27,6 +27,12 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      # The lessons are a Quarto book rendered into site/learn/ from frozen
+      # notebook outputs; nothing executes on the runner.
+      - uses: quarto-dev/quarto-actions/setup@v2
+        with:
+          version: 1.6.39
+      - run: docs/render.sh
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
