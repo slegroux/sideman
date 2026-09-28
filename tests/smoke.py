@@ -11,7 +11,6 @@ anything but tempo and its own scratch state.
   ./tests/smoke.py            run
   ./tests/smoke.py -v         show each assertion
 """
-import json
 import pathlib
 import sys
 
@@ -212,8 +211,9 @@ def test_canonical_path():
 
 def test_transaction_groups():
     """Groupable ops must collapse into ONE undo step."""
-    g = lambda p, a: (request("get", {"path": p, "property": a})
-                      .get("result", {}) or {}).get("value")
+    def g(p, a):
+        return (request("get", {"path": p, "property": a})
+                .get("result", {}) or {}).get("value")
     with Scratch() as a, Scratch() as b:
         # Two scratch tracks, never the user's. This test used to rename
         # live_set tracks 0 and 1 and rely on undo to put them back; a run

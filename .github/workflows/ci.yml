@@ -1,0 +1,24 @@
+# The Live-free seam only. A Remote Script cannot be exercised without its
+# host, so CI runs exactly what scripts/test.sh runs on a machine without
+# Ableton: the docs check, the coverage harness (which skips itself when the
+# competitor checkouts are absent), and the stubbed-socket MCP unit suite.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -e .
+      - name: Lint
+        run: pipx run ruff check .
+      - name: Test suite (Live-dependent suites self-skip)
+        run: ./scripts/test.sh
