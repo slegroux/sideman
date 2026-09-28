@@ -227,3 +227,10 @@ for the protocol and how to add an op.
 Deliberately **no curated per-feature tool layer**. The plan called for ~30 sugar
 verbs; at 30 generic tools that would mean 60, and tool overload degrades
 selection. The skill buys the same ergonomics at zero tool cost.
+
+## License
+
+GPL-3.0-or-later — see [LICENSE](LICENSE). Use it, fork it, ship it; a
+distributed modification stays open. The Remote Script imports Ableton's own
+`_MxDCore` modules at runtime inside Live, as every Remote Script does; nothing
+of Ableton's is in this tree.
