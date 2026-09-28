@@ -30,6 +30,7 @@ format:
     toc: true
     code-fold: false
     code-tools: false
+    css: lom-links.css
 
 # Never execute on render: the cells talk to a running Ableton Live. Outputs
 # are frozen by the author when a lesson is written, and re-executing the

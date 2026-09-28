@@ -1,0 +1,13 @@
+/* Links added by scripts/lom_links.py around member names. They should read as
+   code that happens to be clickable: the token keeps its own colour and gains
+   an underline only under the pointer. */
+a.lom {
+  color: inherit;
+  text-decoration: none;
+}
+
+a.lom:hover,
+a.lom:focus {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
