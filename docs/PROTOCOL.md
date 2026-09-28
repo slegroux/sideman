@@ -63,6 +63,10 @@ Handled without reaching the engine, so they work even when it fails to load:
 | `ping` | health; reports whether handlers loaded and any load error |
 | `reload` | re-`importlib.reload` the engine — **no Live restart needed** |
 
+`ping` is answered on the socket thread; `reload` is marshalled onto the main
+thread like an engine op, because tearing observers down removes listeners —
+a Live API call.
+
 `reload` tears observers down first. `importlib.reload` re-executes the module,
 so anything registered in module globals would be orphaned while Live still held
 the callback. State that must survive reload lives on the ControlSurface

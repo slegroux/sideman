@@ -139,34 +139,43 @@ class AbletonLOM(ControlSurface):
             return {"id": req_id, "ok": False,
                     "error": {"type": "BadRequest", "message": str(e)}}
 
-        # --- ops served by the shell itself, no main thread needed -----------
+        # --- ops served by the shell itself, engine not required -------------
         if op == "ping":
             return {"id": req_id, "ok": True,
                     "result": {"pong": True, "port": PORT,
                                "handlers": self._handlers is not None,
                                "handler_error": self._handler_error}}
         if op == "reload":
-            ok = self._load_handlers()
-            return {"id": req_id, "ok": ok,
-                    "result": {"reloaded": ok},
-                    "error": None if ok else {"type": "HandlerLoadError",
-                                              "message": self._handler_error}}
+            # Marshalled like every other op: _load_handlers tears down live
+            # observers first, and removing a listener IS a Live API call.
+            # Serving it on the socket thread violated the contract above.
+            return self._run_on_main_thread(req_id, self._reload_response)
 
         if self._handlers is None:
             return {"id": req_id, "ok": False,
                     "error": {"type": "HandlerLoadError",
                               "message": self._handler_error or "handlers not loaded"}}
 
-        return self._run_on_main_thread(req_id, op, params)
+        def dispatch():
+            return {"ok": True,
+                    "result": self._handlers.dispatch(self, op, params)}
 
-    def _run_on_main_thread(self, req_id, op, params):
-        """Marshal onto Live's main thread and wait for the result."""
+        return self._run_on_main_thread(req_id, dispatch)
+
+    def _reload_response(self):
+        ok = self._load_handlers()
+        return {"ok": ok,
+                "result": {"reloaded": ok},
+                "error": None if ok else {"type": "HandlerLoadError",
+                                          "message": self._handler_error}}
+
+    def _run_on_main_thread(self, req_id, fn):
+        """Run `fn` on Live's main thread and wait for its response dict."""
         result_q = queue.Queue(1)
 
         def task():
             try:
-                res = self._handlers.dispatch(self, op, params)
-                result_q.put({"ok": True, "result": res})
+                result_q.put(fn())
             except Exception as e:
                 result_q.put({"ok": False,
                               "error": {"type": type(e).__name__,
