@@ -1,0 +1,65 @@
+# Build the installer on a macOS runner and attach it to a DRAFT release.
+#
+# A package built on a developer Mac carries com.apple.provenance on every
+# file, which pkgbuild encodes as ~5,000 zero-byte AppleDouble entries; a
+# runner has no provenance lineage and packs a clean manifest. The release is
+# created as a draft so a human can run the package in a clean account before
+# anyone can download it.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # build.sh reads the mcp version from the repo's own environment so the
+      # package ships exactly what the suite was run against.
+      - name: Install the project
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --quiet -e .
+
+      - name: Tag must match pyproject version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(.venv/bin/python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          [ "$tag" = "$ver" ] || { echo "tag v$tag != pyproject $ver" >&2; exit 1; }
+
+      - name: Build
+        run: installer/build.sh
+
+      - name: Installer harness
+        run: installer/test.sh
+
+      - name: Manifest carries no AppleDouble entries
+        run: |
+          d="$(mktemp -d)"; (cd "$d" && xar -xf "$GITHUB_WORKSPACE"/dist/Sideman-*.pkg)
+          n="$(lsbom -s "$(find "$d" -name Bom | head -1)" | grep -c '/\._' || true)"
+          echo "AppleDouble entries: $n"; [ "$n" = "0" ]
+
+      - name: Draft release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/Sideman-*.pkg \
+            --draft --title "Sideman $GITHUB_REF_NAME" \
+            --notes-file installer/release-notes.md --generate-notes
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Sideman-pkg
+          path: dist/Sideman-*.pkg
