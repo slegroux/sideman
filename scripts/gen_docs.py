@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Generate docs/TOOLS.md from the live MCP tool registry, and check the
-README's counts against it.
+"""Generate docs/TOOLS.md from the live MCP tool registry and docs/CLIENT.md
+from sideman/client.py, and check the README's counts against them.
 
 Hand-written API tables drift. This project has been bitten by exactly that
 three times already - a write guard listing functions Live had removed, a census
 filename pinned to a version, a README claiming two test suites when there were
-three. So the tool reference is generated from the registry itself and checked
-in CI-style with --check.
+three. So the tool reference is generated from the registry itself, the client
+reference from the class itself, and both are checked in CI-style with --check.
 
 The README and the landing page stay hand-written prose, so --check asserts
 their numbers instead.
 
-  ./scripts/gen_docs.py           write docs/TOOLS.md
-  ./scripts/gen_docs.py --check   exit 1 if TOOLS.md is stale or a count in
+  ./scripts/gen_docs.py           write docs/TOOLS.md and docs/CLIENT.md
+  ./scripts/gen_docs.py --check   exit 1 if either is stale, or if a count in
                                   README.md, site/index.html or docs/COVERAGE.md
                                   disagrees with
                                   the registry/census
@@ -29,8 +29,10 @@ import tomllib
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 import mcp_server.server as S  # noqa: E402
+import sideman.client as C  # noqa: E402
 
 OUT = REPO / "docs" / "TOOLS.md"
+CLIENT_OUT = REPO / "docs" / "CLIENT.md"
 README = REPO / "README.md"
 SITE = REPO / "site" / "index.html"
 COVERAGE = REPO / "docs" / "COVERAGE.md"
@@ -54,8 +56,12 @@ GROUPS = [
 ]
 
 
-def signature(name):
-    fn = getattr(S, name, None)
+STARS = {inspect.Parameter.VAR_POSITIONAL: "*",
+         inspect.Parameter.VAR_KEYWORD: "**"}
+
+
+def render_signature(fn, name, drop_self=False):
+    """`name(annotated, params = defaults)`, or "" if fn has no signature."""
     if fn is None:
         return ""
     try:
@@ -64,14 +70,34 @@ def signature(name):
         return ""
     parts = []
     for p in sig.parameters.values():
-        ann = getattr(p.annotation, "__name__", None) or (
-            str(p.annotation).replace("typing.", "")
-            if p.annotation is not inspect.Parameter.empty else "")
-        s = p.name + (": " + ann if ann else "")
+        if drop_self and not parts and p.name == "self":
+            continue
+        if p.annotation is inspect.Parameter.empty:
+            ann = ""
+        else:
+            ann = (getattr(p.annotation, "__name__", None)
+                   or str(p.annotation).replace("typing.", ""))
+        s = STARS.get(p.kind, "") + p.name + (": " + ann if ann else "")
         if p.default is not inspect.Parameter.empty:
             s += " = %r" % (p.default,)
         parts.append(s)
     return "%s(%s)" % (name, ", ".join(parts))
+
+
+def signature(name):
+    return render_signature(getattr(S, name, None), name)
+
+
+def as_prose(raw):
+    """A docstring as markdown prose.
+
+    Bodies carry Python's own indentation, which markdown would render as a
+    code block. Dedent everything after the summary line so prose reads as
+    prose; relative indentation inside the body survives, which is what keeps
+    a wrapped example lined up.
+    """
+    head, _, rest = (raw or "").strip().partition("\n")
+    return head + ("\n" + textwrap.dedent(rest) if rest.strip() else "")
 
 
 def render():
@@ -113,14 +139,103 @@ def render():
                 L.append(sig)
                 L.append("```")
                 L.append("")
-            # Docstring bodies carry 4-space Python indentation, which
-            # markdown would render as a code block. Dedent everything after
-            # the summary line so prose reads as prose.
-            raw = tools[n].description or ""
-            head, _, rest = raw.strip().partition("\n")
-            desc = head + ("\n" + textwrap.dedent(rest) if rest.strip() else "")
+            desc = as_prose(tools[n].description)
             L.append(desc if desc.strip() else "_No description._")
             L.append("")
+    return "\n".join(L).rstrip() + "\n"
+
+
+# The Python client's methods, grouped as TOOLS.md groups the tools they
+# correspond to, so the two references can be read side by side. `request` and
+# `reload` have no tool counterpart; anything unlisted falls into "Other",
+# which is the signal to update this list.
+CLIENT_GROUPS = [
+    ("Connection", ["request", "reload"]),
+    ("Discovery", ["search", "describe", "canonical_path", "count", "types",
+                   "ping"]),
+    ("Read / write", ["get", "set", "call",
+                      "get_batch", "set_batch", "transaction"]),
+    ("MIDI notes", ["notes_get", "notes_add", "notes_modify", "notes_remove"]),
+    ("Browser", ["browser_list", "browser_load"]),
+    ("Automation", ["envelope_get", "envelope_insert_step", "envelope_clear"]),
+    ("Arrangement", ["arrangement_list", "arrangement_create_clip",
+                     "arrangement_duplicate_clip"]),
+    ("Observers", ["observe", "unobserve", "observers", "unobserve_all",
+                   "poll_events"]),
+]
+
+
+def render_client():
+    """docs/CLIENT.md, read off the class rather than written beside it.
+
+    Nothing is invented: a method with no docstring gets its signature and
+    silence, which is a visible gap in the page rather than a plausible
+    sentence in it.
+    """
+    methods = {n: f for n, f in inspect.getmembers(C.Live, inspect.isfunction)
+               if not n.startswith("_")}
+    grouped = {n for _, names in CLIENT_GROUPS for n in names}
+    other = sorted(set(methods) - grouped)
+
+    L = ["<!-- GENERATED by scripts/gen_docs.py - do not edit by hand. -->",
+         "# Python client", "",
+         "`sideman.Live` is the Python way in: %d methods over the same engine,"
+         % len(methods),
+         "paths and vocabulary as the MCP tools. Generated from",
+         "`sideman/client.py` so it cannot drift; regenerate with",
+         "`./scripts/gen_docs.py` after changing the client.", "",
+         "The [tool reference](TOOLS.md) says what each op does inside Live,",
+         "and [conventions](CONVENTIONS.md) covers the rules they share.", ""]
+
+    L.append("## Index")
+    L.append("")
+    sections = CLIENT_GROUPS + ([("Other", other)] if other else [])
+    for title, names in sections:
+        present = [n for n in names if n in methods]
+        if present:
+            L.append("- **%s** — %s" % (title, ", ".join("`%s`" % n
+                                                         for n in present)))
+    L.append("")
+
+    L.append("## `Live`")
+    L.append("")
+    L.append("```python")
+    L.append(render_signature(C.Live.__init__, "Live", drop_self=True))
+    L.append("```")
+    L.append("")
+    L.append(as_prose(inspect.getdoc(C.Live)) or "_No description._")
+    L.append("")
+
+    for title, names in sections:
+        present = [n for n in names if n in methods]
+        if not present:
+            continue
+        L.append("## %s" % title)
+        L.append("")
+        for n in present:
+            L.append("### `%s`" % n)
+            L.append("")
+            sig = render_signature(methods[n], n, drop_self=True)
+            if sig:
+                L.append("```python")
+                L.append(sig)
+                L.append("```")
+                L.append("")
+            desc = as_prose(inspect.getdoc(methods[n]))
+            if desc.strip():
+                L.append(desc)
+                L.append("")
+
+    L.append("## Errors")
+    L.append("")
+    L.append("### `LiveError`")
+    L.append("")
+    L.append("```python")
+    L.append(render_signature(C.LiveError.__init__, "LiveError",
+                              drop_self=True))
+    L.append("```")
+    L.append("")
+    L.append(as_prose(inspect.getdoc(C.LiveError)) or "_No description._")
     return "\n".join(L).rstrip() + "\n"
 
 
@@ -202,21 +317,25 @@ def check_counts():
 
 
 def main():
-    text = render()
-    check = "--check" in sys.argv
-    if check:
-        if not OUT.exists():
-            print("docs/TOOLS.md missing; run scripts/gen_docs.py")
-            return 1
-        if OUT.read_text() != text:
-            print("docs/TOOLS.md is STALE; run scripts/gen_docs.py")
-            return 1
-        print("docs/TOOLS.md up to date")
-        return check_counts()
-    OUT.parent.mkdir(exist_ok=True)
-    OUT.write_text(text)
-    print("wrote %s (%d lines)" % (OUT.relative_to(REPO),
-                                   text.count("\n") + 1))
+    generated = [(OUT, render()), (CLIENT_OUT, render_client())]
+    if "--check" in sys.argv:
+        rc = 0
+        for path, text in generated:
+            name = path.relative_to(REPO)
+            if not path.exists():
+                print("%s missing; run scripts/gen_docs.py" % name)
+                rc = 1
+            elif path.read_text() != text:
+                print("%s is STALE; run scripts/gen_docs.py" % name)
+                rc = 1
+            else:
+                print("%s up to date" % name)
+        return rc or check_counts()
+    for path, text in generated:
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(text)
+        print("wrote %s (%d lines)" % (path.relative_to(REPO),
+                                       text.count("\n") + 1))
     return 0
 
 

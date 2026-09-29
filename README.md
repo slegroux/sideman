@@ -35,6 +35,8 @@ reachable without shipping new code.
 - **[The course](https://sideman-course.sideman-course.workers.dev/)** — a melodic house track from an empty Set in ten lessons; one path for musicians (prompts only), one for programmers (executed notebooks).
 - **[docs/TOOLS.md](docs/TOOLS.md)** — all 30 tools with signatures (generated)
 - **[docs/PROTOCOL.md](docs/PROTOCOL.md)** — wire protocol, threading contract, how to add an op
+- **[docs/CLIENT.md](docs/CLIENT.md)** — the `sideman.Live` Python client, method by method (generated)
+- **[docs/CONVENTIONS.md](docs/CONVENTIONS.md)** — paths, `__path__`, batches vs transactions, observers, and the gotchas measured against Live
 - **[skills/sideman/SKILL.md](skills/sideman/SKILL.md)** — path grammar for the model
 
 ## Why
@@ -232,7 +234,7 @@ longer exists.
 ./scripts/lomcli.py describe "live_set"        # explore
 ./scripts/lomcli.py reload                     # after editing handlers.py
 ./scripts/census.py                            # refresh the LOM baseline
-./scripts/gen_docs.py                          # regenerate docs/TOOLS.md
+./scripts/gen_docs.py                          # regenerate docs/TOOLS.md and docs/CLIENT.md
 ./scripts/coverage_harness.py                  # verify the superset claim
 ```
 
