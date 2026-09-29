@@ -20,7 +20,8 @@
   <a href="docs/TUTORIAL.md">Tutorial</a> ·
   <a href="docs/TOOLS.md">Tools</a> ·
   <a href="docs/PROTOCOL.md">Protocol</a> ·
-  <a href="docs/COVERAGE.md">Coverage</a>
+  <a href="docs/COVERAGE.md">Coverage</a> ·
+  <a href="https://slegroux.github.io/sisyphe/">Sisyphe</a>
 </p>
 
 An **Ableton Live MCP server** with complete Live Object Model coverage.
@@ -243,6 +244,13 @@ for the protocol and how to add an op.
 Deliberately **no curated per-feature tool layer**. The plan called for ~30 sugar
 verbs; at 30 generic tools that would mean 60, and tool overload degrades
 selection. The skill buys the same ergonomics at zero tool cost.
+
+## Who makes this
+
+Sideman is the first product of [Sisyphe](https://slegroux.github.io/sisyphe/),
+a small company building AI that acts in the world: agents that perceive a live
+environment, reason about it, and act inside it. If you want the same done
+against your own tool, [work with us](https://slegroux.github.io/sisyphe/work.html).
 
 ## License
 
