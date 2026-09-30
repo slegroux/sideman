@@ -130,3 +130,10 @@ the missing ones include the entire extended-notes API and every listener.
 **Undo grouping is partial.** `begin_undo_step`/`end_undo_step` groups track
 name, colour and time signature, but automatable parameters (tempo, mixer
 volume, mute, device parameters) always get their own step regardless.
+
+**Some things Live's API simply cannot do.** The 12.2.7 census has no
+`move_track`, so tracks cannot be reordered after creation — create them in their
+final order (`duplicate_track` exists but does not reposition). There is no save,
+export/render, freeze, consolidate or flatten either; the only `export` in the
+object model is `LooperDevice.export_to_clip_slot`. A scripted session has to end
+with a human saving and bouncing, so say so rather than assuming the set persists.
