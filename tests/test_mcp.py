@@ -10,6 +10,7 @@ and never loads this module.
   ./tests/test_mcp.py        run
   ./tests/test_mcp.py -v     list each assertion
 """
+import asyncio
 import json
 import pathlib
 import socket
@@ -266,6 +267,42 @@ def _error_translation_body(real):
     try:
         check("success unwraps result", S._request("ping") == {"v": 1})
     finally:
+        S.socket.create_connection = real
+
+
+def test_errors_reach_the_client():
+    """Through the real MCP dispatch, not _request alone. mcp 2.x replaces the
+    message of any exception that is not a ToolError with a bare "Error
+    executing tool <name>", so a diagnosis that _request gets right can still
+    never reach the model."""
+    real = S.socket.create_connection
+    stub, S._request = S._request, REAL_REQUEST
+
+    def refuse(*_a, **_k):
+        raise ConnectionRefusedError()
+
+    cases = [
+        ("refused connection", refuse, "Control Surface"),
+        ("reset mid-reply",
+         lambda *a, **k: _Sock(exc=ConnectionResetError()), "connection"),
+        ("malformed reply",
+         lambda *a, **k: _Sock(payload=b"not json\n"), "malformed"),
+        ("engine error",
+         lambda *a, **k: _Sock(payload=json.dumps(
+             {"ok": False, "error": {"type": "KeyError", "message": "no such path"}}
+         ).encode() + b"\n"), "no such path"),
+    ]
+    try:
+        for name, conn, needle in cases:
+            S.socket.create_connection = conn
+            try:
+                asyncio.run(S.mcp.call_tool("lom_ping", {}))
+                check("%s raises" % name, False, "no raise")
+            except Exception as e:
+                check("%s message reaches the client" % name,
+                      needle in str(e), "%s: %s" % (type(e).__name__, e))
+    finally:
+        S._request = stub
         S.socket.create_connection = real
 
 

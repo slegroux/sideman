@@ -11,6 +11,7 @@ import socket
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 HOST, PORT = "127.0.0.1", 9878
 TIMEOUT = 25.0
@@ -38,8 +39,10 @@ mcp = MCPServer(
 )
 
 
-class LiveError(RuntimeError):
-    pass
+class LiveError(ToolError):
+    """Every failure a tool reports. It must be a ToolError: the MCP SDK treats
+    any other exception as a crash and sends the client only "Error executing
+    tool <name>", dropping the diagnosis."""
 
 
 def _request(op: str, params: dict[str, Any] | None = None) -> Any:
@@ -51,6 +54,8 @@ def _request(op: str, params: dict[str, Any] | None = None) -> Any:
             "with 'AbletonLOM' selected as a Control Surface in "
             "Preferences > Link, Tempo & MIDI."
         )
+    except OSError as e:
+        raise LiveError(f"cannot connect to Live on {HOST}:{PORT}: {e!r}")
     try:
         s.sendall(json.dumps({"id": "mcp", "op": op,
                               "params": params or {}}).encode() + b"\n")
@@ -62,10 +67,16 @@ def _request(op: str, params: dict[str, Any] | None = None) -> Any:
             buf += chunk
     except socket.timeout:
         raise LiveError(f"Live did not respond within {TIMEOUT}s")
+    except OSError as e:
+        raise LiveError(f"connection to Live lost mid-reply: {e!r}")
     finally:
         s.close()
 
-    resp = json.loads(buf.split(b"\n", 1)[0].decode())
+    line = buf.split(b"\n", 1)[0]
+    try:
+        resp = json.loads(line.decode())
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise LiveError(f"malformed reply from Live ({e}): {line[:200]!r}")
     if not resp.get("ok"):
         err = resp.get("error") or {}
         raise LiveError(f"{err.get('type', 'Error')}: {err.get('message', resp)}")
