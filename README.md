@@ -78,7 +78,7 @@ Privacy & Security** and click **Open Anyway**. **Developers:** the steps below.
 ```bash
 git clone <repo> && cd sideman
 uv venv --python 3.11 .venv
-VIRTUAL_ENV=.venv uv pip install -e .     # note: explicit, or uv may target a conda env
+VIRTUAL_ENV=.venv uv pip install -e . -c constraints.txt   # explicit VIRTUAL_ENV, or uv may target a conda env
 ./scripts/install.sh                       # symlinks into Ableton's User Library
 ```
 

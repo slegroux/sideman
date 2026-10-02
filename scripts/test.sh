@@ -27,6 +27,34 @@ echo "== docs: generated reference up to date =="
 #   2  competitor checkouts absent (a fresh clone) - a skip, not a failure
 #   3  no census - the setup itself is broken
 echo
+echo "== env: installed versions match constraints.txt =="
+# The suites prove only the versions they run on. A venv that drifted from
+# the lock tests one mcp while the package ships another.
+"$PY" - "$REPO/constraints.txt" <<'PYEOF' || rc=1
+import importlib.metadata as m, re, sys
+try:
+    from packaging.markers import Marker
+except ImportError:  # not in the lock; pip vendors it
+    from pip._vendor.packaging.markers import Marker
+bad = []
+for line in open(sys.argv[1]):
+    hit = re.match(r"([A-Za-z0-9_.-]+)==([^\s;]+)\s*(?:;(.*))?", line)
+    if not hit or (hit[3] and not Marker(hit[3].strip()).evaluate()):
+        continue  # a pin for another Python or platform
+    try:
+        have = m.version(hit[1])
+    except m.PackageNotFoundError:
+        continue  # not installed here
+    if have != hit[2]:
+        bad.append("%s %s (locked %s)" % (hit[1], have, hit[2]))
+if bad:
+    print("   FAILED - " + ", ".join(bad))
+    print("   sync: VIRTUAL_ENV=.venv uv pip install -e . -c constraints.txt")
+    sys.exit(1)
+print("   in sync")
+PYEOF
+
+echo
 echo "== coverage: superset claim still holds =="
 HARNESS="$REPO/scripts/coverage_harness.py"
 # Checked before running because CPython also exits 2 when it cannot open the

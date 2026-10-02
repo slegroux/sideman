@@ -92,10 +92,14 @@ assert "payload contains the mcp dependency wheels" \
 assert "our source trees carry no __pycache__" \
   bash -c "! grep -qE '^\./(mcp_server|remote_script|skills)/.*__pycache__' '$TMP/bom.txt'"
 
-# The bundled mcp is pinned from the dev venv, not hardcoded.
+# The bundled mcp is the locked one, and the dev venv matches it (build.sh
+# refuses to build otherwise).
 DEV_MCP="$("$REPO/.venv/bin/python" -c 'import importlib.metadata as m; print(m.version("mcp"))' 2>/dev/null)"
 assert_eq "bundled mcp wheel is the dev venv's version" \
   "$(ls "$STAGE/wheels" | grep -c "^mcp-$DEV_MCP-")" "1"
+LOCK_MCP="$(sed -n 's/^mcp==\([^ ;]*\).*/\1/p' "$REPO/constraints.txt")"
+assert_eq "bundled mcp wheel is the locked version" \
+  "$(ls "$STAGE/wheels" | grep -c "^mcp-$LOCK_MCP-")" "1"
 
 rm -rf "$TMP/x"   # the expanded pkg is another copy of the payload
 

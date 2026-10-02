@@ -100,7 +100,19 @@ DEV_PY="$REPO/.venv/bin/python"
 MCP_VER="$("$DEV_PY" -c 'import importlib.metadata as m; print(m.version("mcp"))')" || {
   echo "cannot read the mcp version from $DEV_PY" >&2; exit 1; }
 [ -n "$MCP_VER" ] || { echo "empty mcp version from $DEV_PY" >&2; exit 1; }
-echo "pinning mcp==$MCP_VER (from the dev venv)"
+# constraints.txt is the lock, compiled for the oldest target we ship (Intel,
+# macOS 10.12) with wheels only, so every pin has a wheel on both
+# architectures and both get the same versions. Regenerate it with the command
+# in its header. A dev venv that drifted from it would ship
+# versions the suites never ran against, which is how v0.1.0 nearly went
+# out with an mcp nobody had tested against Live.
+LOCK_FILE="$REPO/constraints.txt"
+LOCK_MCP="$(sed -n 's/^mcp==\([^ ;]*\).*/\1/p' "$LOCK_FILE")"
+[ "$MCP_VER" = "$LOCK_MCP" ] || {
+  echo "dev venv has mcp $MCP_VER but constraints.txt locks $LOCK_MCP." >&2
+  echo "Sync it: VIRTUAL_ENV=.venv uv pip install -e . -c constraints.txt" >&2
+  exit 1; }
+echo "pinning mcp==$MCP_VER (locked in constraints.txt)"
 # A throwaway copy of the same interpreter does the downloading and building.
 # Using a staged one leaves ~9 MB of its own .pyc in the tree we ship, so the
 # two runtimes in the payload would stop being the pristine upstream builds -
@@ -112,14 +124,16 @@ if [ ! -x "$BUILDER_DIR/python/bin/python3" ]; then
       -C "$BUILDER_DIR"
 fi
 BUILDER="$BUILDER_DIR/python/bin/python3"
-WHEELS="$CACHE/wheels-mcp-$MCP_VER"   # third-party wheels only, cached across builds
+# Keyed to the whole lock, so a bump to any transitive pin re-resolves.
+LOCK_KEY="$(shasum -a 256 "$LOCK_FILE" | cut -c1-12)"
+WHEELS="$CACHE/wheels-$LOCK_KEY"      # third-party wheels only, cached across builds
 if [ ! -d "$WHEELS" ]; then
   mkdir -p "$WHEELS"
   for arch in aarch64 x86_64; do
     plat="PLAT_$arch"
     "$BUILDER" -m pip download --quiet --dest "$WHEELS" \
       --only-binary=:all: --python-version 3.11 --platform "${!plat}" \
-      "mcp==$MCP_VER"
+      -c "$LOCK_FILE" "mcp==$MCP_VER"
   done
 fi
 rsync -a "$WHEELS/" "$STAGE/wheels/"

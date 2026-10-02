@@ -24,12 +24,12 @@ jobs:
         with:
           python-version: "3.11"
 
-      # build.sh reads the mcp version from the repo's own environment so the
-      # package ships exactly what the suite was run against.
+      # constraints.txt is the lock: the package ships exactly the versions the
+      # suites were run against, not whatever is newest on the day of the tag.
       - name: Install the project
         run: |
           python -m venv .venv
-          .venv/bin/pip install --quiet -e .
+          .venv/bin/pip install --quiet -e . -c constraints.txt
 
       - name: Tag must match pyproject version
         if: startsWith(github.ref, 'refs/tags/')
