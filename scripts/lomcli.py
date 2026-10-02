@@ -35,8 +35,10 @@ def _warn_if_engine_differs():
         return  # a non-standard User Library location: nothing to compare
     if live != REPO_ENGINE and not filecmp.cmp(live, REPO_ENGINE, shallow=False):
         print("WARNING: Live loads %s,\nwhich differs from this checkout's "
-              "handlers.py, so reload runs the old engine. Copy it first:\n"
-              "  cp '%s' '%s'" % (live, REPO_ENGINE, live), file=sys.stderr)
+              "handlers.py, so reload runs the old engine. Point Live at the "
+              "checkout (a copy would be reverted by the next install):\n"
+              "  %s/scripts/install.sh" % (live, REPO_ENGINE.parents[2]),
+              file=sys.stderr)
 
 
 def request(op, params=None, timeout=20.0):

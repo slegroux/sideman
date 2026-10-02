@@ -300,8 +300,8 @@ def test_observer_poll_window():
             page = ok(request("observe_poll", {"since": cursor, "limit": 2}),
                       "poll page")
             seen += [e["seq"] for e in page["events"]]
-            cursor = page["next_since"]
-            if not page["truncated"]:
+            cursor = page.get("next_since")
+            if cursor is None or not page.get("truncated"):
                 break
         check("paging by next_since sees every event once", seen == want,
               "%r vs %r" % (seen, want))
@@ -321,15 +321,57 @@ def test_observer_poll_window():
               and [e["seq"] for e in ahead["events"]][-len(want):] == want,
               {k: ahead.get(k) for k in ("reset", "count", "next_since")})
 
-        ok(request("observe_poll", {"since": base, "limit": 2, "consume": True}),
-           "consume page")
+        # Consume a page from the middle: events at or below `since` belong
+        # to whoever has not read them yet and must survive.
+        ok(request("observe_poll", {"since": want[1], "limit": 2,
+                                    "consume": True}), "consume page")
         rest = ok(request("observe_poll", {"since": base}), "poll after consume")
-        check("consume keeps what the limit held back",
-              [e["seq"] for e in rest["events"]] == want[2:],
-              [e["seq"] for e in rest["events"]])
+        left = [e["seq"] for e in rest["events"]]
+        check("consume removes exactly the returned events",
+              left == want[:2] + want[4:], left)
+        check("a cursor that missed consumed events reports gap",
+              rest.get("gap") is True, rest.get("gap"))
+        clean = ok(request("observe_poll", {"since": want[3]}), "poll past hole")
+        check("no gap once past the hole", clean.get("gap") is False,
+              clean.get("gap"))
     finally:
         request("set", {"path": "live_set", "property": "tempo", "value": before})
         ok(request("observe_clear"), "observe_clear final")
+
+
+def test_call_reports_created_path():
+    n = ok(request("count", {"path": "live_set", "child": "tracks"}), "count")
+    r = ok(request("call", {"path": "live_set", "function": "create_midi_track",
+                            "args": [-1]}), "create_midi_track")
+    if not r:
+        return
+    path = "live_set tracks %d" % n["count"]
+    try:
+        check("create_midi_track returns result_path",
+              r.get("result_path") == path, r.get("result_path"))
+        request("set", {"path": path, "property": "name", "value": SCRATCH_NAME})
+        c = ok(request("call", {"path": path + " clip_slots 0",
+                                "function": "create_clip", "args": [4.0]}),
+               "create_clip")
+        check("create_clip returns the clip path",
+              c and c.get("result_path") == path + " clip_slots 0 clip",
+              c and c.get("result_path"))
+        a = ok(request("arrangement_create_clip",
+                       {"path": path, "start_time": 0.0, "length": 4.0}),
+               "arrangement_create_clip")
+        check("arrangement clip returns clip_path",
+              a and a.get("clip_path") == path + " arrangement_clips 0",
+              a and a.get("clip_path"))
+        bad = request("notes_add", {"path": path + " clip_slots 0 clip",
+                                    "notes": [{"pitch": 60}]})
+        msg = (bad.get("error") or {}).get("message", "")
+        check("note missing fields names them",
+              "start_time" in msg and "duration" in msg and "note 0" in msg, msg)
+    finally:
+        name = ok(request("get", {"path": path, "property": "name"}), "name")
+        if name and name.get("value") == SCRATCH_NAME:
+            request("call", {"path": "live_set", "function": "delete_track",
+                             "args": [n["count"]], "confirm": True})
 
 
 # ---------------------------------------------------------------- scratch

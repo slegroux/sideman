@@ -574,8 +574,13 @@ def op_call(surface, params):
             "%r is destructive; re-send with confirm=true to proceed" % fn)
     with _undo(surface):
         result = target(*args)
-    return {"path": path, "function": fn,
-            "result": _jsonify_windowed(result, params)}
+    out = {"path": path, "function": fn,
+           "result": _jsonify_windowed(result, params)}
+    if _is_lom_object(result):
+        # create_midi_track and friends hand back the object but not where it
+        # landed, so the caller had to work out the index from a count.
+        out["result_path"] = _locate(surface, path, result)
+    return out
 
 
 def op_count(surface, params):
@@ -732,7 +737,11 @@ def op_notes_add(surface, params):
     from Live.Clip import MidiNoteSpecification
     clip = _require_midi_clip(surface, params["path"])
     specs = []
-    for n in params["notes"]:
+    for i, n in enumerate(params["notes"]):
+        missing = [k for k in ("pitch", "start_time", "duration") if k not in n]
+        if missing:
+            raise KeyError("note %d is missing %s (required: pitch, start_time, "
+                           "duration)" % (i, ", ".join(missing)))
         specs.append(MidiNoteSpecification(
             pitch=int(n["pitch"]),
             start_time=float(n["start_time"]),
@@ -939,7 +948,8 @@ def op_arrangement_create_clip(surface, params):
         else:
             raise ValueError("kind must be 'midi' or 'audio'")
     return {"path": params["path"], "kind": kind, "start_time": start,
-            "clip": jsonify(clip)}
+            "clip": jsonify(clip),
+            "clip_path": _locate(surface, params["path"], clip)}
 
 
 def op_arrangement_duplicate_clip(surface, params):
@@ -1159,13 +1169,28 @@ def op_observe_poll(surface, params):
     out = events[:limit]
     next_since = out[-1]["seq"] if out else (
         int(since) if since is not None else reg["seq"])
+    # Every seq is one event, so a page starting after since+1, or with a
+    # hole in it, means events this cursor never saw: dropped by the ring
+    # buffer or consumed by another client first.
+    oldest = reg["events"][0]["seq"] if reg["events"] else reg["seq"] + 1
+    gap = False
+    if since is not None:
+        seqs = [int(since)] + [e["seq"] for e in out]
+        last = next_since if out else reg["seq"]
+        gap = (any(b != a + 1 for a, b in zip(seqs, seqs[1:]))
+               or (not out and last > int(since)))
     if params.get("consume") and out:
-        # Only what was returned (and anything older). Emptying the buffer
-        # would discard the events a limit held back.
-        reg["events"] = [e for e in reg["events"] if e["seq"] > next_since]
+        # Exactly what was returned. Emptying the buffer would discard what a
+        # limit held back, and cutting below `since` would delete another
+        # client's unread events.
+        lo = int(since) if since is not None else -1
+        reg["events"] = [e for e in reg["events"]
+                         if not lo < e["seq"] <= next_since]
     return {"count": len(out),
             "truncated": truncated,
             "reset": reset,
+            "gap": gap,
+            "oldest_seq": oldest,
             "next_since": next_since,
             "latest_seq": reg["seq"],
             "dropped_events": reg["dropped"],
@@ -1210,6 +1235,17 @@ SINGULAR = (
     "crossfade_assign", "crossfader", "cue_volume", "song_tempo",
     "left_split_stereo", "right_split_stereo",
 )
+
+
+def _locate(surface, root, obj):
+    """Path of obj if it sits directly under root (a new track under live_set,
+    a clip under its slot), else None. One level only: this runs on Live's
+    main thread after every call that returns an object."""
+    target = _identity(obj)
+    for p, _o, ident in _walk(surface, root, max_depth=1, max_nodes=2000):
+        if ident == target and p != root:
+            return p
+    return None
 
 
 def _walk(surface, root, max_depth=6, max_nodes=4000, stats=None):

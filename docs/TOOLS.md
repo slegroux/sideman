@@ -168,6 +168,10 @@ which Live knows even while `parameters` exposes one entry:
 
     lom_call(dev, "get_parameter_names", limit=50)   -> 50 of 2362 names
 
+When the call returns a Live object that sits directly under `path` (a new
+track, a new clip), `result_path` gives its path, e.g.
+create_midi_track -> "live_set tracks 5".
+
 Destructive functions refuse to run unless confirm=True - anything named
 delete_*, remove_* or clear_*, plus crop. Ask the user before setting it.
 
@@ -344,6 +348,8 @@ path       - track path, e.g. "live_set tracks 0"
 start_time - position in beats
 kind       - "midi" (uses length) or "audio" (requires file_path)
 
+Returns `clip_path`, e.g. "live_set tracks 0 arrangement_clips 2".
+
 ### `arrangement_duplicate_clip`
 
 ```python
@@ -414,8 +420,9 @@ The buffer is shared with every earlier session, so start from the
 `next_since` to get only new events, oldest first. When `truncated` is
 true, more are waiting: poll again with since=next_since. `reset` true
 means Live restarted the sequence: the page starts over from the oldest
-buffered event. `limit` must be at least 1.
-`consume=true` removes the returned events from the buffer.
+buffered event. `gap` true means events after `since` are gone (dropped
+or consumed by another client) and the page skips them. `limit` must be
+at least 1. `consume=true` removes exactly the returned events.
 
 Check `dropped_events`: the buffer holds 2000 events and drops oldest
 first, so a nonzero value means changes were lost between polls.

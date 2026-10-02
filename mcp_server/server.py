@@ -54,6 +54,9 @@ def _request(op: str, params: dict[str, Any] | None = None) -> Any:
             "with 'AbletonLOM' selected as a Control Surface in "
             "Preferences > Link, Tempo & MIDI."
         )
+    except socket.timeout:
+        raise LiveError(f"Live did not accept a connection on {HOST}:{PORT} "
+                        f"within {TIMEOUT}s; its UI may be blocked by a dialog")
     except OSError as e:
         raise LiveError(f"cannot connect to Live on {HOST}:{PORT}: {e!r}")
     try:
@@ -77,8 +80,12 @@ def _request(op: str, params: dict[str, Any] | None = None) -> Any:
         resp = json.loads(line.decode())
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise LiveError(f"malformed reply from Live ({e}): {line[:200]!r}")
+    if not isinstance(resp, dict):
+        raise LiveError(f"malformed reply from Live (not an object): {line[:200]!r}")
     if not resp.get("ok"):
         err = resp.get("error") or {}
+        if not isinstance(err, dict):
+            raise LiveError(f"Error: {err}")
         raise LiveError(f"{err.get('type', 'Error')}: {err.get('message', resp)}")
     return resp.get("result")
 
@@ -175,6 +182,10 @@ def lom_call(path: str, function: str, args: list[Any] | None = None,
     which Live knows even while `parameters` exposes one entry:
 
         lom_call(dev, "get_parameter_names", limit=50)   -> 50 of 2362 names
+
+    When the call returns a Live object that sits directly under `path` (a new
+    track, a new clip), `result_path` gives its path, e.g.
+    create_midi_track -> "live_set tracks 5".
 
     Destructive functions refuse to run unless confirm=True - anything named
     delete_*, remove_* or clear_*, plus crop. Ask the user before setting it.
@@ -353,6 +364,8 @@ def arrangement_create_clip(path: str, start_time: float,
     path       - track path, e.g. "live_set tracks 0"
     start_time - position in beats
     kind       - "midi" (uses length) or "audio" (requires file_path)
+
+    Returns `clip_path`, e.g. "live_set tracks 0 arrangement_clips 2".
     """
     p: dict[str, Any] = {"path": path, "start_time": start_time,
                          "length": length, "kind": kind}
@@ -548,8 +561,9 @@ def lom_poll_events(since: int | None = None, limit: int = 500,
     `next_since` to get only new events, oldest first. When `truncated` is
     true, more are waiting: poll again with since=next_since. `reset` true
     means Live restarted the sequence: the page starts over from the oldest
-    buffered event. `limit` must be at least 1.
-    `consume=true` removes the returned events from the buffer.
+    buffered event. `gap` true means events after `since` are gone (dropped
+    or consumed by another client) and the page skips them. `limit` must be
+    at least 1. `consume=true` removes exactly the returned events.
 
     Check `dropped_events`: the buffer holds 2000 events and drops oldest
     first, so a nonzero value means changes were lost between polls.

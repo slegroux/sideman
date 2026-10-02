@@ -288,6 +288,14 @@ def test_errors_reach_the_client():
          lambda *a, **k: _Sock(exc=ConnectionResetError()), "connection"),
         ("malformed reply",
          lambda *a, **k: _Sock(payload=b"not json\n"), "malformed"),
+        ("reply not an object",
+         lambda *a, **k: _Sock(payload=b"[]\n"), "not an object"),
+        ("error not an object",
+         lambda *a, **k: _Sock(payload=b'{"ok": false, "error": "boom"}\n'),
+         "boom"),
+        ("connect timeout",
+         lambda *a, **k: (_ for _ in ()).throw(socket.timeout()),
+         "did not accept a connection"),
         ("engine error",
          lambda *a, **k: _Sock(payload=json.dumps(
              {"ok": False, "error": {"type": "KeyError", "message": "no such path"}}

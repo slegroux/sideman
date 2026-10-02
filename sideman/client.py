@@ -370,15 +370,16 @@ class Live:
 
     def poll_events(self, **params):
         """Collect the change events observe() recorded, oldest first. Returns
-        {count, truncated, reset, next_since, latest_seq, dropped_events,
-        active_listeners, events}.
+        {count, truncated, reset, gap, oldest_seq, next_since, latest_seq,
+        dropped_events, active_listeners, events}.
 
         The buffer is shared, so start from the latest_seq observe() returned,
         then pass since=<the previous next_since> for only what is new. When
         truncated, more are waiting: poll again with since=next_since.
-        reset means Live restarted the sequence, so the page starts over.
-        Optional limit (500 by default) and consume, which removes the
-        returned events from the buffer.
+        reset means Live restarted the sequence, so the page starts over;
+        gap means events after since are gone and the page skips them.
+        Optional limit (500 by default) and consume, which removes exactly
+        the returned events from the buffer.
         It holds 2000 events and drops the oldest first, so a nonzero
         `dropped_events` means changes were lost between polls."""
         return self.request("observe_poll", params)
