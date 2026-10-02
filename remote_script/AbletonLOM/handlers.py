@@ -1028,7 +1028,8 @@ def op_observe_add(surface, params):
     reg = _registry(surface)
     k = _key(path, prop)
     if k in reg["listeners"]:
-        return {"path": path, "property": prop, "already_observing": True}
+        return {"path": path, "property": prop, "already_observing": True,
+                "latest_seq": reg["seq"]}
 
     obj = resolve(surface, path)
     adder = getattr(obj, "add_%s_listener" % prop, None)
@@ -1136,15 +1137,26 @@ def op_observe_poll(surface, params):
     """
     reg = _registry(surface)
     since = params.get("since")
-    events = reg["events"]
+    # seq restarts at 0 when the registry is rebuilt (Live restarted, the
+    # surface re-created). A cursor from before that is ahead of every new
+    # event and would filter them all out until seq caught up, so start over
+    # from the oldest buffered event and say so.
+    reset = since is not None and int(since) > reg["seq"]
+    if reset:
+        since = None
+    events = list(reg["events"])
     if since is not None:
         events = [e for e in events if e["seq"] > int(since)]
     # Oldest first. Returning the newest `limit` instead would skip the
     # middle for good: the caller advances its cursor past events it never
     # saw, and dropped_events does not count them.
     limit = int(params.get("limit", 500))
-    truncated = bool(limit) and len(events) > limit
-    out = events[:limit] if truncated else events
+    if limit < 1:
+        # A negative limit used to slice off the newest event on every page
+        # while reporting truncated, so "poll again" never terminated.
+        raise ValueError("limit must be at least 1, got %d" % limit)
+    truncated = len(events) > limit
+    out = events[:limit]
     next_since = out[-1]["seq"] if out else (
         int(since) if since is not None else reg["seq"])
     if params.get("consume") and out:
@@ -1153,6 +1165,7 @@ def op_observe_poll(surface, params):
         reg["events"] = [e for e in reg["events"] if e["seq"] > next_since]
     return {"count": len(out),
             "truncated": truncated,
+            "reset": reset,
             "next_since": next_since,
             "latest_seq": reg["seq"],
             "dropped_events": reg["dropped"],

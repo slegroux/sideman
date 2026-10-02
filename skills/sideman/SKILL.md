@@ -103,7 +103,9 @@ pitch is a MIDI number (60 = C3); times are in **beats**.
 
 **Arrangement** — `arrangement_create_clip("live_set tracks 0", start_time=0, length=8)`
 
-**Watch for user edits** — `lom_observe` then `lom_poll_events(since=last_seq)`.
+**Watch for user edits** — `lom_observe` (keep the `latest_seq` it returns),
+then `lom_poll_events(since=cursor)`, setting `cursor = next_since` each time.
+If `truncated` is true, poll again at once: more events are waiting.
 This catches changes made in the GUI, not just your own writes.
 
 **Many reads** — `lom_get_batch([...])` is one round trip instead of N.

@@ -411,12 +411,13 @@ poll_events(**params)
 ```
 
 Collect the change events observe() recorded, oldest first. Returns
-{count, truncated, next_since, latest_seq, dropped_events,
+{count, truncated, reset, next_since, latest_seq, dropped_events,
 active_listeners, events}.
 
 The buffer is shared, so start from the latest_seq observe() returned,
 then pass since=<the previous next_since> for only what is new. When
 truncated, more are waiting: poll again with since=next_since.
+reset means Live restarted the sequence, so the page starts over.
 Optional limit (500 by default) and consume, which removes the
 returned events from the buffer.
 It holds 2000 events and drops the oldest first, so a nonzero

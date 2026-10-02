@@ -276,9 +276,13 @@ def test_observer_roundtrip_via_mcp():
     check("poll reports a cursor", "latest_seq" in ev)
     jcall(S.lom_set, "live_set", "tempo", before)
 
-    seq = ev.get("latest_seq", 0)
-    later = jcall(S.lom_poll_events, since=seq + 100)
+    # Taken after the tempo restore above, which fires an event of its own.
+    seq = jcall(S.lom_poll_events).get("latest_seq", 0)
+    later = jcall(S.lom_poll_events, since=seq)
     check("since cursor filters", later.get("count") == 0, later.get("count"))
+    ahead = jcall(S.lom_poll_events, since=seq + 100)
+    check("cursor ahead of seq reports reset", ahead.get("reset") is True,
+          ahead.get("reset"))
 
     lst = jcall(S.lom_observers)
     check("observers listed", lst.get("active_listeners") == 1, lst)

@@ -268,7 +268,9 @@ Those first events are a human dragging the tempo, captured while this
 tutorial was being written. MCP has no server-to-client push, so this is a
 pull with a ring buffer behind it: Live accumulates events, you collect them.
 
-- Pass `since=<previous latest_seq>` to get only new events.
+- Pass `since=<previous next_since>` to get only new events, oldest first.
+  Start from the `latest_seq` that `lom_observe` returned. If `truncated` is
+  true, poll again: more are waiting.
 - Watch `dropped_events`. The buffer holds 2000 and drops oldest first, so
   nonzero means you polled too slowly and lost changes.
 - Not every property is observable. If there is no `add_<property>_listener`,

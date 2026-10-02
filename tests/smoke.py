@@ -306,6 +306,21 @@ def test_observer_poll_window():
         check("paging by next_since sees every event once", seen == want,
               "%r vs %r" % (seen, want))
 
+        again = ok(request("observe_add", {"path": "live_set",
+                                           "property": "tempo"}), "observe_add dup")
+        check("already_observing still returns latest_seq",
+              again and again.get("latest_seq") == whole["latest_seq"], again)
+
+        neg = request("observe_poll", {"since": base, "limit": -1})
+        check("negative limit rejected", not neg.get("ok"), neg)
+
+        ahead = ok(request("observe_poll", {"since": whole["latest_seq"] + 10**6}),
+                   "poll ahead of seq")
+        check("cursor ahead of seq reports reset and starts over",
+              ahead.get("reset") is True
+              and [e["seq"] for e in ahead["events"]][-len(want):] == want,
+              {k: ahead.get(k) for k in ("reset", "count", "next_since")})
+
         ok(request("observe_poll", {"since": base, "limit": 2, "consume": True}),
            "consume page")
         rest = ok(request("observe_poll", {"since": base}), "poll after consume")

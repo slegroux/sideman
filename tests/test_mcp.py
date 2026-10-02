@@ -18,6 +18,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import mcp_server.server as S  # noqa: E402
+from mcp.server.mcpserver.exceptions import ToolError  # noqa: E402
 
 VERBOSE = "-v" in sys.argv
 FAILURES = []
@@ -273,7 +274,7 @@ def _error_translation_body(real):
 def test_errors_reach_the_client():
     """Through the real MCP dispatch, not _request alone. mcp 2.x replaces the
     message of any exception that is not a ToolError with a bare "Error
-    executing tool <name>", so a diagnosis that _request gets right can still
+    executing tool <name>" (since after 2.0.0), so a diagnosis that _request gets right can still
     never reach the model."""
     real = S.socket.create_connection
     stub, S._request = S._request, REAL_REQUEST
@@ -301,6 +302,12 @@ def test_errors_reach_the_client():
             except Exception as e:
                 check("%s message reaches the client" % name,
                       needle in str(e), "%s: %s" % (type(e).__name__, e))
+                # The message check alone passes on mcp 2.0.0 even when
+                # LiveError is a plain RuntimeError: only later releases
+                # mask. The cause's type is what decides it on every 2.x.
+                check("%s raised as a ToolError" % name,
+                      isinstance(e.__cause__, ToolError),
+                      type(e.__cause__).__name__)
     finally:
         S._request = stub
         S.socket.create_connection = real

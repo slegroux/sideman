@@ -412,7 +412,9 @@ Collect change events recorded by lom_observe.
 The buffer is shared with every earlier session, so start from the
 `latest_seq` that lom_observe returned. Then pass `since` = the previous
 `next_since` to get only new events, oldest first. When `truncated` is
-true, more are waiting: poll again with since=next_since.
+true, more are waiting: poll again with since=next_since. `reset` true
+means Live restarted the sequence: the page starts over from the oldest
+buffered event. `limit` must be at least 1.
 `consume=true` removes the returned events from the buffer.
 
 Check `dropped_events`: the buffer holds 2000 events and drops oldest

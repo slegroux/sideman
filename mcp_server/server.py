@@ -40,8 +40,8 @@ mcp = MCPServer(
 
 
 class LiveError(ToolError):
-    """Every failure a tool reports. It must be a ToolError: the MCP SDK treats
-    any other exception as a crash and sends the client only "Error executing
+    """Every failure a tool reports. It must be a ToolError: the MCP SDK (after
+    2.0.0) treats any other exception as a crash and sends the client only "Error executing
     tool <name>", dropping the diagnosis."""
 
 
@@ -546,7 +546,9 @@ def lom_poll_events(since: int | None = None, limit: int = 500,
     The buffer is shared with every earlier session, so start from the
     `latest_seq` that lom_observe returned. Then pass `since` = the previous
     `next_since` to get only new events, oldest first. When `truncated` is
-    true, more are waiting: poll again with since=next_since.
+    true, more are waiting: poll again with since=next_since. `reset` true
+    means Live restarted the sequence: the page starts over from the oldest
+    buffered event. `limit` must be at least 1.
     `consume=true` removes the returned events from the buffer.
 
     Check `dropped_events`: the buffer holds 2000 events and drops oldest

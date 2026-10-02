@@ -111,9 +111,11 @@ conversation rather than a script. Collect with `lom_poll_events`.
 The registry lives inside Live and is **shared across clients** — an MCP
 session, a shell and a notebook all see one buffer. So:
 
-- Take a baseline `latest_seq` before observing anything, and poll with
-  `since=`. It is cheaper than re-reading, and you never claim someone else's
-  events as your own.
+- Start from the `latest_seq` that `lom_observe` returns, and poll with
+  `since=`, advancing it to each reply's `next_since`. It is cheaper than
+  re-reading, and you never claim someone else's events as your own. Use
+  `next_since`, not `latest_seq`: when a page is `truncated`, `latest_seq`
+  jumps past the events still waiting.
 - Unobserve what you created. `lom_unobserve_all` is a blunt instrument: it
   removes observers you did not create. Its `leaked` count is listeners still
   firing inside Live and should always be 0.
