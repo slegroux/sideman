@@ -268,6 +268,55 @@ def test_observers():
           cleared and cleared.get("leaked"))
 
 
+def test_observer_poll_window():
+    """Paging with since/limit must see every event exactly once, and consume
+    must not discard what a limit held back."""
+    ok(request("observe_clear"), "observe_clear")
+    added = ok(request("observe_add", {"path": "live_set", "property": "tempo"}),
+               "observe_add")
+    base = added and added.get("latest_seq")
+    check("observe_add returns latest_seq", isinstance(base, int), added)
+    if not isinstance(base, int):
+        return
+    before = ok(request("get", {"path": "live_set", "property": "tempo"}),
+                "tempo")["value"]
+    try:
+        for i in range(5):
+            request("set", {"path": "live_set", "property": "tempo",
+                            "value": round(before + 1.0 + i, 3)})
+        whole = ok(request("observe_poll", {"since": base}), "poll all")
+        want = [e["seq"] for e in whole["events"]]
+        check("five changes recorded", len(want) >= 5, len(want))
+
+        first = ok(request("observe_poll", {"since": base, "limit": 2}),
+                   "poll page 1")
+        check("page is the OLDEST events",
+              [e["seq"] for e in first["events"]] == want[:2],
+              [e["seq"] for e in first["events"]])
+        check("page reports truncated", first.get("truncated") is True)
+
+        seen, cursor = [], base
+        for _ in range(len(want) + 2):
+            page = ok(request("observe_poll", {"since": cursor, "limit": 2}),
+                      "poll page")
+            seen += [e["seq"] for e in page["events"]]
+            cursor = page["next_since"]
+            if not page["truncated"]:
+                break
+        check("paging by next_since sees every event once", seen == want,
+              "%r vs %r" % (seen, want))
+
+        ok(request("observe_poll", {"since": base, "limit": 2, "consume": True}),
+           "consume page")
+        rest = ok(request("observe_poll", {"since": base}), "poll after consume")
+        check("consume keeps what the limit held back",
+              [e["seq"] for e in rest["events"]] == want[2:],
+              [e["seq"] for e in rest["events"]])
+    finally:
+        request("set", {"path": "live_set", "property": "tempo", "value": before})
+        ok(request("observe_clear"), "observe_clear final")
+
+
 # ---------------------------------------------------------------- scratch
 # The remaining ops need a MIDI clip. A user's Set may be all-audio, so the
 # suite makes its own track and removes it. It never touches existing tracks.

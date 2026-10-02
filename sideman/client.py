@@ -369,12 +369,15 @@ class Live:
         return self.request("observe_clear")
 
     def poll_events(self, **params):
-        """Collect the change events observe() recorded. Returns {count,
-        latest_seq, dropped_events, active_listeners, events}.
+        """Collect the change events observe() recorded, oldest first. Returns
+        {count, truncated, next_since, latest_seq, dropped_events,
+        active_listeners, events}.
 
-        Pass since=<a previous latest_seq> for only what is new; take a
-        baseline before observing anything, since the buffer is shared.
-        Optional limit (500 by default) and consume, which empties the buffer.
+        The buffer is shared, so start from the latest_seq observe() returned,
+        then pass since=<the previous next_since> for only what is new. When
+        truncated, more are waiting: poll again with since=next_since.
+        Optional limit (500 by default) and consume, which removes the
+        returned events from the buffer.
         It holds 2000 events and drops the oldest first, so a nonzero
         `dropped_events` means changes were lost between polls."""
         return self.request("observe_poll", params)

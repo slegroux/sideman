@@ -1064,8 +1064,12 @@ def op_observe_add(surface, params):
     adder(_callback)
     reg["listeners"][k] = {"cb": _callback, "obj": obj, "remover": remover,
                            "path": path, "property": prop}
+    # latest_seq lets a caller poll with since=<this> and skip whatever the
+    # shared buffer already held: earlier sessions' events, keyed by paths
+    # that may now name a different object.
     return {"path": path, "property": prop, "observing": True,
-            "active_listeners": len(reg["listeners"])}
+            "active_listeners": len(reg["listeners"]),
+            "latest_seq": reg["seq"]}
 
 
 def _remove_one(entry):
@@ -1135,11 +1139,21 @@ def op_observe_poll(surface, params):
     events = reg["events"]
     if since is not None:
         events = [e for e in events if e["seq"] > int(since)]
+    # Oldest first. Returning the newest `limit` instead would skip the
+    # middle for good: the caller advances its cursor past events it never
+    # saw, and dropped_events does not count them.
     limit = int(params.get("limit", 500))
-    out = events[-limit:] if limit and len(events) > limit else events
-    if params.get("consume"):
-        reg["events"] = []
+    truncated = bool(limit) and len(events) > limit
+    out = events[:limit] if truncated else events
+    next_since = out[-1]["seq"] if out else (
+        int(since) if since is not None else reg["seq"])
+    if params.get("consume") and out:
+        # Only what was returned (and anything older). Emptying the buffer
+        # would discard the events a limit held back.
+        reg["events"] = [e for e in reg["events"] if e["seq"] > next_since]
     return {"count": len(out),
+            "truncated": truncated,
+            "next_since": next_since,
             "latest_seq": reg["seq"],
             "dropped_events": reg["dropped"],
             "active_listeners": len(reg["listeners"]),

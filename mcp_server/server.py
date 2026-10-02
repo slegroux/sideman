@@ -543,8 +543,11 @@ def lom_poll_events(since: int | None = None, limit: int = 500,
                     consume: bool = False) -> str:
     """Collect change events recorded by lom_observe.
 
-    Pass `since` = the previous `latest_seq` to get only new events; that is
-    cheaper and avoids re-reading. `consume=true` empties the buffer instead.
+    The buffer is shared with every earlier session, so start from the
+    `latest_seq` that lom_observe returned. Then pass `since` = the previous
+    `next_since` to get only new events, oldest first. When `truncated` is
+    true, more are waiting: poll again with since=next_since.
+    `consume=true` removes the returned events from the buffer.
 
     Check `dropped_events`: the buffer holds 2000 events and drops oldest
     first, so a nonzero value means changes were lost between polls.

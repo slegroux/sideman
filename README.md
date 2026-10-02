@@ -232,7 +232,7 @@ longer exists.
 ```bash
 ./scripts/lomcli.py ping                       # health
 ./scripts/lomcli.py describe "live_set"        # explore
-./scripts/lomcli.py reload                     # after editing handlers.py
+./scripts/lomcli.py reload                     # after editing handlers.py (warns if Live loads an installed copy)
 ./scripts/census.py                            # refresh the LOM baseline
 ./scripts/gen_docs.py                          # regenerate docs/TOOLS.md and docs/CLIENT.md
 ./scripts/coverage_harness.py                  # verify the superset claim

@@ -13,11 +13,30 @@ MCP layer in the way.
   ./lomcli.py count "live_set" tracks
   ./lomcli.py types
 """
+import filecmp
 import json
+import pathlib
 import socket
 import sys
 
 HOST, PORT = "127.0.0.1", 9878
+REPO_ENGINE = (pathlib.Path(__file__).resolve().parent.parent
+               / "remote_script" / "AbletonLOM" / "handlers.py")
+# Where Live loads the script from. The installer points this at its own copy,
+# not at this checkout, so `reload` alone re-runs the installed engine.
+LIVE_ENGINE = (pathlib.Path.home() / "Music" / "Ableton" / "User Library"
+               / "Remote Scripts" / "AbletonLOM" / "handlers.py")
+
+
+def _warn_if_engine_differs():
+    try:
+        live = LIVE_ENGINE.resolve(strict=True)
+    except OSError:
+        return  # a non-standard User Library location: nothing to compare
+    if live != REPO_ENGINE and not filecmp.cmp(live, REPO_ENGINE, shallow=False):
+        print("WARNING: Live loads %s,\nwhich differs from this checkout's "
+              "handlers.py, so reload runs the old engine. Copy it first:\n"
+              "  cp '%s' '%s'" % (live, REPO_ENGINE, live), file=sys.stderr)
 
 
 def request(op, params=None, timeout=20.0):
@@ -69,6 +88,8 @@ def main(argv):
     else:
         params = json.loads(rest[0]) if rest else {}
 
+    if op == "reload":
+        _warn_if_engine_differs()
     try:
         resp = request(op, params)
     except ConnectionRefusedError:
