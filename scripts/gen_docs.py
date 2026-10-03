@@ -30,6 +30,8 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 import mcp_server.server as S  # noqa: E402
 import sideman.client as C  # noqa: E402
+sys.path.insert(0, str(REPO / "scripts"))
+from census import newest_census  # noqa: E402
 
 OUT = REPO / "docs" / "TOOLS.md"
 CLIENT_OUT = REPO / "docs" / "CLIENT.md"
@@ -269,15 +271,14 @@ CLAIMS = {
 
 def check_counts():
     """Assert every hand-written count against the registry and the census."""
-    census = sorted((REPO / "baseline").glob("lom_census_*.json"),
-                    key=lambda p: tuple(int(x) for x in p.stem[len("lom_census_"):].split(".")))
-    if not census:
+    census = newest_census()
+    if census is None:
         print("no census in baseline/; run scripts/census.py")
         return 1
-    data = json.loads(census[-1].read_text())
+    data = json.loads(census.read_text())
     actual = {
         "tool count": len(asyncio.run(S.mcp.list_tools())),
-        "census version": census[-1].stem[len("lom_census_"):],
+        "census version": census.stem[len("lom_census_"):],
         "type count": data["type_count"],
         "member count": data["totals"]["substantive"],
         "package version": tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["version"],

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The Python client (sideman.client) against a live Ableton.
 
-The third seam: test_mcp stubs the socket, smoke speaks raw JSON, this one
+Its own seam: test_mcp stubs the socket, smoke speaks raw JSON, this one
 exercises the importable client - the surface docs/tutorial.ipynb is built on.
 
 Scratch-safe, same rules as smoke.py: creates one MIDI track named

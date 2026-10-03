@@ -33,7 +33,11 @@ def live_version():
 
 
 def newest_census():
-    files = sorted(BASELINE.glob("lom_census_*.json"))
+    """Newest baseline/lom_census_<version>.json, or None. Sorted by version
+    number: as text, 12.10 would sort before 12.9."""
+    def version(p):
+        return tuple(int(x) for x in p.stem[len("lom_census_"):].split("."))
+    files = sorted(BASELINE.glob("lom_census_*.json"), key=version)
     return files[-1] if files else None
 
 

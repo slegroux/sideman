@@ -22,6 +22,8 @@ import sys
 from html.parser import HTMLParser
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "scripts"))
+from census import newest_census  # noqa: E402
 BASE = "https://docs.cycling74.com/apiref/lom/%s/#%s"
 
 # The reference's own page list, read off https://docs.cycling74.com/apiref/lom/.
@@ -79,12 +81,10 @@ def slug(type_name):
 
 
 def census():
-    paths = sorted((REPO / "baseline").glob("lom_census_*.json"),
-                   key=lambda p: tuple(int(x) for x in
-                                       p.stem[len("lom_census_"):].split(".")))
-    if not paths:
+    path = newest_census()
+    if path is None:
         sys.exit("no census in baseline/; run scripts/census.py")
-    return json.loads(paths[-1].read_text())["types"]
+    return json.loads(path.read_text())["types"]
 
 
 def member_links(types):

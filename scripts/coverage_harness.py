@@ -22,15 +22,11 @@ import re
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-def _census_path():
-    """Newest census on disk. Hardcoding a version is how the harness ends up
-    silently checking against an API Live no longer has - the same drift that
-    rotted the write guard. Regenerate with scripts/census.py after upgrading."""
-    files = sorted((REPO / "baseline").glob("lom_census_*.json"))
-    return files[-1] if files else REPO / "baseline" / "lom_census_MISSING.json"
+sys.path.insert(0, str(REPO / "scripts"))
+from census import newest_census  # noqa: E402
 
-
-CENSUS = _census_path()
+# Never a hardcoded version: that silently checks an API Live no longer has.
+CENSUS = newest_census() or REPO / "baseline" / "lom_census_MISSING.json"
 
 # Competitor checkouts. Must be a stable location: this previously pointed into
 # a temp scratchpad, which meant the sources could vanish without warning - and
@@ -55,17 +51,6 @@ COMPETITORS = {
         VENDOR / "ableton-mcp-extended/AbletonMCP_Remote_Script/__init__.py"],
     "ahujasid/ableton-mcp": [
         VENDOR / "ahujasid_ableton-mcp/AbletonMCP_Remote_Script/__init__.py"],
-}
-
-# Members of Browser / BrowserItem. These are genuinely reachable
-# (browser_list/browser_load use them) but do NOT appear in the census, because
-# the type registry covers only a subset, and Browser is not in it.
-# A real census gap, tracked rather than hidden.
-BROWSER_SURFACE = {
-    "children", "is_device", "is_folder", "is_loadable", "display_name",
-    "hotswap_target", "uri", "browser", "load_item", "instruments", "sounds",
-    "drums", "audio_effects", "midi_effects", "plugins", "packs",
-    "user_library", "current_project", "max_for_live", "source",
 }
 
 # VERIFIED ABSENT from Live 12.2.7. Probed against a running Live by direct
@@ -225,26 +210,17 @@ def main(verbose: bool = False) -> int:
     for r in grand_residue.values():
         allres |= r
 
-    browser = sorted(allres & BROWSER_SURFACE)
     infra = sorted(allres & INFRA)
     absent = sorted(allres & ABSENT_IN_12_2_7)
-    unexplained = sorted(allres - BROWSER_SURFACE - INFRA - ABSENT_IN_12_2_7)
+    unexplained = sorted(allres - INFRA - ABSENT_IN_12_2_7)
 
     print(f"RESIDUE: {len(allres)} attributes competitors touch that the census lacks")
     print()
-    print(f"  [A] Browser/BrowserItem surface ......... {len(browser):>3}  REAL CENSUS GAP")
-    print("      Reachable today (browser_list/browser_load use them) but absent")
-    print("      from the census: the type registry covers %d types and Browser"
-          % data["totals"]["registered_types"])
-    print("      is not one. The census understates the reachable graph.")
-    if browser:
-        print("      " + ", ".join(browser))
-    print()
-    print(f"  [B] Competitor server infrastructure .... {len(infra):>3}  not Live API")
+    print(f"  [A] Competitor server infrastructure .... {len(infra):>3}  not Live API")
     if infra:
         print("      " + ", ".join(infra))
     print()
-    print(f"  [C] Verified ABSENT from Live 12.2.7 ..... {len(absent):>3}  nothing to cover")
+    print(f"  [B] Verified ABSENT from Live 12.2.7 ..... {len(absent):>3}  nothing to cover")
     print("      Probed live 2026-08-01 and 2026-09-23. Direct get/call returns")
     print("      AttributeError, e.g. \"'Clip' object has no attribute")
     print("      'follow_action_a'\". jpoindexter names members Live 12 removed")
@@ -254,7 +230,7 @@ def main(verbose: bool = False) -> int:
     if absent:
         print("      " + ", ".join(absent))
     print()
-    print(f"  [D] STILL UNEXPLAINED .................... {len(unexplained):>3}")
+    print(f"  [C] STILL UNEXPLAINED .................... {len(unexplained):>3}")
     for a in unexplained:
         who = [n.split("/")[0] for n, r in grand_residue.items() if a in r]
         print(f"      {a:32} used by: {', '.join(who)}")
@@ -269,7 +245,7 @@ def main(verbose: bool = False) -> int:
             err(f"      {m}")
         err("")
 
-    blocking = len(browser) + len(unexplained)
+    blocking = len(unexplained)
     if missing:
         err("VERDICT: UNVERIFIED - %d competitor source(s) could not be read."
             % len(missing))

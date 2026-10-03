@@ -1,6 +1,7 @@
 # Wire protocol
 
-What the MCP server and `scripts/lomcli.py` both speak to the Remote Script.
+What the MCP server, the Python client (`sideman.client`) and `scripts/lomcli.py`
+all speak to the Remote Script.
 Read this before adding an op or writing another client.
 
 ## Transport
@@ -82,6 +83,7 @@ See `docs/TOOLS.md` for parameters — every MCP tool maps to one of these.
 `envelope_insert_step` `envelope_clear` `arrangement_list`
 `arrangement_create_clip` `arrangement_duplicate_clip` `observe_add`
 `observe_remove` `observe_list` `observe_clear` `observe_poll`
+`warp_markers_set`
 
 ## Paths
 

@@ -29,7 +29,7 @@ FAST = "--fast" in sys.argv
 
 # What a Set is allowed to contain for this to be safe to run in.
 DEFAULT_TRACK = re.compile(r"^\d+-(MIDI|Audio)$")   # a brand new Set's tracks
-SCRATCH = ("__lomtest", "__e2etest")                # the test suites' leftovers
+SCRATCH = ("__lomtest", "__e2etest", "__sideman_client")  # the test suites' leftovers
 BUILT = ("Chords", "Bass", "Drums")                 # our own previous run
 
 TEMPO = 124.0

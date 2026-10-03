@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """End-to-end: the real MCP tool functions against a real Ableton Live.
 
-This closes the seam the other two suites leave open:
+This closes the seam the other suites leave open:
 
-  test_mcp.py   MCP layer with a STUBBED socket   - never touches Live
-  smoke.py      engine via a RAW socket           - never loads the MCP layer
-  test_e2e.py   MCP layer -> socket -> Live       - the path Claude actually uses
+  test_mcp.py     MCP layer with a STUBBED socket   - never touches Live
+  smoke.py        engine via a RAW socket           - never loads the MCP layer
+  test_client.py  sideman.client -> Live            - never loads the MCP layer
+  test_e2e.py     MCP layer -> socket -> Live       - the path Claude actually uses
 
 A bug that only appears when the real layers meet - a response shape the tool
 cannot serialise, an error that escapes as the wrong type - passes both other

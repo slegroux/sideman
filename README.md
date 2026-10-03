@@ -186,17 +186,21 @@ does not have while missing eleven it does.
 |---|---|---|
 | `tests/test_mcp.py` | no | MCP layer with a **stubbed socket** — op mapping, optional params, safe destructive defaults, error translation |
 | `tests/test_e2e.py` | yes | **MCP layer → socket → Live** — the path Claude actually takes |
+| `tests/test_client.py` | yes | the **Python client** (`sideman.client`) → Live — the surface the tutorial notebook uses |
 | `tests/smoke.py` | yes | engine via a **raw socket** — all 29 engine ops (~70s; loads a real device, imports an audio file, cycles scratch tracks) |
 
-The three cover deliberately different seams: `test_mcp` never touches Live,
-`smoke` never loads the MCP layer, and only `test_e2e` exercises both together.
+The four cover deliberately different seams: `test_mcp` never touches Live,
+`smoke` never loads the MCP layer, `test_client` goes through the Python client,
+and `test_e2e` exercises the MCP layer and Live together.
 
-The Live-dependent suites create a scratch MIDI track named `__lomtest` and
-delete it, so they work on an all-audio Set. They refuse to delete a track whose
+The Live-dependent suites create a scratch MIDI track (`__lomtest`, or
+`__sideman_client` for the client suite) and delete it, so they work on an
+all-audio Set. They refuse to delete a track whose
 name changed underneath them, and never touch existing tracks.
 
-Only `test_mcp.py` is CI-able — a Remote Script cannot be exercised without its
-host, so the rest are integration by necessity.
+CI runs what needs no Live: `test_mcp.py`, the docs check, the dependency-lock
+check and the coverage harness. A Remote Script cannot be exercised without its
+host, so the other suites are integration by necessity.
 
 ## Troubleshooting
 

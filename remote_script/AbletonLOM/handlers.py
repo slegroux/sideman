@@ -857,8 +857,8 @@ def op_browser_list(surface, params):
 
 
 def op_browser_load(surface, params):
-    """Load a browser item onto the SELECTED track. Set `select_track` to a
-    track index first if you need a specific destination."""
+    """Load a browser item onto the selected track, or onto `track_index`
+    (which selects that track first)."""
     b = _browser(surface)
     rel = params["path"].strip("/")
     node = _browser_resolve(surface, rel)

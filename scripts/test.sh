@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Run all three suites. Which seam each one covers: see README.
+# Run the docs, lock and coverage checks, then all four suites. Which seam
+# each suite covers: see README.
 #
-#   tests/test_mcp.py  unit,  no Live required    -> CI-able, ~1s
-#   tests/test_e2e.py  e2e,   needs Live          -> MCP layer -> socket -> Live
-#   tests/smoke.py     engine, needs Live         -> raw socket, ~70s
+#   tests/test_mcp.py     unit,   no Live required -> CI-able, ~1s
+#   tests/test_e2e.py     e2e,    needs Live       -> MCP layer -> socket -> Live
+#   tests/test_client.py  client, needs Live       -> sideman.client -> Live
+#   tests/smoke.py        engine, needs Live       -> raw socket, ~70s
 #
 # The Live-dependent suites are slow because they do real work: six scratch-track
 # create/delete cycles and a genuine device load through the browser. Do not
