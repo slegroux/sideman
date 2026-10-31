@@ -87,11 +87,10 @@ lom_transaction(ops=[
 → {"count": 6, "applied": 6, "failed": false, ...}
 ```
 
-**Read the `undo` field in the result.** Names and colours group into one undo
-step. Automatable parameters — tempo, mixer volume, mute, device parameters —
-do not: Live gives each its own step no matter what you wrap them in. This was
-measured, not assumed. A transaction is "one Cmd-Z for the groupable ops, plus
-one per automatable parameter touched".
+**Read the `undo` field in the result.** On Live 12.4+ the whole batch is one
+undo step, tempo, volume and device parameters included. On older Live those
+automatable parameters can need extra Cmd-Z; the field says which applies.
+This was measured, not assumed.
 
 It is also not a database transaction. If op 5 fails, ops 1–4 have already
 applied. `stop_on_error` defaults true; `rollback_on_error` defaults **false**
@@ -293,7 +292,7 @@ lom_unobserve_all()
 | `lom_search` to locate | `LP Freq`, not `Cutoff` — you cannot guess vendor naming |
 | Paths are values | `live_set tracks 0 devices 0 parameters 1` can be stored, passed, reused |
 | Typed tools are the exception | notes, envelopes, browser, warp markers — only where generic access genuinely cannot work |
-| Undo grouping is partial | check the `undo` field rather than assuming one Cmd-Z |
+| Undo grouping depends on the Live version | check the `undo` field rather than assuming one Cmd-Z |
 | Observers are a pull | poll, and watch `dropped_events` |
 
 ## Where to go next

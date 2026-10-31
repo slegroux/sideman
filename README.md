@@ -41,7 +41,7 @@ reachable without shipping new code.
 
 ## Why
 
-Live 12.2.7 exposes **47 reachable types / 922 members** by measurement (see
+Live 12.4.6 exposes **47 reachable types / 983 members** by measurement (see
 `baseline/`). Coverage is measured, not claimed: a census of the running Live,
 and a harness that checks every Live API attribute the Remote Script
 competitors touch against it and exits nonzero if any is unaccounted for.
@@ -66,6 +66,11 @@ on a `Queue`. Violating this freezes the GUI.
 engine changes need no Live restart. Only the socket shell does.
 
 ## Install
+
+**Live version:** any Live 12 edition. **12.4 or later is recommended**: that is
+where a transaction becomes one Cmd-Z, and where `insert_device`, `insert_chain`
+and `replace_sample` exist. On older Live the same tools reach whatever that
+Live exposes.
 
 **Musicians:** download the `.pkg` from
 [Releases](https://github.com/slegroux/sideman/releases), open it, and follow the
@@ -164,12 +169,10 @@ raise on a given object — MIDI tracks have no `input_meter_left`, only the mai
 track has a `crossfader`. `lom_describe` reports these in an `unavailable` map
 rather than pretending the type list is uniformly gettable.
 
-**Undo grouping is partial.** `lom_transaction` collapses ops into one Cmd-Z —
-except automatable parameters, which Live always gives their own undo step:
-
-| Groups | Own step |
-|---|---|
-| track `name`, `color_index`, `signature_numerator` | `tempo`, mixer `volume`, `mute`, device parameters |
+**Undo grouping.** `lom_transaction` collapses its ops into one Cmd-Z. On Live
+12.4+ that includes tempo, mixer volume, mute and device parameters. On older
+Live those automatable parameters can need extra Cmd-Z, and the result's
+`undo` field says so.
 
 **Destructive calls are guarded.** Anything named `delete_*`, `remove_*` or
 `clear_*`, plus `crop`, refuses to run unless `confirm=true`. Derived from a

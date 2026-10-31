@@ -487,11 +487,10 @@ def lom_transaction(ops: list[dict[str, Any]], stop_on_error: bool = True,
     ops: [{"op": "set", "path": ..., "property": ..., "value": ...},
           {"op": "call", "path": ..., "function": ..., "args": [...]}]
 
-    UNDO CAVEAT (measured on Live 12.2.7, not assumed): grouping does NOT cover
-    automatable parameters. tempo, mixer volume, mute and device parameters
-    each form their own undo step in Live even inside an explicit one. Track
-    name, colour and time signature do group. The `undo` field in the result
-    restates this.
+    UNDO (measured, not assumed): on Live 12.4+ the whole batch is one Cmd-Z,
+    tempo, volume and device parameters included. On older Live those
+    automatable parameters can need extra Cmd-Z. The `undo`
+    field in the result says which applies to the running Live.
 
     NOT a database transaction - Live has no intra-step rollback, so if op 5
     fails, ops 1-4 have already applied. `rollback_on_error` defaults to FALSE

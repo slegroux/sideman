@@ -129,12 +129,18 @@ silently. Use `_live_ptr` (see `_identity`) and hold references during a walk.
 the missing ones include the entire extended-notes API and every listener.
 `_member_names` returns the union.
 
-**Undo grouping is partial.** `begin_undo_step`/`end_undo_step` groups track
-name, colour and time signature, but automatable parameters (tempo, mixer
-volume, mute, device parameters) always get their own step regardless.
+**Undo grouping.** Live records automatable parameter changes (tempo, mixer
+volume, mute, device parameters) in the undo history lazily, after the call
+returns, so `begin_undo_step`/`end_undo_step` alone leaves them in a step of
+their own, unless a later structural `call` in the batch pulls them in. On Live
+12.4+, transactions and `set_batch` call `Song.sync_parameter_changes()` before
+`end_undo_step`, which pulls them in: the batch is one Cmd-Z and
+`rollback_on_error` reverts all of it. Single ops skip the sync; a single
+`set` is one Cmd-Z regardless (measured). Older Live keeps the split. Measured on 12.4.6 with the sync
+sent as the batch's last op; `tests/smoke.py` checks the engine path.
 
-**Some things Live's API simply cannot do.** The 12.2.7 census has no
-`move_track`, so tracks cannot be reordered after creation — create them in their
+**Some things Live's API simply cannot do.** The 12.4.6 census, like 12.2.7's, has
+no `move_track`, so tracks cannot be reordered after creation — create them in their
 final order (`duplicate_track` exists but does not reposition). There is no save,
 export/render, freeze, consolidate or flatten either; the only `export` in the
 object model is `LooperDevice.export_to_clip_slot`. A scripted session has to end

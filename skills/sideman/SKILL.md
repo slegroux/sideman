@@ -51,16 +51,12 @@ an error:
 So a member listed for `Track` may still be unavailable on *this* track. Check
 `unavailable` before reporting something as broken.
 
-## Undo grouping is partial (measured on Live 12.2.7)
+## Undo grouping (measured on Live 12.4.6)
 
-`lom_transaction` collapses ops into one Cmd-Z — **but not for automatable
-parameters**, which Live always gives their own undo step:
-
-| Groups | Own step |
-|---|---|
-| track `name`, `color_index`, `signature_numerator` | `tempo`, mixer `volume`, `mute`, device parameters |
-
-Don't promise the user "one undo" when the batch touches tempo or volume.
+`lom_transaction` is **one Cmd-Z on Live 12.4+**, tempo, volume and device
+parameters included. On older Live those automatable parameters can need
+extra Cmd-Z. The result's `undo` field says which applies; repeat it to the
+user rather than promising one undo.
 
 ## Recipes
 
@@ -88,6 +84,41 @@ lom_call("live_set", "create_midi_track", [-1])
 lom_call("live_set tracks 0 clip_slots 0", "create_clip", [4.0])
 lom_call("live_set tracks 0 clip_slots 0", "fire")
 ```
+
+**Insert a native device (Live 12.4+)** — no browser path, and you pick the slot:
+```
+lom_call("live_set tracks 0", "insert_device", ["EQ Eight"])      # at the end
+lom_call("live_set tracks 2", "insert_device", ["Utility", 0])    # audio track, index 0
+```
+The result's `result_path` is the new device. The name is the browser name,
+exact and case-sensitive: `"Auto Pan-Tremolo"`, not `"Auto Pan"`. Auto Pan and
+Erosion keep their old versions as `"… Legacy"`. It refuses plug-ins (and,
+per Ableton's release notes, Max devices): use `browser_load` for those. It also
+refuses instruments on audio tracks and a second instrument on a track. Chains
+take `insert_device` too. `duplicate_device(i)` copies device `i` to `i + 1` and
+returns nothing, so re-read `devices`. It refuses to duplicate a chain's
+instrument.
+
+**Build a Drum Rack (Live 12.4+)** —
+```
+lom_call(track, "insert_device", ["Drum Rack"])                  # -> rack path
+lom_call(rack, "insert_chain")                                   # -> chain path
+lom_set(chain, "in_note", 38)                                    # pad = MIDI note
+lom_call(chain, "insert_device", ["Simpler"])
+lom_call(simpler, "replace_sample", ["/abs/path/snare.wav"])
+```
+A new chain's `in_note` is **36**, so set it on every chain or they all stack
+on C1. `-1` ("All Notes") is rejected. `replace_sample` needs an absolute path
+to a real audio file, works on an empty Simpler, and leaves the sample alone
+when it fails.
+
+**A/B a device (Live 12.4+)** — `save_preset_to_compare_ab_slot()` copies the
+current state into the other slot (measured from A); then tweak, and set
+`is_using_compare_preset_b` to `true` / `false` to compare. Check
+`can_compare_ab` first: it is `false` on racks.
+
+**Parameter names change between Live versions** — on 12.4, Utility's `Gain` is
+`Output`. Read a device's `parameters` names; don't hardcode them.
 
 **MIDI notes** — use the typed tools, not `lom_set`. Notes cannot round-trip
 through generic get/set.

@@ -53,9 +53,12 @@ COMPETITORS = {
         VENDOR / "ahujasid_ableton-mcp/AbletonMCP_Remote_Script/__init__.py"],
 }
 
-# VERIFIED ABSENT from Live 12.2.7. Probed against a running Live by direct
-# get/call returning AttributeError, positive controls passing: 2026-08-01, and
-# 2026-09-23 for the four marked below.
+# VERIFIED ABSENT from Live 12.2.7 and 12.4.6. On 12.2.7, probed against a
+# running Live by direct get/call returning AttributeError, positive controls
+# passing: 2026-08-01, and 2026-09-23 for the four marked below. All 25
+# re-probed on 12.4.6 on 2026-10-31: none in the census, and none answering a
+# direct get (a function answers "is a function") on Song, Song.View,
+# Application, Application.View, Track, Clip, DeviceParameter or RackDevice.
 #
 # jpoindexter names members Live 12 removed and leaves several unguarded, so
 # those tools raise. ahujasid hasattr-guards its four, which are legacy or
@@ -65,7 +68,7 @@ COMPETITORS = {
 #
 # Never add a member without probing it: an unprobed entry silently excuses a
 # real gap, which is the one thing this harness exists to prevent.
-ABSENT_IN_12_2_7 = {
+ABSENT_IN_LIVE_12 = {
     "clear_automation_envelope", "create_group_track", "fade_in_end",
     "fade_in_start", "fade_out_end", "fade_out_start", "follow_action_a",
     "follow_action_b", "follow_action_chance", "follow_action_time", "freeze",
@@ -211,8 +214,8 @@ def main(verbose: bool = False) -> int:
         allres |= r
 
     infra = sorted(allres & INFRA)
-    absent = sorted(allres & ABSENT_IN_12_2_7)
-    unexplained = sorted(allres - INFRA - ABSENT_IN_12_2_7)
+    absent = sorted(allres & ABSENT_IN_LIVE_12)
+    unexplained = sorted(allres - INFRA - ABSENT_IN_LIVE_12)
 
     print(f"RESIDUE: {len(allres)} attributes competitors touch that the census lacks")
     print()
@@ -220,13 +223,13 @@ def main(verbose: bool = False) -> int:
     if infra:
         print("      " + ", ".join(infra))
     print()
-    print(f"  [B] Verified ABSENT from Live 12.2.7 ..... {len(absent):>3}  nothing to cover")
-    print("      Probed live 2026-08-01 and 2026-09-23. Direct get/call returns")
+    print(f"  [B] Verified ABSENT from 12.2.7/12.4.6 .. {len(absent):>3}  nothing to cover")
+    print("      Probed on 12.2.7 and again on 12.4.6. Direct get/call returns")
     print("      AttributeError, e.g. \"'Clip' object has no attribute")
     print("      'follow_action_a'\". jpoindexter names members Live 12 removed")
     print("      and leaves several unguarded, so those tools RAISE on Live 12.")
     print("      ahujasid's four are legacy/M4L-only spellings, guarded - see")
-    print("      ABSENT_IN_12_2_7 for what Live 12 exposes instead.")
+    print("      ABSENT_IN_LIVE_12 for what Live 12 exposes instead.")
     if absent:
         print("      " + ", ".join(absent))
     print()
@@ -256,7 +259,7 @@ def main(verbose: bool = False) -> int:
     if blocking == 0:
         print("VERDICT: SUPERSET PROVEN for the three Remote Script competitors.")
         print("  Every Live API member they touch is either in our census, their")
-        print("  own infrastructure, or absent from Live 12.2.7 entirely.")
+        print("  own infrastructure, or absent from Live 12.2.7 and 12.4.6.")
         print("  NOT proven for xiaolaa2 / Simon-Kansara - different bridges,")
         print("  excluded from this method by construction, not yet tested.")
     else:

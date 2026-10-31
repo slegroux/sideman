@@ -244,6 +244,85 @@ def test_transaction_groups():
                                      g(b.track, "color_index")))
 
 
+def test_transaction_one_undo_with_parameters():
+    """On Live 12.4+ automatable parameters join the step: ONE undo reverts a
+    mixed batch, redo restores it, and rollback_on_error reverts all of it.
+
+    Live records parameter changes lazily, after the call returns, so without
+    the engine's sync_parameter_changes() call the parameter sets below land
+    in a trailing step of their own: one undo would revert only them, and the
+    rollback would leave them applied (measured on 12.4.6, 2026-10-31)."""
+    has_sync = "is a function" in str(request(
+        "get", {"path": "live_set", "property": "sync_parameter_changes"}).get("error"))
+    if not has_sync:
+        skip("transaction one undo with parameters",
+             "this Live has no Song.sync_parameter_changes (pre-12.4)")
+        return
+
+    def g(p, a):
+        return (request("get", {"path": p, "property": a})
+                .get("result", {}) or {}).get("value")
+
+    with Scratch("audio") as s:  # the track kind the probe measured
+        if not ok(request("call", {"path": s.track, "function": "insert_device",
+                                   "args": ["Utility"]}), "insert Utility"):
+            return
+        util = s.track + " devices 0"
+        names = [p.get("name") for p in g(util, "parameters") or []]
+        if "Stereo Width" not in names:
+            check("Utility has a Stereo Width parameter", False, names)
+            return
+        width = "%s parameters %d" % (util, names.index("Stereo Width"))
+        watch = [(s.track, "color_index"), (s.track, "mute"),
+                 (s.track + " mixer_device volume", "value"),
+                 (s.track + " mixer_device panning", "value"), (width, "value")]
+
+        def state():
+            return tuple(g(p, a) for p, a in watch)
+
+        orig = state()
+        if None in orig:
+            check("one-undo test could read every watched value", False, orig)
+            return
+        new_values = [(orig[0] + 3) % 70, 1, 0.3, 0.5, 1.5]
+        mixed = [{"op": "set", "path": p, "property": a, "value": v}
+                 for (p, a), v in zip(watch, new_values)]
+        # Parameters first and last, the colour in between: the order that
+        # split into two steps without the sync.
+        mixed = [mixed[2], mixed[0], mixed[1], mixed[3], mixed[4]]
+        r = ok(request("transaction", {"ops": mixed}), "mixed transaction")
+        if not r:
+            return
+        after = state()
+        check("mixed transaction says ONE Cmd-Z reverts the batch",
+              r.get("undo", "").startswith("ONE Cmd-Z reverts the batch"),
+              r.get("undo"))
+        request("call", {"path": "live_set", "function": "undo", "args": []})
+        now = state()
+        one_undo = now == orig
+        check("ONE undo reverted colour, mute, volume, pan and a device parameter",
+              one_undo, "was %r, now %r" % (orig, now))
+        if not one_undo:
+            return  # phase 2 compares against orig; it would mislead
+        request("call", {"path": "live_set", "function": "redo", "args": []})
+        check("redo restored the whole batch", state() == after,
+              "expected %r, got %r" % (after, state()))
+        request("call", {"path": "live_set", "function": "undo", "args": []})
+        if state() != orig:
+            check("undo after redo reverted the batch", False, state())
+            return
+
+        r = ok(request("transaction", {
+            "ops": mixed + [{"op": "set", "path": s.track,
+                             "property": "no_such_prop", "value": 1}],
+            "rollback_on_error": True}), "failing transaction")
+        now = state()
+        check("rollback_on_error reverted parameters too",
+              r and r.get("rolled_back") and now == orig,
+              "rolled_back=%r, was %r, now %r"
+              % (r and r.get("rolled_back"), orig, now))
+
+
 def test_observers():
     ok(request("observe_clear"), "observe_clear")
     ok(request("observe_add", {"path": "live_set", "property": "tempo"}),

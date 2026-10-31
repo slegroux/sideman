@@ -203,10 +203,11 @@ class Live:
         ops: [{"op": "set", "path": ..., "property": ..., "value": ...},
               {"op": "call", "path": ..., "function": ..., "args": [...]}]
 
-        Grouping does not cover automatable parameters: tempo, mixer volume,
-        mute and device parameters each form their own undo step in Live even
-        inside an explicit one. Not a database transaction either - Live has
-        no intra-step rollback, so if op 5 fails, ops 1-4 have applied."""
+        One Cmd-Z on Live 12.4+, automatable parameters included; on older
+        Live, tempo, volume and device parameters can need extra ones (the
+        result's `undo` field says which). Not a database transaction either -
+        Live has no intra-step rollback, so if op 5 fails, ops 1-4 have
+        applied."""
         return self.request("transaction", dict(params, ops=ops))
 
     # ------------------------- typed ops (JSON cannot express these shapes)
