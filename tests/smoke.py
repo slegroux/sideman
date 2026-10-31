@@ -572,6 +572,36 @@ def test_notes_lifecycle():
               left and left.get("count"))
 
 
+def test_undo_classes():
+    """Each mutating result says how it can be taken back (phase 11 item 1)."""
+    with Scratch() as s:
+        clip = s.clip()
+        cases = [
+            ("set", {"path": clip, "property": "name", "value": "u"},
+             "parameter"),
+            ("notes_add", {"path": clip, "notes": [
+                {"pitch": 60, "start_time": 0.0, "duration": 1.0}]},
+             "additive"),
+            ("notes_remove", {"path": clip}, "destructive_light"),
+            ("call", {"path": s.track + " clip_slots 0",
+                      "function": "delete_clip", "confirm": True},
+             "destructive_light"),
+        ]
+        for op, params, want in cases:
+            r = ok(request(op, params), op)
+            check("%s -> %s" % (op, want), r and r.get("undo_class") == want,
+                  r and r.get("undo_class"))
+        g = ok(request("get", {"path": s.track, "property": "name"}), "get")
+        check("a read carries no undo_class", g and "undo_class" not in g, g)
+        t = ok(request("transaction", {"ops": [
+            {"op": "set", "path": s.track, "property": "mute", "value": 1},
+            {"op": "call", "path": s.track + " clip_slots 0",
+             "function": "create_clip", "args": [4.0]},
+        ]}), "transaction")
+        check("transaction -> heaviest applied (additive)",
+              t and t.get("undo_class") == "additive", t and t.get("undo_class"))
+
+
 def test_envelope_ops():
     with Scratch() as s:
         clip = s.clip()

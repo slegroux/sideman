@@ -1,7 +1,8 @@
 # The Live-free seam only. A Remote Script cannot be exercised without its
 # host, so CI runs exactly what scripts/test.sh runs on a machine without
 # Ableton: the docs check, the coverage harness (which skips itself when the
-# competitor checkouts are absent), and the stubbed-socket MCP unit suite.
+# competitor checkouts are absent), the stubbed-socket MCP unit suite and the
+# stub-Live engine unit suite.
 name: CI
 
 on:

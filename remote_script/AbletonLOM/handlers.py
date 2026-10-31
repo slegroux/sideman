@@ -37,6 +37,207 @@ def _is_destructive(fn):
         return False
     return bool(_DESTRUCTIVE.match(fn))
 
+
+# Undo classes: every mutating result carries "undo_class", saying what kind of
+# change it was and so how it can be taken back.
+#   none               transport, view, selection: nothing enters the undo
+#                      history (recording is not "none": see _call_undo_class)
+#   parameter          a value changed in place; Cmd-Z reverts it
+#   additive           something was created; Cmd-Z or deleting it reverts it
+#   destructive_light  content inside a clip or device was removed (notes,
+#                      envelopes, warp markers, slices, a MIDI clip without
+#                      envelopes): small enough to snapshot first
+#   destructive_heavy  structure was removed or overwritten (tracks, devices,
+#                      scenes, chains, audio clips, looper audio): Cmd-Z is the
+#                      only way back, and for the looper not even that
+#   unknown            a function this table does not list (a newer Live)
+# A transaction reports the heaviest class among the ops it applied. unknown
+# ranks below heavy, so an unlisted call can't hide a known heavy delete, and
+# above light, so it is never reported as harmless.
+# Classes are conservative: when the kind of change depends on state this
+# can't read, the heavier class wins.
+UNDO_RANK = ("none", "parameter", "additive", "destructive_light", "unknown",
+             "destructive_heavy")
+
+# Typed ops. Read-only ops are absent and carry no undo_class.
+# transaction/set_batch/call/browser_load are classified per call.
+_OP_UNDO_CLASS = {
+    "set": "parameter",
+    "notes_add": "additive",
+    "notes_modify": "parameter",
+    "notes_remove": "destructive_light",
+    "envelope_insert_step": "parameter",       # a value over a range; Cmd-Z
+    "envelope_clear": "destructive_light",
+    "arrangement_create_clip": "additive",
+    "arrangement_duplicate_clip": "additive",
+    "warp_markers_set": "destructive_light",   # replaces the old warp map
+}
+
+
+# Functions reachable through op "call", from the 12.4.6 census. A name, not a
+# type, is the key: the same name means the same kind of change on every type
+# that has it, except the names refined per instance in _call_undo_class.
+_CALL_UNDO_CLASS = {}
+_CALL_UNDO_CLASS.update(dict.fromkeys((
+    # transport and playback (the ones that can record are refined below)
+    "fire", "fire_as_selected", "stop", "stop_all_clips", "start_playing",
+    "stop_playing", "continue_playing", "play_selection", "jump", "jump_by",
+    "jump_to_next_cue", "jump_to_prev_cue", "jump_in_running_session_clip",
+    "scrub", "scrub_by", "stop_scrub", "move_playing_pos",
+    "set_fire_button_state", "play", "stop_preview",
+    # view and selection
+    "focus_view", "show_view", "hide_view", "zoom_view", "scroll_view",
+    "toggle_browse", "select_device", "select_instrument",
+    "select_envelope_parameter", "show_envelope", "hide_envelope", "show_loop",
+    "select_all_notes", "deselect_all_notes", "select_notes_by_id",
+    "show_message", "show_on_the_fly_message",
+    # undo plumbing itself (LooperDevice.undo is refined below)
+    "undo", "redo", "begin_undo_step", "end_undo_step",
+    "sync_parameter_changes", "begin_gesture", "end_gesture",
+    # reads whose names don't start get_/is_/has_
+    "beat_to_sample_time", "sample_to_beat_time", "seconds_to_sample_time",
+    "find_device_position", "guess_playback_length", "note_number_to_name",
+    "iter_children", "automation_envelope", "str_for_value",
+    "available_main_views", "__str__",
+    "preview_item", "force_link_beat_time",      # audition, Link sync
+), "none"))
+_CALL_UNDO_CLASS.update(dict.fromkeys((
+    "apply_note_modifications", "quantize", "quantize_pitch",
+    "move_warp_marker", "move_slice", "move_device", "randomize_macros",
+    "recall_selected_variation", "recall_last_used_variation",
+    "re_enable_automation", "set_modulation_value", "set_data", "tap_tempo",
+    "warp_as", "warp_double", "warp_half", "store_chosen_bank",
+    "save_preset_to_compare_ab_slot", "store_variation",
+    "double_speed", "half_speed",                # looper playback rate
+    "reverse",                                   # Simpler sample direction
+), "parameter"))
+_CALL_UNDO_CLASS.update(dict.fromkeys((
+    "create_audio_clip", "create_audio_track", "create_automation_envelope",
+    "create_clip", "create_midi_clip", "create_midi_track",
+    "create_return_track", "create_scene", "create_take_lane",
+    "duplicate_clip_slot", "duplicate_clip_to_arrangement", "duplicate_device",
+    "duplicate_loop", "duplicate_notes_by_id", "duplicate_region",
+    "duplicate_scene", "duplicate_track", "insert_chain", "insert_device",
+    "insert_slice", "add_new_notes", "add_warp_marker", "add_macro",
+    "add_parameter_to_modulation_matrix", "capture_and_insert_scene",
+    "capture_midi", "trigger_session_record",    # records new clips
+    "overdub", "double_length", "export_to_clip_slot",  # looper
+    "load_item",                                 # refined below
+), "additive"))
+_CALL_UNDO_CLASS.update(dict.fromkeys((
+    "remove_notes", "remove_notes_by_id", "remove_notes_extended",
+    "set_notes", "replace_selected_notes",       # replace = remove + add
+    "clear_envelope", "clear_all_envelopes", "remove_warp_marker",
+    "remove_slice", "clear_slices", "reset_slices",
+    "set_or_delete_cue",                         # toggles: may delete a locator
+    "delete_selected_variation",
+), "destructive_light"))
+_CALL_UNDO_CLASS.update(dict.fromkeys((
+    "delete_track", "delete_return_track", "delete_scene", "delete_device",
+    "delete_all_chains", "remove_macro",         # drops the macro's mappings
+    "copy_pad",                                  # overwrites the target pad
+    "duplicate_clip_to",                         # overwrites the target slot
+    "replace_sample",
+    # LooperDevice: its audio never enters Live's undo history
+    "clear", "record", "half_length",
+    "delete_clip", "crop",                       # refined per instance below
+), "destructive_heavy"))
+_CALL_UNDO_CLASS.update(dict.fromkeys((
+    "press_current_dialog_button",               # the dialog could be anything
+), "unknown"))
+
+_READ_FUNCTION = re.compile(r"^(get|is|has)_")
+_STARTS_TRANSPORT = ("start_playing", "continue_playing", "play_selection")
+
+
+def _load_undo_class(surface, browser, track=None):
+    """Loading a browser item adds a device only onto a track with no devices
+    and no hot-swap target; otherwise it can replace an instrument, a rack or
+    Simpler's sample, so it is heavy. Unreadable state is heavy too."""
+    try:
+        if getattr(browser, "hotswap_target", None) is not None:
+            return "destructive_heavy"
+        if track is None:
+            track = surface.song().view.selected_track
+        return "additive" if len(track.devices) == 0 else "destructive_heavy"
+    except Exception:
+        return "destructive_heavy"
+
+
+def _call_undo_class(surface, obj, fn, args):
+    """Class for op "call", read BEFORE the call (afterwards the clip is gone).
+
+    Refined per instance:
+      delete_clip, crop  a MIDI clip without envelopes is notes plus a loop,
+                         small enough to snapshot (light); anything else heavy
+      undo               LooperDevice.undo erases the last overdub outside
+                         Live's undo history (heavy); Song.undo is none
+      load_item          see _load_undo_class
+      fire, start_playing and friends  start recording when a slot's track is
+                         armed (additive) or arrangement record is on (heavy:
+                         it records over what is there)
+    """
+    cls = _CALL_UNDO_CLASS.get(fn)
+    if cls is None:
+        return "none" if _READ_FUNCTION.match(fn) else "unknown"
+    try:
+        if fn in ("delete_clip", "crop"):
+            if fn == "delete_clip":
+                # ClipSlot.delete_clip() vs Track.delete_clip(clip)
+                clip = args[0] if args else getattr(obj, "clip", None)
+            else:
+                clip = obj
+            if (clip is not None and getattr(clip, "is_midi_clip", False) is True
+                    and getattr(clip, "has_envelopes", True) is False):
+                return "destructive_light"
+            return "destructive_heavy"
+        if fn == "undo" and hasattr(obj, "double_speed"):
+            return "destructive_heavy"
+        if fn == "load_item":
+            return _load_undo_class(surface, obj)
+        if fn in _STARTS_TRANSPORT or fn in ("fire", "fire_as_selected"):
+            if getattr(surface.song(), "record_mode", False):
+                return "destructive_heavy"
+            if fn == "fire" and getattr(obj, "has_clip", True) is False:
+                track = getattr(obj, "canonical_parent", None)
+                if getattr(track, "arm", False):
+                    return "additive"
+            if fn in ("fire", "fire_as_selected") and hasattr(obj, "clip_slots"):
+                # A Scene: with "Start Recording on Scene Launch" on, it
+                # records into every armed track's empty slot.
+                if any(getattr(t, "arm", False) for t in surface.song().tracks):
+                    return "additive"
+    except Exception:
+        return "destructive_heavy"
+    return cls
+
+
+def _heaviest(classes):
+    classes = [c for c in classes if c in UNDO_RANK]
+    if not classes:
+        return "none"
+    return max(classes, key=UNDO_RANK.index)
+
+
+def _result_undo_class(op, result):
+    """The undo_class a result should carry, or None for a read-only op."""
+    if "undo_class" in result:
+        return result["undo_class"]            # set by the op before it ran
+    if op in ("transaction", "set_batch"):
+        return _heaviest([r.get("undo_class") for r in result.get("results", [])
+                          if r.get("ok")])
+    return _OP_UNDO_CLASS.get(op)
+
+
+def _tag_undo_class(op, result):
+    if not isinstance(result, dict):
+        return result
+    cls = _result_undo_class(op, result)
+    if cls is not None:
+        result["undo_class"] = cls
+    return result
+
+
 _MXD = {"types": None, "utils": None, "error": None,
         "lom_types": None, "props_for_type": None, "api_names": {}}
 
@@ -522,8 +723,11 @@ def _run_ops(surface, ops, stop_on_error, rollback_on_error):
                     break
                 continue
             try:
-                results.append({"index": i, "op": name, "ok": True,
-                                "result": fn(surface, spec)})
+                res = _tag_undo_class(name, fn(surface, spec))
+                entry = {"index": i, "op": name, "ok": True, "result": res}
+                if isinstance(res, dict) and "undo_class" in res:
+                    entry["undo_class"] = res.pop("undo_class")
+                results.append(entry)
             except Exception as e:
                 results.append({"index": i, "op": name, "ok": False,
                                 "error": "%s: %s" % (type(e).__name__, e)})
@@ -540,6 +744,12 @@ def _run_ops(surface, ops, stop_on_error, rollback_on_error):
         try:
             surface.song().undo()
             out["rolled_back"] = True
+            # "none" only when the undo provably reverted all of it: a
+            # top-level batch (a nested one undoes inside the open outer
+            # step) on a Live whose parameter changes were synced into it.
+            if (getattr(surface, "_lom_undo_depth", 0) == 0
+                    and _undo_note(surface) == UNDO_NOTE_SYNCED):
+                out["undo_class"] = "none"
         except Exception as e:
             out["rolled_back"] = False
             out["rollback_error"] = str(e)
@@ -595,10 +805,12 @@ def op_call(surface, params):
     if _is_destructive(fn) and not params.get("confirm"):
         raise PermissionError(
             "%r is destructive; re-send with confirm=true to proceed" % fn)
+    undo_class = _call_undo_class(surface, obj, fn, args)
     with _undo(surface):
         result = target(*args)
     out = {"path": path, "function": fn,
-           "result": _jsonify_windowed(result, params)}
+           "result": _jsonify_windowed(result, params),
+           "undo_class": undo_class}
     if _is_lom_object(result):
         # create_midi_track and friends hand back the object but not where it
         # landed, so the caller had to work out the index from a count.
@@ -892,10 +1104,12 @@ def op_browser_load(surface, params):
     idx = params.get("track_index")
     if idx is not None:
         song.view.selected_track = song.tracks[int(idx)]
+    undo_class = _load_undo_class(surface, b, song.view.selected_track)
     with _undo(surface):
         b.load_item(node)
     return {"loaded": rel,
-            "track": getattr(song.view.selected_track, "name", None)}
+            "track": getattr(song.view.selected_track, "name", None),
+            "undo_class": undo_class}
 
 
 # ------------------------------------------------------- automation envelopes
@@ -1543,7 +1757,7 @@ def dispatch(surface, op, params):
     fn = OPS.get(op)
     if fn is None:
         raise ValueError("unknown op %r; known: %s" % (op, sorted(OPS)))
-    return fn(surface, params)
+    return _tag_undo_class(op, fn(surface, params))
 
 
 def teardown(surface):

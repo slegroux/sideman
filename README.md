@@ -194,11 +194,12 @@ does not have while missing eleven it does.
 | Suite | Needs Live | Seam it covers |
 |---|---|---|
 | `tests/test_mcp.py` | no | MCP layer with a **stubbed socket** — op mapping, optional params, safe destructive defaults, error translation |
+| `tests/test_handlers.py` | no | the **engine** (`handlers.py`) with a stub `Live` module and fake objects — undo classes on every mutating result |
 | `tests/test_e2e.py` | yes | **MCP layer → socket → Live** — the path Claude actually takes |
 | `tests/test_client.py` | yes | the **Python client** (`sideman.client`) → Live — the surface the tutorial notebook uses |
 | `tests/smoke.py` | yes | engine via a **raw socket** — all 29 engine ops (~70s; loads a real device, imports an audio file, cycles scratch tracks) |
 
-The four cover deliberately different seams: `test_mcp` never touches Live,
+The five cover deliberately different seams: `test_mcp` and `test_handlers` never touch Live,
 `smoke` never loads the MCP layer, `test_client` goes through the Python client,
 and `test_e2e` exercises the MCP layer and Live together.
 
@@ -207,7 +208,7 @@ The Live-dependent suites create a scratch MIDI track (`__lomtest`, or
 all-audio Set. They refuse to delete a track whose
 name changed underneath them, and never touch existing tracks.
 
-CI runs what needs no Live: `test_mcp.py`, the docs check, the dependency-lock
+CI runs what needs no Live: `test_mcp.py`, `test_handlers.py`, the docs check, the dependency-lock
 check and the coverage harness. A Remote Script cannot be exercised without its
 host, so the other suites are integration by necessity.
 

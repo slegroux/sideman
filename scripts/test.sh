@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Run the docs, lock and coverage checks, then all four suites. Which seam
+# Run the docs, lock and coverage checks, then all five suites. Which seam
 # each suite covers: see README.
 #
 #   tests/test_mcp.py     unit,   no Live required -> CI-able, ~1s
+#   tests/test_handlers.py unit,  no Live required -> engine with a stub Live
 #   tests/test_e2e.py     e2e,    needs Live       -> MCP layer -> socket -> Live
 #   tests/test_client.py  client, needs Live       -> sideman.client -> Live
 #   tests/smoke.py        engine, needs Live       -> raw socket, ~70s
@@ -80,6 +81,10 @@ fi
 echo
 echo "== unit: MCP layer (no Live needed) =="
 "$PY" "$REPO/tests/test_mcp.py" "$@" || rc=1
+
+echo
+echo "== unit: engine with a stub Live (no Live needed) =="
+"$PY" "$REPO/tests/test_handlers.py" "$@" || rc=1
 
 echo
 if "$REPO/scripts/lomcli.py" ping >/dev/null 2>&1; then
