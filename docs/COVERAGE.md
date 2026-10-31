@@ -37,9 +37,10 @@ Every attribute falls into one of four buckets, and the harness prints them:
 
 - in the census — covered;
 - competitor server infrastructure (sockets, threads, stdlib) — not Live API;
-- verified absent from Live 12.2.7 — members those servers reference that Live
-  12 removed, or legacy / Max-for-Live-only spellings; each was probed by
-  direct `get`/`call` against a running Live with positive controls passing;
+- verified absent from Live 12.2.7 and 12.4.6 — members those servers
+  reference that Live 12 removed, or legacy / Max-for-Live-only spellings;
+  each was probed by direct `get`/`call` against a running Live with positive
+  controls passing;
 - unexplained — anything else, which is the failing case.
 
 Currently 0 unexplained.

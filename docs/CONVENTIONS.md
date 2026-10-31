@@ -75,11 +75,11 @@ Three shapes, and the choice is about undo, not speed.
   so one unavailable property does not lose the other forty.
 - `lom_transaction` — mixed `set` and `call` ops inside one undo step.
 
-Undo grouping is partial, and this is Live's behaviour, not the server's.
-Track name, colour and time signature group into one ⌘Z. Automatable
-parameters — tempo, mixer volume, mute, device parameters — each form their
-own step even inside an explicit one. Say which is which rather than promising
-one undo.
+Undo grouping: on Live 12.4+ a transaction is one ⌘Z, automatable parameters
+(tempo, mixer volume, mute, device parameters) included, because the engine
+syncs Live's lazily recorded parameter changes into the step. On older Live
+those parameters can need extra ⌘Z. The result's `undo` field says which
+applies; pass it on rather than promising one undo.
 
 A transaction is not a database transaction. Live has no intra-step rollback,
 so if op 5 fails, ops 1–4 have already applied. `rollback_on_error` defaults to

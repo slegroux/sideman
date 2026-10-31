@@ -390,7 +390,7 @@ def describe(surface, path, include_values=True):
 
 # --------------------------------------------------------------------- verbs
 
-def _undo(surface):
+def _undo(surface, sync=False):
     """REENTRANT undo step.
 
     Every mutating op opens one of these. A transaction wraps N such ops, so
@@ -398,6 +398,18 @@ def _undo(surface):
     outer pair - which is how you get a corrupted or unusable undo history.
     Only the OUTERMOST scope actually begins and ends the step, so a
     transaction collapses to exactly one Cmd-Z.
+
+    Live records automatable parameter changes (tempo, volume, device
+    parameters) in the undo history lazily, after the call returns, so on their
+    own they land in a separate step outside ours. Live 12.4 added
+    Song.sync_parameter_changes(), which flushes them; calling it just before
+    end_undo_step pulls them into this step. Older Live lacks it and keeps the
+    split - see _undo_note.
+
+    sync=True only for multi-op batches (transaction, set_batch): a single op
+    is one Cmd-Z either way, and syncing there could sweep a change the user is
+    making at that moment (a knob drag) into Sideman's step, or record the
+    values an undo/redo call restores as a new step.
 
     The depth lives on the surface instance, not module state, so it survives
     hot-reload (same reasoning as the observer registry).
@@ -408,6 +420,7 @@ def _undo(surface):
         def __enter__(self):
             depth = getattr(surface, "_lom_undo_depth", 0)
             if depth == 0:
+                surface._lom_undo_sync = sync
                 try:
                     song.begin_undo_step()
                 except Exception:
@@ -419,6 +432,13 @@ def _undo(surface):
             depth = max(getattr(surface, "_lom_undo_depth", 1) - 1, 0)
             surface._lom_undo_depth = depth
             if depth == 0:
+                flush = getattr(song, "sync_parameter_changes", None)
+                if getattr(surface, "_lom_undo_sync", False) and flush is not None:
+                    surface._lom_sync_failed = False
+                    try:
+                        flush()
+                    except Exception:
+                        surface._lom_sync_failed = True
                 try:
                     song.end_undo_step()
                 except Exception:
@@ -464,20 +484,23 @@ def op_transaction(surface, params):
     ops: [{"op": "set", "path": ..., "property": ..., "value": ...},
           {"op": "call", "path": ..., "function": ..., "args": [...]}, ...]
 
-    CAVEAT, measured not assumed: grouping does not cover automatable
-    parameters. tempo, mixer volume, mute and device parameters each form
-    their own undo step in Live even inside an explicit step. Track name,
-    color and time signature do group. See UNDO_GROUPING_NOTE.
+    On Live 12.4+ the whole batch is one Cmd-Z, automatable parameters
+    included (_undo syncs them into the step). On older Live, automatable
+    parameters (tempo, mixer volume, mute, device parameters) can land
+    outside the step, so a mixed batch can need more than one. See
+    _undo_note.
 
     NOT a database transaction. Live has no intra-step rollback, so if op 5
     fails, ops 1-4 have already applied. Two honest options:
       stop_on_error   (default true)  - halt at the first failure
       rollback_on_error (default FALSE) - additionally call song.undo() once
+                                          (complete on 12.4+; on older Live
+                                          parameter changes may survive it)
 
     rollback defaults OFF deliberately: it is a MUTATION on an error path. If
     our step captured nothing, undo() would revert whatever the user did
     before, which is worse than the partial application it is trying to fix.
-    Either way a single Cmd-Z reverts the batch, which is stated in the result.
+    The result's `undo` field says how many Cmd-Z revert the batch on this Live.
     """
     return _run_ops(surface, params["ops"],
                     params.get("stop_on_error", True),
@@ -487,7 +510,7 @@ def op_transaction(surface, params):
 def _run_ops(surface, ops, stop_on_error, rollback_on_error):
     results = []
     failed = False
-    with _undo(surface):
+    with _undo(surface, sync=True):
         for i, spec in enumerate(ops):
             name = spec.get("op", "set")
             fn = OPS.get(name)
@@ -511,7 +534,7 @@ def _run_ops(surface, ops, stop_on_error, rollback_on_error):
     applied = sum(1 for r in results if r["ok"])
     out = {"count": len(results), "applied": applied, "failed": failed,
            "results": results,
-           "undo": UNDO_GROUPING_NOTE}
+           "undo": _undo_note(surface)}
 
     if failed and rollback_on_error and applied:
         try:
@@ -523,7 +546,7 @@ def _run_ops(surface, ops, stop_on_error, rollback_on_error):
     elif failed and applied:
         out["rolled_back"] = False
         out["warning"] = ("%d op(s) applied before the failure; they remain "
-                          "applied. One Cmd-Z reverts them." % applied)
+                          "applied. %s" % (applied, _undo_note(surface)))
     return out
 
 
@@ -994,21 +1017,41 @@ def op_arrangement_list(surface, params):
 
 MAX_EVENTS = 2000
 
-# MEASURED against Live 12.2.7, not assumed. begin_undo_step/end_undo_step
-# groups many mutations into one Cmd-Z, but NOT all: automatable/mappable
-# parameters get their own undo step regardless.
-#
-#   grouped  : track name, color_index, signature_numerator
-#   separate : tempo, mixer volume, mute
-#
-# So a transaction is "one Cmd-Z for the groupable ops, plus one per
-# automatable parameter touched". Claiming a flat single-undo would be false.
-UNDO_GROUPING_NOTE = (
-    "Groupable ops collapse into ONE Cmd-Z. Automatable parameters "
-    "(tempo, mixer volume, mute, device parameters) each form their OWN undo "
-    "step in Live regardless of grouping, so reverting those needs one extra "
-    "undo apiece. Measured on Live 12.2.7."
+# MEASURED, not assumed (Live 12.2.7 2026-08-01; Live 12.4.6 2026-10-31).
+# Live records automatable parameter changes - tempo, mixer volume, mute,
+# device parameters - in the undo history lazily, after the call returns, so
+# begin/end_undo_step alone does not capture them:
+#   - set ops only: all pending parameter changes merge into ONE trailing step,
+#     undone first, so a mixed batch is two Cmd-Z;
+#   - a structural call later in the batch (create_clip, insert_device) pulls
+#     the pending changes into the batch's own step;
+#   - rollback's in-call song.undo() runs before that trailing step exists, so
+#     it leaves the parameter changes applied.
+# Song.sync_parameter_changes() (Live 12.4) flushes them. Sent as the last op
+# of a batch it made every probed order (set-only, interleaved, mixed with call
+# ops; colour, name, mute, tempo, volume, a device parameter) ONE
+# Cmd-Z, redo restored all of it, and rollback was complete. _undo(sync=True)
+# makes the same call before end_undo_step for transactions and set_batch;
+# tests/smoke.py test_transaction_one_undo_with_parameters checks that path.
+# The 12.2.7 note said one extra step per automatable parameter (not
+# re-verified). Raw data:
+# ~/.omc/reports/sideman-09-live-12-4/probe-raw-part{3,4,6,7,8}-2026-10-31.json
+UNDO_NOTE_SYNCED = (
+    "ONE Cmd-Z reverts the batch, automatable parameters included "
+    "(this Live syncs parameter changes into the undo step)."
 )
+UNDO_NOTE_UNSYNCED = (
+    "More than one Cmd-Z may be needed on this Live: automatable parameters "
+    "(tempo, mixer volume, mute, device parameters) can land outside the "
+    "batch's step, and a rollback can leave them applied. (Live 12.4+ makes "
+    "it one by syncing them; here that sync is missing or failed.)"
+)
+
+
+def _undo_note(surface):
+    synced = (hasattr(surface.song(), "sync_parameter_changes")
+              and not getattr(surface, "_lom_sync_failed", False))
+    return UNDO_NOTE_SYNCED if synced else UNDO_NOTE_UNSYNCED
 
 
 def _registry(surface):

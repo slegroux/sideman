@@ -51,16 +51,12 @@ an error:
 So a member listed for `Track` may still be unavailable on *this* track. Check
 `unavailable` before reporting something as broken.
 
-## Undo grouping is partial (measured on Live 12.2.7)
+## Undo grouping (measured on Live 12.4.6)
 
-`lom_transaction` collapses ops into one Cmd-Z — **but not for automatable
-parameters**, which Live always gives their own undo step:
-
-| Groups | Own step |
-|---|---|
-| track `name`, `color_index`, `signature_numerator` | `tempo`, mixer `volume`, `mute`, device parameters |
-
-Don't promise the user "one undo" when the batch touches tempo or volume.
+`lom_transaction` is **one Cmd-Z on Live 12.4+**, tempo, volume and device
+parameters included. On older Live those automatable parameters can need
+extra Cmd-Z. The result's `undo` field says which applies; repeat it to the
+user rather than promising one undo.
 
 ## Recipes
 
