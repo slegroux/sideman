@@ -41,6 +41,13 @@ def fake_request(op, params=None):
     return {"echo": op}
 
 
+# Installed at import, not only in main(): a runner that collects the test_
+# functions directly (pytest) never calls main(), and without the stub they
+# send real commands - start_playing, tempo, arrangement_create_clip on
+# track 0 - to whatever Set Live has open.
+S._request = fake_request
+
+
 def call(fn, *a, **kw):
     """Invoke a tool and return (op, params) it would have sent."""
     del CALLS[:]
