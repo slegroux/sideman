@@ -159,6 +159,41 @@ between the first step and the second, and you get the *first* step's value.
 Sample inside a step, not on its boundary, or correct automation reads as
 broken.
 
+## Inserting native devices
+
+On Live 12.4+, `insert_device(name, index)` on a track or chain places a native
+device exactly where you ask, which `browser_load` cannot. `index` is optional;
+without it the device goes at the end. `name` is the browser name, exact and
+case-sensitive. Recent releases renamed devices (measured on 12.4.6): Auto Pan
+is now `Auto Pan-Tremolo`, and the old Auto Pan and Erosion survive as
+`… Legacy`. So a name that worked last release can come back *not found*.
+
+It inserts native devices only. A plug-in comes back *not found* (measured), and
+per Ableton's release notes so does a Max for Live device: both still go
+through `browser_load`. It takes a device name, not a preset, so a preset also
+needs `browser_load`. Live's own rules are enforced with readable errors: only
+audio effects on an audio track, no second instrument on a track, an index
+within the chain. `duplicate_device(i)` copies device `i` to `i + 1` and returns
+nothing. Duplicating the instrument in a rack chain is refused.
+
+A Drum Rack can now be built without the browser:
+1. `insert_chain()` on the rack adds a pad chain.
+2. Set `in_note` to the chain's MIDI note.
+3. `insert_device("Simpler")` on the chain.
+4. `replace_sample(abs_path)` on the Simpler.
+
+Two measured surprises:
+- A new chain's `in_note` is 36, not the −1 ("All Notes") the release notes
+  describe, and setting −1 is rejected. Give every chain its note, or they all
+  stack on C1.
+- `replace_sample` wants an absolute path to a real audio file. It reports
+  either mistake plainly and leaves the loaded sample unchanged.
+
+Device A/B compare is reachable too, where `can_compare_ab` is true (not on
+racks). `save_preset_to_compare_ab_slot()` copies the current state into the
+other slot (measured from A to B), and `is_using_compare_preset_b` switches
+between the slots.
+
 ## Loading from the browser
 
 `browser_load` places a device at the **end** of the track's device chain, and

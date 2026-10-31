@@ -67,6 +67,11 @@ engine changes need no Live restart. Only the socket shell does.
 
 ## Install
 
+**Live version:** any Live 12 edition. **12.4 or later is recommended**: that is
+where a transaction becomes one Cmd-Z, and where `insert_device`, `insert_chain`
+and `replace_sample` exist. On older Live the same tools reach whatever that
+Live exposes.
+
 **Musicians:** download the `.pkg` from
 [Releases](https://github.com/slegroux/sideman/releases), open it, and follow the
 last screen. It installs into your home folder, needs no password, and brings its
