@@ -52,6 +52,7 @@ for line in open(sys.argv[1]):
 if bad:
     print("   FAILED - " + ", ".join(bad))
     print("   sync: VIRTUAL_ENV=.venv uv pip install -e . -c constraints.txt")
+    print("   (usual cause: `uv run`, which syncs .venv to uv.lock, not this lock)")
     sys.exit(1)
 print("   in sync")
 PYEOF

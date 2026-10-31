@@ -87,6 +87,12 @@ VIRTUAL_ENV=.venv uv pip install -e . -c constraints.txt   # explicit VIRTUAL_EN
 ./scripts/install.sh                       # symlinks into Ableton's User Library
 ```
 
+`constraints.txt` is the lock, and `uv run` does not read it. Run things with
+`.venv/bin/python` or `./scripts/…`, not `uv run`. In this checkout `uv run`
+writes a `uv.lock` of its own (ignored by git) and re-syncs `.venv` to it, so the
+venv drifts off the lock and `scripts/test.sh` fails its env check. The fix is
+the install line above.
+
 Then in Ableton: **Preferences → Link, Tempo & MIDI → Control Surface** and pick
 **AbletonLOM** in any free slot. Restart Live first if it was running when you
 ran `install.sh` — Live only scans `Remote Scripts/` at startup.
