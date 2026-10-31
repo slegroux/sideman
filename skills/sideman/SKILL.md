@@ -103,6 +103,19 @@ pitch is a MIDI number (60 = C3); times are in **beats**.
 
 **Arrangement** — `arrangement_create_clip("live_set tracks 0", start_time=0, length=8)`
 
+**Locators** — `set_or_delete_cue` *toggles* a locator at the playhead, and a
+`current_song_time` write only lands after the call returns. So one transaction
+that moves and drops repeatedly toggles 14 times at the same spot (net: nothing).
+Place one per call, each call dropping a locator and queueing the next move:
+```
+lom_set("live_set", "current_song_time", 0)                     # lands after return
+lom_transaction([{"op":"call","path":"live_set","function":"set_or_delete_cue"},
+                 {"op":"set","path":"live_set","property":"current_song_time","value":64}])
+# ...repeat per section, then read `live_set cue_points N time` (sorted by time)
+# and set `live_set cue_points N name`.
+```
+`back_to_arranger` likewise reads back stale inside the same call.
+
 **Watch for user edits** — `lom_observe` (keep the `latest_seq` it returns),
 then `lom_poll_events(since=cursor)`, setting `cursor = next_since` each time.
 If `truncated` is true, poll again at once: more events are waiting.
