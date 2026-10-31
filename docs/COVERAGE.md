@@ -16,7 +16,7 @@ version that produced it:
 baseline/lom_census_<version>.json
 ```
 
-Live 12.2.7 exposes **47 reachable types / 922 substantive members**. The
+Live 12.4.6 exposes **47 reachable types / 983 substantive members**. The
 census records which private getter spelling bound (`mxd_api`), because
 Ableton has renamed those getters once inside the 12.x line already.
 

@@ -41,7 +41,7 @@ reachable without shipping new code.
 
 ## Why
 
-Live 12.2.7 exposes **47 reachable types / 922 members** by measurement (see
+Live 12.4.6 exposes **47 reachable types / 983 members** by measurement (see
 `baseline/`). Coverage is measured, not claimed: a census of the running Live,
 and a harness that checks every Live API attribute the Remote Script
 competitors touch against it and exits nonzero if any is unaccounted for.
