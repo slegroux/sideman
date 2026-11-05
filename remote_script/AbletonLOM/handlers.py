@@ -14,6 +14,7 @@
 
 from __future__ import absolute_import, print_function
 
+import json
 import re
 import traceback
 
@@ -21,20 +22,34 @@ import Live
 
 EPII_VERSION = (3, 0)
 
-# Functions that destroy user work require params["confirm"] is True.
+# The confirm gate. A call that removes or overwrites the user's work needs
+# params["expect"] (the target's identity, checked before the call) or
+# params["confirm"] is True. Which calls: the ones _CALL_UNDO_CLASS below
+# classes destructive, unless read per instance they remove nothing (a clip
+# copied into an empty slot, a locator added rather than deleted). See _guard.
 #
-# Derived from a pattern rather than a hand-kept list. The previous list had
-# drifted badly: it guarded two names Live 12 does not have
-# (delete_cue_point, remove_all_notes) while MISSING eleven it does - including
-# remove_notes_extended, clear_all_envelopes and delete_all_chains. A stale
-# allowlist is worse than none, because it looks like coverage.
+# The pattern is only a net for names the table doesn't list (a newer Live).
+# A hand-kept list on its own drifted badly once: it guarded two names Live 12
+# does not have (delete_cue_point, remove_all_notes) while MISSING eleven it
+# does, including remove_notes_extended, clear_all_envelopes and
+# delete_all_chains. A stale allowlist is worse than none, because it looks
+# like coverage.
 _DESTRUCTIVE = re.compile(r"^(delete|remove|clear)_|^crop$")
+_GATED = ("destructive_light", "destructive_heavy", "unknown")
+# Transport that records is classed heavy per instance but not gated: it adds
+# a take rather than removing a thing an agent could name in expect.
+_RECORDING_TRANSPORT = ("start_playing", "continue_playing", "play_selection",
+                        "fire", "fire_as_selected")
 
 
 def _is_destructive(fn):
+    """By name alone: can this function remove or overwrite work?"""
     # add_x_listener / remove_x_listener are lifecycle plumbing, not edits.
     if fn.endswith("_listener"):
         return False
+    cls = _CALL_UNDO_CLASS.get(fn)
+    if cls is not None:
+        return cls in ("destructive_light", "destructive_heavy")
     return bool(_DESTRUCTIVE.match(fn))
 
 
@@ -173,6 +188,9 @@ def _call_undo_class(surface, obj, fn, args):
       undo               LooperDevice.undo erases the last overdub outside
                          Live's undo history (heavy); Song.undo is none
       load_item          see _load_undo_class
+      duplicate_clip_to, copy_pad, replace_sample, set_or_delete_cue
+                         additive when the target is empty (see
+                         _overwrite_undo_class), which also clears the gate
       fire, start_playing and friends  start recording when a slot's track is
                          armed (additive) or arrangement record is on (heavy:
                          it records over what is there)
@@ -195,6 +213,9 @@ def _call_undo_class(surface, obj, fn, args):
             return "destructive_heavy"
         if fn == "load_item":
             return _load_undo_class(surface, obj)
+        refined = _overwrite_undo_class(surface, obj, fn, args)
+        if refined is not None:
+            return refined
         if fn in _STARTS_TRANSPORT or fn in ("fire", "fire_as_selected"):
             if getattr(surface.song(), "record_mode", False):
                 return "destructive_heavy"
@@ -210,6 +231,175 @@ def _call_undo_class(surface, obj, fn, args):
     except Exception:
         return "destructive_heavy"
     return cls
+
+
+# Refinements that clear the gate: these functions overwrite only when their
+# target already holds something.
+def _overwrite_undo_class(surface, obj, fn, args):
+    """Class for duplicate_clip_to, copy_pad, replace_sample and
+    set_or_delete_cue, or None for any other function."""
+    if fn == "duplicate_clip_to":
+        empty = getattr(args[0], "has_clip", True) is False
+    elif fn == "copy_pad":
+        empty = len(obj.drum_pads[args[1]].chains) == 0
+    elif fn == "replace_sample":
+        empty = obj.sample is None
+    elif fn == "set_or_delete_cue":
+        empty = _cue_at_playhead(obj) is None     # adds rather than deletes
+    else:
+        return None
+    return "additive" if empty else _CALL_UNDO_CLASS[fn]
+
+
+# set_or_delete_cue deletes the locator under the playhead. Live's own
+# tolerance isn't documented, so this one errs wide: a near miss gates a call
+# that would only add, never the other way round.
+_CUE_TOLERANCE = 0.01   # beats
+
+
+def _cue_at_playhead(song):
+    now = song.current_song_time
+    for cue in song.cue_points:
+        if abs(cue.time - now) <= _CUE_TOLERANCE:
+            return cue
+    return None
+
+
+# The note removers' identity must include the clip's note count: a clip's
+# name is often empty or Live's default, so the name alone can't tell two
+# clips apart.
+_NOTE_REMOVERS = ("remove_notes", "remove_notes_by_id", "remove_notes_extended",
+                  "set_notes", "replace_selected_notes")
+
+# Names that don't identify anything: empty (API-made clips and scenes) or
+# Live's positional defaults ("3-MIDI", "A-Reverb"), which renumber when a
+# track is inserted above. A name-only expect on one of these is refused.
+_POSITIONAL_NAME = re.compile(r"^$|^(\d+|[A-L])-")
+
+
+def _call_target(obj, fn, args, surface=None):
+    """The object a destructive call removes or overwrites."""
+    if fn == "load_item":
+        # Replaces the hot-swap target, else lands on the selected track.
+        hot = getattr(obj, "hotswap_target", None)
+        return hot if hot is not None else surface.song().view.selected_track
+    if fn == "delete_track":
+        return obj.tracks[args[0]]
+    if fn == "delete_return_track":
+        return obj.return_tracks[args[0]]
+    if fn == "delete_scene":
+        return obj.scenes[args[0]]
+    if fn == "delete_device":
+        return obj.devices[args[0]]
+    if fn == "delete_clip":
+        return args[0] if args else obj.clip    # Track.delete_clip(clip)
+    if fn == "duplicate_clip_to":
+        return args[0].clip
+    if fn == "copy_pad":
+        return obj.drum_pads[args[1]]
+    if fn == "set_or_delete_cue":
+        return _cue_at_playhead(obj)
+    return obj
+
+
+def _note_count(clip):
+    """Every note in the clip, the same count clip_get_notes reports as
+    `total` (its `count` covers only the window it read)."""
+    return len(clip.get_all_notes_extended())
+
+
+def _target_identity(obj, fn, args, surface=None):
+    """{"name", "id"}, plus "note_count" for a MIDI clip. A target with no name
+    of its own (a Sample) takes its device's. "id" is Live's _live_ptr, stable
+    for the object's life: lom_get(path, "_live_ptr") reads it."""
+    target = _call_target(obj, fn, args, surface)
+    holder = target
+    for _ in range(3):
+        name = getattr(holder, "name", None)
+        if isinstance(name, str):
+            break
+        holder = getattr(holder, "canonical_parent", None)
+    else:
+        name = None
+    ident = {"name": name}
+    ptr = getattr(target, "_live_ptr", None)
+    if ptr is not None:
+        ident["id"] = ptr
+    if getattr(target, "is_midi_clip", False) is True:
+        ident["note_count"] = _note_count(target)
+    return ident
+
+
+def _shown(ident):
+    """An identity as a refusal shows it: without the id, so the way past a
+    refusal is to re-read the target, not to copy the number back."""
+    return json.dumps(dict((k, v) for k, v in ident.items() if k != "id"),
+                      ensure_ascii=False, sort_keys=True)
+
+
+def _is_gated(fn, undo_class):
+    if undo_class not in _GATED:
+        return False
+    return _is_destructive(fn) or (undo_class == "destructive_heavy"
+                                   and fn not in _RECORDING_TRANSPORT)
+
+
+def _guard(fn, obj, args, undo_class, params, surface=None):
+    """Run the gate for op "call". Returns (gated, identity): identity is the
+    target's, or None when it wasn't read. Raises PermissionError to refuse.
+
+    expect, when given, is always checked, and confirm never overrides it: a
+    name, or a dict whose every key must equal the target's (name, id,
+    note_count). The note removers need note_count; a name that is empty or
+    positional needs another key. confirm alone still runs, with a warning,
+    since it can't catch an index that shifted."""
+    expect = params.get("expect")
+    gated = _is_gated(fn, undo_class)
+    if expect is None:
+        if gated and not params.get("confirm"):
+            raise PermissionError(
+                "%r is destructive; re-send with expect=<the target's name, "
+                "as you just read it> (or confirm=true)" % fn)
+        if not gated:
+            return False, None
+        try:
+            return True, _target_identity(obj, fn, args, surface)
+        except Exception:
+            return True, None         # Live reports the bad index itself
+    if isinstance(expect, str):
+        expect = {"name": expect}
+    if not isinstance(expect, dict) or not expect:
+        raise ValueError("expect must be a name or a dict like "
+                         '{"name": ..., "note_count": ...}; got %r' % (expect,))
+    try:
+        ident = _target_identity(obj, fn, args, surface)
+    except Exception as e:
+        raise PermissionError("can't read the target of %r to check expect "
+                              "(%s: %s); this call changed nothing"
+                              % (fn, type(e).__name__, e))
+    extra = sorted(set(expect) - set(ident))
+    if extra:
+        raise ValueError("expect has %s; this target's identity has only %s"
+                         % (extra, sorted(ident)))
+    if any(ident[k] != v for k, v in expect.items()):
+        raise PermissionError(
+            "expect does not match: the target of %r is %s, not %s; this call "
+            "changed nothing. Re-read the target before retrying"
+            % (fn, _shown(ident), _shown(expect)))
+    if fn in _NOTE_REMOVERS and "note_count" not in expect:
+        raise ValueError(
+            "%r needs expect with the clip's note_count too (the `total` "
+            "clip_get_notes reports), e.g. %s" % (fn, json.dumps(
+                {"name": ident["name"], "note_count": "<total>"},
+                ensure_ascii=False)))
+    if set(expect) == {"name"} and _POSITIONAL_NAME.match(expect["name"] or ""):
+        raise ValueError(
+            "the name %s can't identify the target: empty names and Live's "
+            "defaults like \"3-MIDI\" repeat or renumber with position. Rename "
+            "it, or add \"id\" (lom_get(<path>, \"_live_ptr\"))%s"
+            % (json.dumps(expect["name"], ensure_ascii=False),
+               " or \"note_count\"" if "note_count" in ident else ""))
+    return True, ident
 
 
 def _heaviest(classes):
@@ -802,15 +992,21 @@ def op_call(surface, params):
         raise AttributeError("%s has no member %r" % (_type_name(obj), fn))
     if not callable(target):
         raise TypeError("%r is a property; use op 'get'/'set'" % fn)
-    if _is_destructive(fn) and not params.get("confirm"):
-        raise PermissionError(
-            "%r is destructive; re-send with confirm=true to proceed" % fn)
     undo_class = _call_undo_class(surface, obj, fn, args)
+    gated, ident = _guard(fn, obj, args, undo_class, params, surface)
     with _undo(surface):
         result = target(*args)
     out = {"path": path, "function": fn,
            "result": _jsonify_windowed(result, params),
            "undo_class": undo_class}
+    if ident is not None:
+        out["target"] = ident
+    if gated and params.get("expect") is None:
+        out["warning"] = (
+            "ran on confirm alone, which can't catch an index that shifted; "
+            "pass expect next time (%s)" % (
+                "this target: %s" % _shown(ident) if ident is not None
+                else "the target couldn't be read"))
     if _is_lom_object(result):
         # create_midi_track and friends hand back the object but not where it
         # landed, so the caller had to work out the index from a count.
@@ -964,6 +1160,7 @@ def op_notes_get(surface, params):
     clip = _require_midi_clip(surface, params["path"])
     notes = clip.get_notes_extended(*_note_range(clip, params))
     return {"path": params["path"], "count": len(notes),
+            "total": _note_count(clip),
             "notes": [_note_to_dict(n) for n in notes]}
 
 

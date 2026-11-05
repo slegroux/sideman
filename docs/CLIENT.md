@@ -163,10 +163,12 @@ Call a function on a Live object, inside a native undo step.
 Returns {path, function, result}.
 
 {"__path__": "<lom path>"} anywhere in args names a Live object by
-path; a plain string is never reinterpreted as one. Destructive
-functions (delete_*, remove_*, clear_*, crop) raise
-LiveError("PermissionError") unless confirm=True. Optional
-offset/limit page a long return value.
+path; a plain string is never reinterpreted as one. Calls that
+remove or overwrite work (delete_*, remove_*, clear_*, crop, a clip
+copied onto a full slot, ...) raise LiveError("PermissionError")
+unless given expect=<the target's name> (checked inside Live, so a
+shifted index is refused) or confirm=True. Optional offset/limit page
+a long return value.
 
 ### `get_batch`
 

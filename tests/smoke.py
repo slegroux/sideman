@@ -602,6 +602,120 @@ def test_undo_classes():
               t and t.get("undo_class") == "additive", t and t.get("undo_class"))
 
 
+def test_expect_identity():
+    """A delete by index checks the name it was given (phase 11 item 2)."""
+    names = ("sm-expect-A", "sm-expect-B")
+
+    def count():
+        return request("count", {"path": "live_set",
+                                 "child": "tracks"})["result"]["count"]
+
+    def make(index, name):
+        ok(request("call", {"path": "live_set", "function": "create_midi_track",
+                            "args": [index]}), "create " + name)
+        at = count() - 1 if index < 0 else index
+        request("set", {"path": "live_set tracks %d" % at, "property": "name",
+                        "value": name})
+
+    n = count()
+    probe_ids = []                  # default-named tracks, deleted by id
+    try:
+        make(-1, names[0])                       # A at n
+        a = ok(request("get", {"path": "live_set tracks %d" % n,
+                               "property": "name"}), "read A")
+        make(n, names[1])                        # B lands at n, A moves to n+1
+        before = count()
+        r = request("call", {"path": "live_set", "function": "delete_track",
+                             "args": [n], "expect": a and a["value"]})
+        err = r.get("error") or {}
+        check("stale index refused", err.get("type") == "PermissionError", err)
+        check("refusal names what is there now",
+              names[1] in err.get("message", ""), err.get("message"))
+        check("track count unchanged", count() == before, count())
+        r = ok(request("call", {"path": "live_set", "function": "delete_track",
+                                "args": [n + 1], "expect": names[0]}),
+               "delete A by its new index")
+        check("matching expect deletes, no confirm",
+              r and r.get("target", {}).get("name") == names[0], r)
+        check("the target carries a stable id",
+              r and isinstance(r.get("target", {}).get("id"), int), r)
+
+        # The gate clears when nothing is overwritten (lessons 07-09).
+        slot = "live_set tracks %d clip_slots" % n
+        ok(request("call", {"path": slot + " 0", "function": "create_clip",
+                            "args": [4.0]}), "clip to copy")
+        r = request("call", {"path": slot + " 0", "function": "duplicate_clip_to",
+                             "args": [{"__path__": slot + " 1"}]})
+        check("copy into an empty slot runs unconfirmed", r.get("ok"),
+              r.get("error"))
+        r = request("call", {"path": slot + " 0", "function": "duplicate_clip_to",
+                             "args": [{"__path__": slot + " 1"}]})
+        check("copy onto a full slot is refused",
+              (r.get("error") or {}).get("type") == "PermissionError",
+              r.get("error"))
+
+        # note_count is the clip's total, as notes_get reports it.
+        clip = slot + " 0 clip"
+        ok(request("notes_add", {"path": clip, "notes": [
+            {"pitch": 60 + i, "start_time": float(i), "duration": 0.5}
+            for i in range(3)]}), "notes for the remover")
+        g = ok(request("notes_get", {"path": clip}), "notes_get total")
+        cname = ok(request("get", {"path": clip, "property": "name"}),
+                   "clip name")
+        check("notes_get reports total", g and g.get("total") == 3, g)
+        r = request("call", {"path": clip, "function": "remove_notes_extended",
+                             "args": [0, 128, 0.0, 4.0],
+                             "expect": {"name": cname and cname["value"],
+                                        "note_count": 2}})
+        check("a wrong note_count is refused",
+              (r.get("error") or {}).get("type") == "PermissionError",
+              r.get("error"))
+        r = ok(request("call", {"path": clip, "function": "remove_notes_extended",
+                                "args": [0, 128, 0.0, 4.0],
+                                "expect": {"name": cname and cname["value"],
+                                           "note_count": g and g["total"]}}),
+               "remove with the right note_count")
+        check("the remover ran", r is not None, r)
+
+        # Probe, not a pass/fail: do Live's default names renumber on insert?
+        # Either way a name-only expect on one is refused.
+        ok(request("call", {"path": "live_set", "function": "create_midi_track",
+                            "args": [-1]}), "default-named track")
+        last = count() - 1
+        d0 = request("get", {"path": "live_set tracks %d" % last,
+                             "property": "name"})["result"]["value"]
+        ptr = request("get", {"path": "live_set tracks %d" % last,
+                              "property": "_live_ptr"})["result"]["value"]
+        probe_ids.append(ptr)
+        ok(request("call", {"path": "live_set", "function": "create_midi_track",
+                            "args": [last]}), "insert above it")
+        probe_ids.append(request("get", {"path": "live_set tracks %d" % last,
+                                         "property": "_live_ptr"})
+                         ["result"]["value"])
+        d1 = request("get", {"path": "live_set tracks %d" % (last + 1),
+                             "property": "name"})["result"]["value"]
+        print("  info default name before/after an insert above: %r -> %r"
+              % (d0, d1))
+        r = request("call", {"path": "live_set", "function": "delete_track",
+                             "args": [last + 1], "expect": d1})
+        check("a name-only expect on a default name is refused",
+              (r.get("error") or {}).get("type") == "ValueError", r.get("error"))
+        r = ok(request("call", {"path": "live_set", "function": "delete_track",
+                                "args": [last + 1], "expect": {"id": ptr}}),
+               "delete by id")
+        check("delete by id hits the same track",
+              r and r.get("target", {}).get("id") == ptr, r)
+    finally:
+        for i in reversed(range(count())):
+            g = request("get_batch", {"specs": [
+                {"path": "live_set tracks %d" % i, "property": "name"},
+                {"path": "live_set tracks %d" % i, "property": "_live_ptr"}]})
+            name, ptr = [e.get("value") for e in g["result"]["results"]]
+            if name in names or ptr in probe_ids:
+                request("call", {"path": "live_set", "function": "delete_track",
+                                 "args": [i], "expect": {"id": ptr}})
+
+
 def test_envelope_ops():
     with Scratch() as s:
         clip = s.clip()

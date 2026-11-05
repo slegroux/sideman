@@ -66,6 +66,15 @@ class Clip(object):
     def remove_notes_extended(self, *window):
         self.notes = []
 
+    def get_all_notes_extended(self):
+        return list(self.notes)
+
+    def set_notes(self, notes):
+        pass
+
+    def replace_selected_notes(self, notes):
+        pass
+
     def crop(self):
         pass
 
@@ -85,6 +94,9 @@ class Slot(object):
     def delete_clip(self):
         self.clip = None
 
+    def duplicate_clip_to(self, target):
+        target.clip = Clip()
+
 
 class Track(object):
     def __init__(self, name):
@@ -100,13 +112,57 @@ class Track(object):
     def delete_clip(self, clip):
         pass
 
+    def delete_device(self, index):
+        del self.devices[index]
+
 
 class Looper(object):
+    name = "Looper"
+
     def double_speed(self):
+        pass
+
+    def clear(self):
         pass
 
     def undo(self):
         pass
+
+
+class Pad(object):
+    def __init__(self, name, chains):
+        self.name = name
+        self.chains = list(range(chains))
+
+
+class DrumRack(object):
+    name = "Kit"
+
+    def __init__(self):
+        self.drum_pads = [Pad("pad%d" % i, 0) for i in range(128)]
+        self.drum_pads[36] = Pad("Kick", 1)
+        self.drum_pads[38] = Pad("Snare", 1)
+
+    def copy_pad(self, source, destination):
+        self.drum_pads[destination] = Pad("copy", 1)
+
+
+class Sample(object):
+    def __init__(self, device):
+        self.canonical_parent = device
+
+    def reset_slices(self):
+        pass
+
+
+class Simpler(object):
+    name = "Simpler"
+
+    def __init__(self, loaded=True):
+        self.sample = Sample(self) if loaded else None
+
+    def replace_sample(self, path):
+        self.sample = Sample(self)
 
 
 class Browser(object):
@@ -124,7 +180,10 @@ class Song(object):
         self.tracks[0].devices = [Looper()]
         self.view = types.SimpleNamespace(selected_track=self.tracks[1])
         self.scenes = [Scene()]
+        self.return_tracks = [Track("Reverb")]
         self.browser = Browser()
+        self.current_song_time = 0.0
+        self.cue_points = [types.SimpleNamespace(name="Drop", time=16.0)]
 
     def undo(self):
         pass
@@ -136,10 +195,22 @@ class Song(object):
         pass
 
     def create_midi_track(self, index):
-        self.tracks.append(Track("new"))
+        if index < 0:
+            self.tracks.append(Track("new"))
+        else:
+            self.tracks.insert(index, Track("new"))
 
     def delete_track(self, index):
         del self.tracks[index]
+
+    def delete_return_track(self, index):
+        del self.return_tracks[index]
+
+    def delete_scene(self, index):
+        del self.scenes[index]
+
+    def set_or_delete_cue(self):
+        pass
 
     def start_playing(self):
         pass
@@ -162,6 +233,7 @@ class Song(object):
 
 class Scene(object):
     def __init__(self):
+        self.name = "Intro"
         self.clip_slots = []
 
     def fire(self):
@@ -278,7 +350,8 @@ def test_undo_class_midi_clip_with_envelopes_is_heavy():
 
 
 def test_undo_class_per_instance_refinements():
-    looper = run("call", path="live_set tracks 0 devices 0", function="undo")
+    looper = run("call", path="live_set tracks 0 devices 0", function="undo",
+                 confirm=True)
     check("LooperDevice.undo -> destructive_heavy",
           looper.get("undo_class") == "destructive_heavy", looper)
     song = run("call", path="live_set", function="undo")
@@ -474,7 +547,7 @@ def test_undo_class_each_refinement():
     surf = Surface()
     surf.song().view.selected_track = surf.song().tracks[0]
     out = run("call", surf, path="live_set browser", function="load_item",
-              args=[None])
+              args=[None], confirm=True)
     check("call load_item consults the track (devices -> heavy)",
           out.get("undo_class") == "destructive_heavy", out)
 
@@ -531,6 +604,374 @@ def test_undo_class_table_agrees_with_the_confirm_gate():
     check("every class is a ranked one", not bad, bad)
     absent = sorted(n for n in H._CALL_UNDO_CLASS if n not in names)
     check("every classified function exists on Live 12.4.6", not absent, absent)
+
+
+# ------------------------------------------------------- expect (item 2)
+
+def refused(op, surface=None, **params):
+    """The error a refused op raises, or None if it ran."""
+    try:
+        run(op, surface, **params)
+    except (PermissionError, ValueError) as e:
+        return e
+    return None
+
+
+def test_expect_matching_name_runs_without_confirm():
+    surf = Surface()
+    out = run("call", surf, path="live_set", function="delete_track",
+              args=[1], expect="B")
+    check("matching expect deletes", [t.name for t in surf.song().tracks] == ["A"])
+    check("result names the target", out.get("target") == {"name": "B"}, out)
+    check("no warning when expect was given", "warning" not in out, out)
+
+
+def test_expect_wrong_name_is_refused_with_the_actual_one():
+    surf = Surface()
+    e = refused("call", surf, path="live_set", function="delete_track",
+                args=[1], expect="A")
+    check("wrong expect -> PermissionError", isinstance(e, PermissionError), e)
+    check("refusal names the actual target", e and '"B"' in str(e), e)
+    check("nothing deleted", len(surf.song().tracks) == 2)
+
+
+def test_expect_catches_an_index_that_shifted():
+    # The live check's shape: read track 1's name, a track lands at 0, then
+    # the delete of "track 1" would hit the wrong one.
+    surf = Surface()
+    name = run("get", surf, path="live_set tracks 1", property="name")["value"]
+    run("call", surf, path="live_set", function="create_midi_track", args=[0])
+    e = refused("call", surf, path="live_set", function="delete_track",
+                args=[1], expect=name)
+    check("stale index refused", isinstance(e, PermissionError), e)
+    check("track count unchanged", len(surf.song().tracks) == 3)
+    check("refusal says what is there now", e and '"A"' in str(e), e)
+
+
+def test_expect_confirm_alone_runs_but_warns():
+    surf = Surface()
+    out = run("call", surf, path="live_set", function="delete_track",
+              args=[1], confirm=True)
+    check("confirm alone deletes", len(surf.song().tracks) == 1)
+    check("confirm alone warns", "expect" in out.get("warning", ""), out)
+    check("warning shows the target", '"B"' in out.get("warning", ""), out)
+    check("result names the target", out.get("target") == {"name": "B"}, out)
+
+
+def test_expect_neither_is_refused():
+    surf = Surface()
+    e = refused("call", surf, path="live_set", function="delete_track", args=[0])
+    check("no expect, no confirm -> PermissionError",
+          isinstance(e, PermissionError), e)
+    check("refusal asks for expect", e and "expect" in str(e), e)
+    check("nothing deleted", len(surf.song().tracks) == 2)
+
+
+def test_expect_note_removers_check_the_note_count():
+    clip = "live_set tracks 0 clip_slots 0 clip"
+    surf = Surface()
+    e = refused("call", surf, path=clip, function="remove_notes_extended",
+                args=[0, 128, 0.0, 4.0], expect={"name": "clip", "note_count": 3})
+    check("wrong note_count refused", isinstance(e, PermissionError), e)
+    check("refusal shows the real count", e and '"note_count": 4' in str(e), e)
+    out = run("call", surf, path=clip, function="remove_notes_extended",
+              args=[0, 128, 0.0, 4.0], expect={"name": "clip", "note_count": 4})
+    check("name plus count runs", out.get("target") ==
+          {"name": "clip", "note_count": 4}, out)
+    surf = Surface()
+    e = refused("call", surf, path=clip, function="remove_notes_extended",
+                args=[0, 128, 0.0, 4.0], expect="clip")
+    check("a bare name is refused for a note remover",
+          isinstance(e, ValueError) and "note_count" in str(e), e)
+    check("and removes nothing",
+          len(surf.song().tracks[0].clip_slots[0].clip.notes) == 4)
+    out = run("call", Surface(), path="live_set tracks 0 clip_slots 0",
+              function="delete_clip", expect="clip")
+    check("delete_clip on a MIDI clip reports its note_count",
+          out.get("target") == {"name": "clip", "note_count": 4}, out)
+    out = run("call", Surface(), path="live_set tracks 0 clip_slots 1",
+              function="delete_clip", expect="clip")
+    check("an audio clip has no note_count",
+          out.get("target") == {"name": "clip"}, out)
+
+
+def test_expect_note_count_is_the_clip_total():
+    # clip_get_notes reads [0, length); notes past the loop still count, and
+    # its `total` is what expect compares.
+    surf = Surface()
+    c = surf.song().tracks[0].clip_slots[0].clip
+    c.get_notes_extended = lambda *w: c.notes[:2]      # 2 inside the window
+    got = run("notes_get", surf, path="live_set tracks 0 clip_slots 0 clip")
+    check("notes_get reports the window and the total",
+          (got.get("count"), got.get("total")) == (2, 4), got)
+    out = run("call", surf, path="live_set tracks 0 clip_slots 0 clip",
+              function="remove_notes_extended", args=[0, 128, 0.0, 4.0],
+              expect={"name": "clip", "note_count": got["total"]})
+    check("expect with the total runs", out.get("target", {}).get("note_count")
+          == 4, out)
+
+
+def test_expect_positional_names_need_more_than_the_name():
+    for name in ("2-MIDI", "3-Audio", "A-Reverb", ""):
+        surf = Surface()
+        surf.song().tracks[1].name = name
+        e = refused("call", surf, path="live_set", function="delete_track",
+                    args=[1], expect=name)
+        check("name-only expect %r refused" % name, isinstance(e, ValueError)
+              and "id" in str(e), e)
+        check("%r: nothing deleted" % name, len(surf.song().tracks) == 2)
+    surf = Surface()
+    surf.song().tracks[1].name = "2-MIDI"
+    surf.song().tracks[1]._live_ptr = 4242
+    out = run("call", surf, path="live_set", function="delete_track", args=[1],
+              expect={"name": "2-MIDI", "id": 4242})
+    check("name plus id runs", len(surf.song().tracks) == 1, out)
+    check("the result carries the id", out.get("target", {}).get("id") == 4242,
+          out)
+    surf = Surface()
+    surf.song().tracks[1]._live_ptr = 4242
+    e = refused("call", surf, path="live_set", function="delete_track", args=[1],
+                expect={"id": 99})
+    check("a wrong id is refused", isinstance(e, PermissionError), e)
+    check("the refusal doesn't print the id to copy",
+          e and "4242" not in str(e), e)
+    clip = "live_set tracks 0 clip_slots 0"
+    surf = Surface()
+    surf.song().tracks[0].clip_slots[0].clip.name = ""
+    e = refused("call", surf, path=clip, function="delete_clip", expect="")
+    check("an empty clip name alone is refused", isinstance(e, ValueError), e)
+    out = run("call", surf, path=clip, function="delete_clip",
+              expect={"name": "", "note_count": 4})
+    check("an empty name plus note_count runs",
+          out.get("target", {}).get("note_count") == 4, out)
+    check("a user name like 'Bass 2-3' is fine",
+          not H._POSITIONAL_NAME.match("Bass 2-3"))
+
+
+def test_expect_confirm_never_overrides_a_wrong_expect():
+    surf = Surface()
+    e = refused("call", surf, path="live_set", function="delete_track",
+                args=[1], expect="A", confirm=True)
+    check("wrong expect plus confirm is refused",
+          isinstance(e, PermissionError), e)
+    check("nothing deleted", len(surf.song().tracks) == 2)
+
+
+def test_expect_heavy_per_instance_is_gated():
+    surf = Surface()
+    e = refused("call", surf, path="live_set tracks 0 devices 0", function="undo")
+    check("LooperDevice.undo needs expect or confirm",
+          isinstance(e, PermissionError), e)
+    out = run("call", surf, path="live_set tracks 0 devices 0", function="undo",
+              expect="Looper")
+    check("with expect it runs", out.get("target", {}).get("name") == "Looper",
+          out)
+    check("Song.undo is not gated",
+          "warning" not in run("call", path="live_set", function="undo"))
+    surf = Surface()
+    surf.song().view.selected_track = surf.song().tracks[0]
+    e = refused("call", surf, path="live_set browser", function="load_item",
+                args=[None])
+    check("a replacing load_item is gated", isinstance(e, PermissionError), e)
+    out = run("call", surf, path="live_set browser", function="load_item",
+              args=[None], expect="A")
+    check("its expect names the track it lands on",
+          out.get("target", {}).get("name") == "A", out)
+    surf.song().browser.hotswap_target = types.SimpleNamespace(name="Drift")
+    out = run("call", surf, path="live_set browser", function="load_item",
+              args=[None], expect="Drift")
+    check("or the hot-swap target it replaces",
+          out.get("target", {}).get("name") == "Drift", out)
+    out = run("call", path="live_set browser", function="load_item",
+              args=[None])
+    check("a load onto an empty track is not",
+          out.get("undo_class") == "additive", out)
+    surf = Surface()
+    surf.song().record_mode = True
+    out = run("call", surf, path="live_set", function="start_playing")
+    check("recording transport is heavy but not gated",
+          out.get("undo_class") == "destructive_heavy" and "warning" not in out,
+          out)
+
+
+def test_expect_confirm_warns_even_when_the_target_is_unreadable():
+    surf = Surface()
+    real = H._target_identity
+    try:
+        def boom(*a):
+            raise RuntimeError("gone")
+        H._target_identity = boom
+        out = run("call", surf, path="live_set", function="delete_track",
+                  args=[1], confirm=True)
+    finally:
+        H._target_identity = real
+    check("still warns", "couldn't be read" in out.get("warning", ""), out)
+
+
+def test_expect_refusal_keeps_non_ascii_names():
+    surf = Surface()
+    surf.song().tracks[1].name = "Bässe"
+    e = refused("call", surf, path="live_set", function="delete_track",
+                args=[1], expect="Drums")
+    check("refusal shows the name as written", e and "Bässe" in str(e), e)
+
+
+def test_expect_malformed_is_refused():
+    for bad in ({"nam": "B"}, {}, 3, ["B"]):
+        surf = Surface()
+        e = refused("call", surf, path="live_set", function="delete_track",
+                    args=[1], expect=bad)
+        check("expect=%r -> ValueError" % (bad,), isinstance(e, ValueError), e)
+        check("expect=%r deletes nothing" % (bad,), len(surf.song().tracks) == 2)
+
+
+def test_expect_unreadable_target_is_refused():
+    surf = Surface()
+    e = refused("call", surf, path="live_set", function="delete_track",
+                args=[9], expect="B")
+    check("an index that doesn't exist -> PermissionError",
+          isinstance(e, PermissionError) and "can't read" in str(e), e)
+
+
+def test_expect_targets_per_function():
+    # The object each call removes, not the object it is called on.
+    surf = Surface()
+    surf.song().tracks[1].devices = [Simpler()]
+    song, track1 = surf.song(), surf.song().tracks[1]
+    rack = DrumRack()
+    cases = [
+        (song, "delete_track", [0], "A"),
+        (song, "delete_return_track", [0], "Reverb"),
+        (song, "delete_scene", [0], "Intro"),
+        (track1, "delete_device", [0], "Simpler"),
+        (track1.clip_slots[0], "delete_clip", [], "clip"),
+        (track1, "delete_clip", [track1.clip_slots[1].clip], "clip"),
+        (track1.clip_slots[2], "duplicate_clip_to", [track1.clip_slots[0]],
+         "clip"),
+        (rack, "copy_pad", [36, 38], "Snare"),
+        (Simpler(), "replace_sample", ["/x.wav"], "Simpler"),
+        (Sample(Simpler()), "reset_slices", [], "Simpler"),   # via its device
+        (Looper(), "clear", [], "Looper"),
+    ]
+    for obj, fn, args, want in cases:
+        got = H._target_identity(obj, fn, args).get("name")
+        check("%s targets %r" % (fn, want), got == want, got)
+    song.current_song_time = 16.0
+    check("set_or_delete_cue targets the locator under the playhead",
+          H._target_identity(song, "set_or_delete_cue", [])
+          == {"name": "Drop"})
+
+
+def test_expect_gate_follows_the_table():
+    # The 8 the old name pattern missed are guarded now.
+    surf = Surface()
+    song = surf.song()
+    song.current_song_time = 16.0             # on the "Drop" locator
+    occupied = song.tracks[0].clip_slots[1]
+    cases = [
+        (song.tracks[0].clip_slots[0].clip, "set_notes", [()]),
+        (song.tracks[0].clip_slots[0].clip, "replace_selected_notes", [()]),
+        (Sample(Simpler()), "reset_slices", []),
+        (song, "set_or_delete_cue", []),
+        (DrumRack(), "copy_pad", [36, 38]),
+        (song.tracks[0].clip_slots[0], "duplicate_clip_to", [occupied]),
+        (Simpler(), "replace_sample", ["/x.wav"]),
+        (Looper(), "clear", []),
+    ]
+    for obj, fn, args in cases:
+        cls = H._call_undo_class(surf, obj, fn, args)
+        try:
+            H._guard(fn, obj, args, cls, {})
+            e = None
+        except PermissionError as err:
+            e = err
+        check("%s guarded (%s)" % (fn, cls), e is not None, cls)
+
+
+def test_expect_gate_clears_when_nothing_is_overwritten():
+    # Lessons 07-09 copy into empty slots and add locators without confirm.
+    surf = Surface()
+    out = run("call", surf, path="live_set tracks 0 clip_slots 0",
+              function="duplicate_clip_to",
+              args=[{"__path__": "live_set tracks 0 clip_slots 2"}])
+    check("duplicate_clip_to an empty slot runs unconfirmed",
+          out.get("undo_class") == "additive", out)
+    check("and reports no target", "target" not in out, out)
+    e = refused("call", surf, path="live_set tracks 0 clip_slots 0",
+                function="duplicate_clip_to",
+                args=[{"__path__": "live_set tracks 0 clip_slots 2"}])
+    check("the same copy onto the now-full slot is refused",
+          isinstance(e, PermissionError), e)
+
+    song = surf.song()
+    song.current_song_time = 8.0
+    out = run("call", surf, path="live_set", function="set_or_delete_cue")
+    check("set_or_delete_cue off a locator adds (runs unconfirmed)",
+          out.get("undo_class") == "additive", out)
+    song.current_song_time = 16.0 + H._CUE_TOLERANCE / 2
+    check("set_or_delete_cue near a locator deletes (light)",
+          H._call_undo_class(surf, song, "set_or_delete_cue", [])
+          == "destructive_light")
+    song.current_song_time = 15.75
+    check("a locator a 16th away isn't under the playhead",
+          H._call_undo_class(surf, song, "set_or_delete_cue", []) == "additive")
+    song.current_song_time = 16.0 + H._CUE_TOLERANCE * 2
+    check("set_or_delete_cue beyond the tolerance adds",
+          H._call_undo_class(surf, song, "set_or_delete_cue", []) == "additive")
+
+    check("copy_pad onto an empty pad -> additive",
+          H._call_undo_class(surf, DrumRack(), "copy_pad", [36, 40])
+          == "additive")
+    check("copy_pad onto a full pad -> heavy",
+          H._call_undo_class(surf, DrumRack(), "copy_pad", [36, 38])
+          == "destructive_heavy")
+    check("replace_sample into an empty Simpler -> additive",
+          H._call_undo_class(surf, Simpler(loaded=False), "replace_sample",
+                             ["/x.wav"]) == "additive")
+    check("replace_sample over a sample -> heavy",
+          H._call_undo_class(surf, Simpler(), "replace_sample", ["/x.wav"])
+          == "destructive_heavy")
+    check("duplicate_clip_to with no target -> heavy",
+          H._call_undo_class(surf, object(), "duplicate_clip_to", [])
+          == "destructive_heavy")
+
+
+def test_expect_is_checked_even_when_not_gated():
+    e = refused("call", path="live_set", function="create_midi_track",
+                args=[-1], expect="nope")
+    check("a wrong expect stops a harmless call too",
+          isinstance(e, PermissionError), e)
+
+
+def test_expect_works_inside_a_transaction():
+    surf = Surface()
+    out = run("transaction", surf, ops=[
+        {"op": "call", "path": "live_set", "function": "delete_track",
+         "args": [1], "expect": "A"},
+    ])
+    entry = out["results"][0]
+    check("a wrong expect fails the op", entry.get("ok") is False, entry)
+    check("with the actual name", '"B"' in entry.get("error", ""), entry)
+    check("nothing deleted", len(surf.song().tracks) == 2)
+
+
+def test_expect_gate_by_name():
+    census = json.loads(
+        (ROOT / "baseline" / "lom_census_12.4.6.json").read_text())
+    names = {m for t in census["types"].values() for m in t["members"]}
+    for n in sorted(names & set(H._CALL_UNDO_CLASS)):
+        want = H._CALL_UNDO_CLASS[n] in ("destructive_light",
+                                         "destructive_heavy")
+        if H._is_destructive(n) != want:
+            check("%s gated iff classed destructive" % n, False)
+    check("an unlisted delete_* is gated (newer Live)",
+          H._is_destructive("delete_everything"))
+    check("listener plumbing is not", not H._is_destructive("remove_x_listener"))
+    check("an unlisted harmless name is not",
+          not H._is_destructive("some_future_function"))
+    check("an unlisted delete_* reaches the gate as unknown",
+          H._call_undo_class(Surface(), object(), "delete_everything", [])
+          == "unknown")
 
 
 def main(argv=None):

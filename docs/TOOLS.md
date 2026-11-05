@@ -143,7 +143,7 @@ Use lom_describe first to discover valid member names; do not guess.
 ### `lom_call`
 
 ```python
-lom_call(path: str, function: str, args: list[Any] | None = None, confirm: bool = False, offset: int | None = None, limit: int | None = None)
+lom_call(path: str, function: str, args: list[Any] | None = None, confirm: bool = False, offset: int | None = None, limit: int | None = None, expect: str | dict[str, Any] | None = None)
 ```
 
 Call a function on a Live object. Wrapped in a native undo step.
@@ -172,8 +172,23 @@ When the call returns a Live object that sits directly under `path` (a new
 track, a new clip), `result_path` gives its path, e.g.
 create_midi_track -> "live_set tracks 5".
 
-Destructive functions refuse to run unless confirm=True - anything named
-delete_*, remove_* or clear_*, plus crop. Ask the user before setting it.
+Calls that remove or overwrite work (delete_*, remove_*, clear_*, crop,
+set_notes, Looper clear, a clip copied onto a full slot, ...) refuse to run
+without `expect`: the name of what they will remove, as you just read it.
+It is checked inside Live before the call, so an index that shifted (a
+track inserted above) is refused with what is there now instead of
+deleting the wrong thing:
+
+    lom_call("live_set", "delete_track", [3], expect="Bass")
+
+The note removers need the clip's note count too, the `total` that
+clip_get_notes reports: expect={"name": "Verse", "note_count": 16}. A name
+that is empty or Live's positional default ("3-MIDI", "A-Reverb")
+renumbers when tracks move, so it is refused on its own: rename the
+target, or add its id, expect={"id": <lom_get(path, "_live_ptr")>}.
+The result's `target` says what was removed. confirm=True alone still
+runs, with a warning, and never overrides a wrong expect. Ask the user
+before removing their work either way.
 
 ### `lom_get_batch`
 
@@ -234,7 +249,9 @@ Read MIDI notes from a clip, with note_id, pitch, start_time, duration,
 velocity, mute, probability, velocity_deviation and release_velocity.
 
 path is a clip path, e.g. "live_set tracks 0 clip_slots 0 clip".
-Defaults cover the whole clip. Keep the note_ids - clip_modify_notes needs them.
+Defaults cover the clip's [0, length) window; `count` is the notes read,
+`total` every note in the clip (the note_count a note remover's expect
+takes). Keep the note_ids - clip_modify_notes needs them.
 
 ### `clip_add_notes`
 

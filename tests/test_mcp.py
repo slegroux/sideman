@@ -187,6 +187,14 @@ def test_search_requires_a_criterion():
 def test_destructive_default_is_safe():
     _, p = call(S.lom_call, "live_set", "delete_track", [0])
     check("lom_call defaults confirm to False", p.get("confirm") is False, p)
+    check("lom_call omits expect when not given", "expect" not in p, p)
+    _, p = call(S.lom_call, "live_set", "delete_track", [0], expect="Bass")
+    check("lom_call forwards expect", p.get("expect") == "Bass", p)
+    _, p = call(S.lom_call, "live_set tracks 0 clip_slots 0 clip",
+                "remove_notes_extended", [0, 128, 0.0, 4.0],
+                expect={"name": "Verse", "note_count": 16})
+    check("lom_call forwards a dict expect",
+          p.get("expect") == {"name": "Verse", "note_count": 16}, p)
     _, p = call(S.lom_transaction, [], rollback_on_error=False)
     check("transaction defaults rollback_on_error to False",
           p.get("rollback_on_error") is False, p)
