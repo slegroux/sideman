@@ -7,6 +7,7 @@ is reachable without shipping new code.
 from __future__ import annotations
 
 import json
+import os
 import socket
 from typing import Any
 
@@ -591,6 +592,89 @@ def lom_poll_events(since: int | None = None, limit: int = 500,
     if since is not None:
         p["since"] = since
     return json.dumps(_request("observe_poll", p), indent=2)
+
+
+# ------------------------------------------------------------------ listening
+# These run in this process on audio files; they send nothing to Live except,
+# for a clip path, one `get` of its file_path. numpy and soundfile come from the
+# optional `listen` extra and are imported only when a listening tool runs.
+
+LISTEN_HINT = ("the listening tools need the optional `listen` extra (numpy, "
+               "soundfile): pip install 'sideman[listen]', or from a checkout "
+               "uv pip install -e '.[listen]'")
+
+
+def _listen():
+    try:
+        from sideman import listen
+    except ImportError as e:
+        raise LiveError("%s (%s)" % (LISTEN_HINT, e))
+    return listen
+
+
+def _audio_file(source: str) -> str:
+    """An absolute file path, from a path or an audio clip's LOM path."""
+    source = source.strip()
+    if not source:
+        raise LiveError("no audio source given: pass a file path or an audio clip's LOM path")
+    if source.split(" ", 1)[0] in ("live_set", "live_app", "app_view"):
+        got = _request("get", {"path": source, "property": "file_path"})
+        path = got.get("value") if isinstance(got, dict) else got
+        if not path:
+            raise LiveError("%s has no file_path; only audio clips do" % source)
+    else:
+        path = os.path.abspath(os.path.expanduser(source))
+    if not os.path.isfile(path):
+        raise LiveError("no such audio file: %s" % path)
+    return path
+
+
+def _analyze(source: str) -> dict:
+    listen = _listen()
+    path = _audio_file(source)
+    try:
+        return listen.analyze(path)
+    except MemoryError:
+        raise LiveError("not enough memory to analyse %s; bounce a shorter section" % path)
+    except (OSError, RuntimeError, ValueError) as e:   # LibsndfileError is a RuntimeError
+        raise LiveError("cannot measure %s: %s" % (path, e))
+
+
+@mcp.tool()
+def audio_analyze(source: str) -> str:
+    """Measure an audio file, locally: loudness, peaks, dynamics, spectrum, stereo.
+
+    `source` is a mono or stereo WAV/AIFF/FLAC path, or an audio clip's LOM
+    path such as "live_set tracks 3 clip_slots 0 clip". A clip path measures
+    the clip's whole source file: its start/end, loop, warping, clip gain and
+    the track's devices are not applied. Nothing leaves the machine.
+
+    Returns integrated / short-term max / momentary max LUFS (BS.1770-4),
+    true_peak_dbtp, sample_peak_db, rms_db, crest_db, centroid_hz, `bands_db`
+    (mean power per band in dBFS: sub 20-60, bass 60-250, low_mid 250-500, mid
+    500-2k, high_mid 2k-6k, high 6k-20k), `side_minus_mid_db` per band,
+    `width` (0 mono .. 1 all side) and `low_end_correlation` (L/R below 120 Hz:
+    1 is mono-safe, below 0 cancels in mono). A value that cannot be measured
+    (loudness of a file under 0.4 s, short-term under 3 s, or silence) is null.
+
+    Needs the `listen` extra; without it the tool says how to install it.
+    """
+    return json.dumps(_analyze(source), indent=2)
+
+
+@mcp.tool()
+def audio_compare(a: str, b: str) -> str:
+    """Compare two audio files, `a` (usually the Set's bounce or capture) against
+    `b` (usually a reference track). Each is a path or an audio clip's LOM path.
+
+    Band balance is compared after removing the overall level offset (the
+    median band difference), so a quieter mix does not read as a darker one.
+    `flagged_bands` names bands still more than 3 dB away from the reference;
+    `diff` gives a - b for LUFS, true peak, crest, width, low-end correlation
+    and centroid. Local only; needs the `listen` extra.
+    """
+    listen = _listen()
+    return json.dumps(listen.compare(_analyze(a), _analyze(b)), indent=2)
 
 
 def main() -> None:

@@ -119,12 +119,17 @@ def test_every_tool_maps_to_the_right_op():
         check("%s -> %s" % (name, want), op == want, "got %r" % op)
 
 
+# Tools that run in the server process and send no op of their own (the
+# listening tools read audio files; a clip path costs one `get`).
+LOCAL_TOOLS = {"audio_analyze", "audio_compare"}
+
+
 def test_tool_count_matches_registry():
     import asyncio
     tools = asyncio.run(S.mcp.list_tools())
     check("every registered tool is covered here",
-          {t.name for t in tools} == set(EXPECTED_OP),
-          "registry-only: %s" % ({t.name for t in tools} - set(EXPECTED_OP)))
+          {t.name for t in tools} == set(EXPECTED_OP) | LOCAL_TOOLS,
+          "registry-only: %s" % ({t.name for t in tools} - set(EXPECTED_OP) - LOCAL_TOOLS))
     check("no tool has an empty description",
           all((t.description or "").strip() for t in tools))
 
@@ -334,6 +339,88 @@ def test_errors_reach_the_client():
     finally:
         S._request = stub
         S.socket.create_connection = real
+
+
+# ------------------------------------------------------------- listening
+
+def test_listen_tools_without_the_extra_give_the_install_hint():
+    import sideman
+    saved = sys.modules.get("sideman.listen", "absent")
+    attr = sideman.__dict__.pop("listen", None)  # `from sideman import listen` checks this first
+    sys.modules["sideman.listen"] = None        # makes the import raise ImportError
+    try:
+        S.audio_analyze("/nonexistent.wav")
+        check("audio_analyze without the extra raises", False, "no raise")
+    except S.LiveError as e:
+        check("install hint names the extra", "listen" in str(e) and "pip install" in str(e), str(e))
+    finally:
+        if saved == "absent":
+            del sys.modules["sideman.listen"]
+        else:
+            sys.modules["sideman.listen"] = saved
+        if attr is not None:
+            sideman.listen = attr
+
+
+def test_audio_file_resolves_a_clip_path_with_one_get():
+    del CALLS[:]
+    S._request = lambda op, params=None: (CALLS.append((op, params or {})), {"value": __file__})[1]
+    try:
+        got = S._audio_file("live_set tracks 3 clip_slots 0 clip")
+    finally:
+        S._request = fake_request
+    check("clip path -> its file_path", got == __file__, got)
+    check("one get of file_path", CALLS == [("get", {"path": "live_set tracks 3 clip_slots 0 clip",
+                                                     "property": "file_path"})], CALLS)
+    del CALLS[:]
+    check("a plain path is not sent to Live", S._audio_file(__file__) == __file__ and not CALLS)
+    import os
+    home = os.path.expanduser("~")
+    check("~ is expanded", S._audio_file("~") == home if os.path.isfile(home) else True)
+    try:
+        S._audio_file("  /no/such/take.wav ")
+        check("missing file raises", False, "no raise")
+    except S.LiveError as e:
+        check("missing file names the absolute path", "no such audio file: /no/such/take.wav" in str(e), str(e))
+
+
+def test_audio_errors_become_live_errors():
+    import types
+    for exc, want in ((MemoryError(), "not enough memory"), (ValueError("6 channels"), "6 channels")):
+        def boom(path, exc=exc):
+            raise exc
+        saved = sys.modules.get("sideman.listen")
+        import sideman
+        attr = sideman.__dict__.pop("listen", None)
+        sys.modules["sideman.listen"] = types.SimpleNamespace(analyze=boom)
+        try:
+            S.audio_analyze(__file__)
+            check("%s raises" % type(exc).__name__, False, "no raise")
+        except S.LiveError as e:
+            check("%s -> LiveError" % type(exc).__name__, want in str(e), str(e))
+        finally:
+            if saved is None:
+                sys.modules.pop("sideman.listen", None)
+            else:
+                sys.modules["sideman.listen"] = saved
+            if attr is not None:
+                sideman.listen = attr
+    try:
+        S._audio_file("   ")
+        check("empty source raises", False, "no raise")
+    except S.LiveError as e:
+        check("empty source says what to pass", "no audio source" in str(e), str(e))
+
+
+def test_audio_file_refuses_a_clip_without_file_path():
+    S._request = lambda op, params=None: {"value": None}
+    try:
+        S._audio_file("live_set tracks 0 clip_slots 0 clip")
+        check("MIDI clip path raises", False, "no raise")
+    except S.LiveError as e:
+        check("MIDI clip path raises with a reason", "file_path" in str(e), str(e))
+    finally:
+        S._request = fake_request
 
 
 def main():

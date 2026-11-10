@@ -7,6 +7,10 @@ license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 dependencies = ["mcp>=2.2,<3"]
 
+[project.optional-dependencies]
+# Local audio analysis (audio_analyze, audio_compare). Not in the base install.
+listen = ["numpy>=1.24", "soundfile>=0.12"]
+
 [project.scripts]
 sideman = "mcp_server.server:main"
 
