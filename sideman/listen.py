@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import math
 import pathlib
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 import numpy as np
 import soundfile as sf
@@ -39,6 +41,11 @@ FRAME = 8192            # spectrum frame; hop is half
 BATCH = 128             # frames per FFT batch, bounds memory on long files
 FLAG_DB = 3.0           # audio_compare flags a band that differs by more than this
 K_TAPS = 8192           # K-weighting impulse response length; the high-pass is below -170 dB by then
+SUBBLOCK_S = 0.1        # BS.1770 loudness is built from 100 ms sub-blocks...
+MOMENTARY_SUBBLOCKS = 4     # ...400 ms momentary window, 100 ms hop
+SHORT_TERM_SUBBLOCKS = 30   # ...3 s short-term window
+ABS_GATE_LUFS = -70.0   # absolute gate, and the floor under which a max is "not measurable"
+REL_GATE_LU = -10.0     # relative gate, below the absolute-gated mean
 
 
 def _db(power: float) -> float:
@@ -113,7 +120,7 @@ def k_impulse(sr: int, taps: int = K_TAPS) -> np.ndarray:
 def _subblock_powers(x: np.ndarray, sr: int) -> np.ndarray:
     """K-weighted mean square per 100 ms sub-block, summed over channels.
     Shape [n_subblocks]; a trailing partial sub-block is dropped."""
-    n = int(round(sr * 0.1))
+    n = int(round(sr * SUBBLOCK_S))
     m = x.shape[0] // n
     if m == 0:
         return np.zeros(0)
@@ -145,23 +152,31 @@ def loudness(x: np.ndarray, sr: int) -> dict:
     """Integrated LUFS (gated), short-term max (3 s) and momentary max (400 ms).
     A value that cannot be measured (file too short, or all of it below the
     -70 LUFS gate) is None, never a placeholder number."""
-    sub = _subblock_powers(x, sr)
+    return loudness_from_subblocks(_subblock_powers(x, sr))
+
+
+def loudness_from_subblocks(sub: np.ndarray) -> dict:
+    """`loudness` from K-weighted 100 ms sub-block powers summed over channels:
+    the file path computes them from samples, the live-listen device sends them
+    (sideman.stream)."""
     out = {"integrated_lufs": None, "short_term_max_lufs": None, "momentary_max_lufs": None}
-    if len(sub) < 4:
+    if len(sub) < MOMENTARY_SUBBLOCKS:
         return out
     c = np.concatenate([[0.0], np.cumsum(sub)])
-    block = (c[4:] - c[:-4]) / 4.0                       # 400 ms, 100 ms hop
+    mom = MOMENTARY_SUBBLOCKS
+    block = (c[mom:] - c[:-mom]) / mom                   # 400 ms, 100 ms hop
     lb = _lufs(block)
-    out["momentary_max_lufs"] = round(float(lb.max()), 2) if lb.max() > -70.0 else None
-    gated = block[lb > -70.0]
+    out["momentary_max_lufs"] = round(float(lb.max()), 2) if lb.max() > ABS_GATE_LUFS else None
+    gated = block[lb > ABS_GATE_LUFS]
     if len(gated):
-        rel = _lufs(gated.mean()) - 10.0
-        gated = block[(lb > -70.0) & (lb > rel)]
+        rel = _lufs(gated.mean()) + REL_GATE_LU
+        gated = block[(lb > ABS_GATE_LUFS) & (lb > rel)]
         if len(gated):
             out["integrated_lufs"] = round(float(_lufs(gated.mean())), 2)
-    if len(sub) >= 30:
-        st = float(_lufs(((c[30:] - c[:-30]) / 30.0).max()))
-        out["short_term_max_lufs"] = round(st, 2) if st > -70.0 else None
+    if len(sub) >= SHORT_TERM_SUBBLOCKS:
+        sh = SHORT_TERM_SUBBLOCKS
+        st = float(_lufs(((c[sh:] - c[:-sh]) / sh).max()))
+        out["short_term_max_lufs"] = round(st, 2) if st > ABS_GATE_LUFS else None
     return out
 
 
@@ -388,7 +403,42 @@ def _slice(x: np.ndarray, sr: int, t0: float, t1: float) -> np.ndarray:
     return x[max(0, int(round(t0 * sr))):max(0, int(round(t1 * sr)))]
 
 
-def masking(kick: np.ndarray, bass: np.ndarray, sr: int) -> float | None:
+def _mask_cells(mono: np.ndarray, sr: int) -> np.ndarray:
+    """Power in the 40-120 Hz bins of each ~85 ms frame (50 % overlap) of a mono
+    signal: [frames, bins]. The FFT runs BATCH frames at a time and only the
+    ~7 low bins per frame are kept, so a 7-minute file holds under a megabyte of
+    cells however long it is. Fewer samples than one frame gives zero frames."""
+    freqs = np.fft.rfftfreq(MASK_FRAME, 1.0 / sr)
+    sel = (freqs >= MASK_LO) & (freqs < MASK_HI)
+    win = np.hanning(MASK_FRAME)
+    starts = np.arange(0, len(mono) - MASK_FRAME + 1, MASK_FRAME // 2)
+    cells = [np.abs(np.fft.rfft(mono[starts[s:s + BATCH, None] + np.arange(MASK_FRAME)[None, :]]
+                                .astype(np.float64) * win, axis=1)[:, sel]) ** 2
+             for s in range(0, len(starts), BATCH)]
+    return np.concatenate(cells) if cells else np.zeros((0, int(sel.sum())))
+
+
+def masking_cells(kick_cells: np.ndarray, bass_cells: np.ndarray) -> dict | None:
+    """The kick/bass overlap rule on two [frames, bins] grids of low-band power.
+    Both grids must have the same shape (the same frames and bins): a mismatch
+    means the two parts are not aligned, and is refused rather than cut.
+    Returns {"overlap", "quieter_db"} or None when either grid is silent.
+
+    overlap: how much of the quieter part's energy sits in the same
+    time-frequency cells as the other's, sum(min) / min(sum kick, sum bass).
+    quieter_db: the quieter part's energy relative to the louder's."""
+    pk, pb = np.asarray(kick_cells, dtype=float), np.asarray(bass_cells, dtype=float)
+    if pk.shape != pb.shape or pk.ndim != 2:
+        raise ValueError("masking cells must be two [frames, bins] grids of one shape; "
+                         "got kick %s and bass %s" % (pk.shape, pb.shape))
+    lo_sum, k_sum, b_sum = float(np.minimum(pk, pb).sum()), float(pk.sum()), float(pb.sum())
+    if k_sum == 0 or b_sum == 0:
+        return None
+    return {"overlap": round(lo_sum / min(k_sum, b_sum), 3),
+            "quieter_db": round(_db(min(k_sum, b_sum) / max(k_sum, b_sum)), 1)}
+
+
+def masking(kick: np.ndarray, bass: np.ndarray, sr: int) -> dict | None:
     """How kick and bass share 40-120 Hz, over ~85 ms frames. Returns
     {"overlap", "quieter_db"} or None when either is silent there.
 
@@ -398,27 +448,15 @@ def masking(kick: np.ndarray, bass: np.ndarray, sr: int) -> float | None:
     bass under each hit); 1 = the quieter one is entirely under the louder.
     quieter_db: the quieter part's 40-120 Hz energy relative to the louder's.
     mix_report flags masking only when both are high, since a part 40 dB down
-    is inaudible whatever it overlaps."""
-    k, b = _stereo(kick).mean(axis=1), _stereo(bass).mean(axis=1)
-    n = min(len(k), len(b))
-    if n < MASK_FRAME:
-        return None
-    win = np.hanning(MASK_FRAME)
-    freqs = np.fft.rfftfreq(MASK_FRAME, 1.0 / sr)
-    sel = (freqs >= MASK_LO) & (freqs < MASK_HI)
-    starts = np.arange(0, n - MASK_FRAME + 1, MASK_FRAME // 2)
-    lo_sum = k_sum = b_sum = 0.0
-    for s in range(0, len(starts), BATCH):
-        idx = starts[s:s + BATCH, None] + np.arange(MASK_FRAME)[None, :]
-        pk = np.abs(np.fft.rfft(k[idx].astype(np.float64) * win, axis=1)[:, sel]) ** 2
-        pb = np.abs(np.fft.rfft(b[idx].astype(np.float64) * win, axis=1)[:, sel]) ** 2
-        lo_sum += float(np.minimum(pk, pb).sum())
-        k_sum += float(pk.sum())
-        b_sum += float(pb.sum())
-    if k_sum == 0 or b_sum == 0:
-        return None
-    return {"overlap": round(lo_sum / min(k_sum, b_sum), 3),
-            "quieter_db": round(_db(min(k_sum, b_sum) / max(k_sum, b_sum)), 1)}
+    is inaudible whatever it overlaps. Builds the FFT cells (_mask_cells), then
+    applies masking_cells."""
+    n = min(len(kick), len(bass))
+    return masking_cells(_mono_cells(kick[:n], sr), _mono_cells(bass[:n], sr))
+
+
+def _mono_cells(x: np.ndarray, sr: int) -> np.ndarray:
+    """_mask_cells of [n, channels] samples, on the mean of the channels."""
+    return _mask_cells(_stereo(x).mean(axis=1), sr)
 
 
 def _third_octave_db(x: np.ndarray, sr: int) -> np.ndarray:
@@ -430,26 +468,21 @@ def _third_octave_db(x: np.ndarray, sr: int) -> np.ndarray:
     return np.array([_db(_band(lr, sp["freqs"], c / 2 ** (1 / 6), c * 2 ** (1 / 6))) for c in centres])
 
 
-def change_rate(x: np.ndarray, sr: int, bar_s: float, offset_s: float, first_bar: int,
-                last_bar: int) -> dict:
-    """Spectral change between consecutive 4-bar blocks on the bar grid: the mean
-    absolute third-octave difference (dB) over the bands sounding in either
-    block, each block's bands floored at 40 dB under its loudest, so an
-    element far below the mix entering does not read as a 70 dB jump. Runs longer than 8 bars
-    with every step under CHANGE_DB are flagged. Silent blocks break a run and
-    are never flagged. Each block is compared with the one before it, so very
-    slow automation (under 1 dB per 4 bars) also reads as no change."""
-    blocks, vecs, floors, steps = [], [], [], []
-    for b0 in range(first_bar, last_bar, CHANGE_BLOCK_BARS):
-        b1 = min(b0 + CHANGE_BLOCK_BARS, last_bar)
-        seg = _slice(x, sr, offset_s + b0 * bar_s, offset_s + b1 * bar_s)
-        if len(seg) < sr // 10:
-            continue
-        v = _third_octave_db(seg, sr)
+def change_steps(blocks: Iterable[tuple[int, int, np.ndarray]], *,
+                 block_bars: int = CHANGE_BLOCK_BARS) -> dict:
+    """The step and static-run logic of change_rate on any source of blocks.
+    `blocks` is a sequence of (b0, b1, v): the bar range of a block and its
+    third-octave levels in dB (a silent block is all FLOOR_DB, as
+    _third_octave_db gives). Returns {"block_bars", "steps", "static_runs"};
+    a static run carries start_bar, end_bar and bars, and change_rate adds the
+    section names. `block_bars` is only reported (the markdown header)."""
+    spans, vecs, floors, steps = [], [], [], []
+    for b0, b1, v in blocks:
+        v = np.asarray(v, dtype=float)
         silent = bool(v.max() < SILENT_DB)
         floor = v.max() - CHANGE_RANGE_DB
         v = np.maximum(v, floor)
-        blocks.append((b0, b1, silent))
+        spans.append((b0, b1, silent))
         if vecs:
             p = vecs[-1]
             live = (v > floor) | (p > floors[-1])
@@ -458,14 +491,92 @@ def change_rate(x: np.ndarray, sr: int, bar_s: float, offset_s: float, first_bar
         vecs.append(v)
         floors.append(floor)
     flags, run_start = [], 0
-    for i in range(1, len(blocks) + 1):
-        if i == len(blocks) or steps[i - 1]["change_db"] >= CHANGE_DB or blocks[i][2] != blocks[i - 1][2]:
-            b0, b1, silent = blocks[run_start][0], blocks[i - 1][1], blocks[run_start][2]
+    for i in range(1, len(spans) + 1):
+        if i == len(spans) or steps[i - 1]["change_db"] >= CHANGE_DB or spans[i][2] != spans[i - 1][2]:
+            b0, b1, silent = spans[run_start][0], spans[i - 1][1], spans[run_start][2]
             if b1 - b0 > STATIC_MAX_BARS and not silent:
                 flags.append({"start_bar": b0, "end_bar": b1, "bars": b1 - b0})
             run_start = i
-    return {"block_bars": CHANGE_BLOCK_BARS,
+    return {"block_bars": block_bars,
             "steps": steps, "static_runs": flags}
+
+
+def change_rate(x: np.ndarray, sr: int, bar_s: float, offset_s: float, first_bar: int,
+                last_bar: int) -> dict:
+    """Spectral change between consecutive 4-bar blocks on the bar grid: the mean
+    absolute third-octave difference (dB) over the bands sounding in either
+    block, each block's bands floored at 40 dB under its loudest, so an
+    element far below the mix entering does not read as a 70 dB jump. Runs longer than 8 bars
+    with every step under CHANGE_DB are flagged. Silent blocks break a run and
+    are never flagged. Each block is compared with the one before it, so very
+    slow automation (under 1 dB per 4 bars) also reads as no change.
+    Measures each block from `x`, then applies change_steps."""
+    def blocks():
+        for b0 in range(first_bar, last_bar, CHANGE_BLOCK_BARS):
+            b1 = min(b0 + CHANGE_BLOCK_BARS, last_bar)
+            seg = _slice(x, sr, offset_s + b0 * bar_s, offset_s + b1 * bar_s)
+            if len(seg) >= sr // 10:
+                yield b0, b1, _third_octave_db(seg, sr)
+    return change_steps(blocks())
+
+
+# One section of a report, from audio today and from a device's per-block rows
+# later: `stats` is the analyze_array() dict for the master over the section;
+# the optional kick/bass cells are masking_cells() inputs. The live-listen path
+# (plan 19 item 7) will add a constructor that fills the same fields from a
+# device's precomputed stats and cell matrices, with no audio.
+
+@dataclass(eq=False)
+class SectionFeatures:
+    stats: dict
+    kick_cells: np.ndarray | None = None
+    bass_cells: np.ndarray | None = None
+
+    @classmethod
+    def from_arrays(cls, master_x: np.ndarray, sr: int, kick_x: np.ndarray | None = None,
+                    bass_x: np.ndarray | None = None) -> SectionFeatures:
+        """Features of one section's samples [n, channels]. Masking cells exist
+        only when both kick and bass are given; a part shorter than one
+        MASK_FRAME has no cells, so masking reads as unmeasurable."""
+        cells = {}
+        if kick_x is not None and bass_x is not None:
+            n = min(len(kick_x), len(bass_x))
+            cells = {"kick_cells": _mono_cells(kick_x[:n], sr),
+                     "bass_cells": _mono_cells(bass_x[:n], sr)}
+        return cls(analyze_array(master_x, sr), **cells)
+
+
+def section_stats(f: SectionFeatures, ref: dict | None) -> dict:
+    """The measurements of one report row: loudness, peak, width, centroid,
+    bands, and `vs_reference` against an analyze()-shaped `ref` when given."""
+    a = f.stats
+    row = {k: a[k] for k in ("integrated_lufs", "short_term_max_lufs", "true_peak_dbtp", "crest_db", "width",
+                             "low_end_correlation", "centroid_hz", "bands_db", "side_minus_mid_db")}
+    if ref is not None:
+        c = compare(a, ref)
+        row["vs_reference"] = {"band_balance_db": c["band_balance_db"],
+                               "flagged_bands": [fb["band"] for fb in c["flagged_bands"]],
+                               "lufs_diff": c["diff"].get("integrated_lufs")}
+    return row
+
+
+def section_flags(mk: dict | None) -> list[str]:
+    """Flags raised on one section from its masking_cells() result: "masking"
+    when kick and bass overlap above MASK_FLAG and the quieter is no further
+    below the louder than MASK_AUDIBLE_DB in 40-120 Hz."""
+    return ["masking"] if mk and mk["overlap"] > MASK_FLAG and mk["quieter_db"] >= MASK_AUDIBLE_DB else []
+
+
+def section_row(name: str, start_bar: int, bars: int, f: SectionFeatures, ref: dict | None) -> dict:
+    """A mix_report section: name and bars, section_stats, then the kick/bass
+    masking fields when the features carry cells."""
+    row = {"name": name, "start_bar": start_bar, "bars": bars, **section_stats(f, ref)}
+    if f.kick_cells is not None and f.bass_cells is not None:
+        mk = masking_cells(f.kick_cells, f.bass_cells)
+        row["kick_bass_overlap"] = mk and mk["overlap"]
+        row["kick_bass_quieter_db"] = mk and mk["quieter_db"]
+        row["masking_flag"] = "masking" in section_flags(mk)
+    return row
 
 
 def mix_report(manifest: dict | str | pathlib.Path, reference: str | pathlib.Path | None = None,
@@ -498,27 +609,16 @@ def mix_report(manifest: dict | str | pathlib.Path, reference: str | pathlib.Pat
     ref = analyze(reference) if reference else None
     kick_role = "kick" if "kick" in audio else ("drums" if "drums" in audio else None)
     rows = []
+    mask = bool(kick_role and "bass" in audio)
     for sec in m["sections"]:
         t0 = off + sec["start_bar"] * bar_s
         t1 = t0 + sec["bars"] * bar_s
-        a = analyze_array(_slice(audio["master"][0], sr, t0, t1), sr)
-        row = {"name": sec.get("name", "bar %d" % sec["start_bar"]), "start_bar": sec["start_bar"],
-               "bars": sec["bars"]}
-        for k in ("integrated_lufs", "short_term_max_lufs", "true_peak_dbtp", "crest_db", "width",
-                  "low_end_correlation", "centroid_hz", "bands_db", "side_minus_mid_db"):
-            row[k] = a[k]
-        if ref is not None:
-            c = compare(a, ref)
-            row["vs_reference"] = {"band_balance_db": c["band_balance_db"],
-                                   "flagged_bands": [f["band"] for f in c["flagged_bands"]],
-                                   "lufs_diff": c["diff"].get("integrated_lufs")}
-        if kick_role and "bass" in audio:
-            mk = masking(_slice(audio[kick_role][0], sr, t0, t1), _slice(audio["bass"][0], sr, t0, t1), sr)
-            row["kick_bass_overlap"] = mk and mk["overlap"]
-            row["kick_bass_quieter_db"] = mk and mk["quieter_db"]
-            row["masking_flag"] = bool(mk and mk["overlap"] > MASK_FLAG
-                                       and mk["quieter_db"] >= MASK_AUDIBLE_DB)
-        rows.append(row)
+        feat = SectionFeatures.from_arrays(
+            _slice(audio["master"][0], sr, t0, t1), sr,
+            _slice(audio[kick_role][0], sr, t0, t1) if mask else None,
+            _slice(audio["bass"][0], sr, t0, t1) if mask else None)
+        rows.append(section_row(sec.get("name", "bar %d" % sec["start_bar"]), sec["start_bar"], sec["bars"],
+                                feat, ref))
     cr = change_rate(audio["master"][0], sr, bar_s, off, first, last)
     names = sorted((s["start_bar"], s["start_bar"] + s["bars"], s.get("name", "")) for s in m["sections"])
     for f in cr["static_runs"]:
