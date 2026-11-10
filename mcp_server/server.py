@@ -677,6 +677,39 @@ def audio_compare(a: str, b: str) -> str:
     return json.dumps(listen.compare(_analyze(a), _analyze(b)), indent=2)
 
 
+@mcp.tool()
+def mix_report(manifest: dict[str, Any] | str, reference: str | None = None,
+               out_dir: str | None = None) -> str:
+    """Per-section mix report of a capture: what to fix, section by section.
+
+    `manifest` (a dict, or the path of a JSON file) places time-aligned files
+    on the Set's bar grid:
+        {"tempo": 122, "beats_per_bar": 4, "offset_s": 0.0,
+         "sources": {"master": "/abs/master.wav", "kick": "...", "bass": "..."},
+         "sections": [{"name": "INTRO A", "start_bar": 0, "bars": 8}, ...]}
+    start_bar counts from the files' bar 0 (at offset_s). "master" is required;
+    a "kick" (or "drums") plus a "bass" source adds masking.
+
+    Per section: integrated / short-term max LUFS, true peak, crest, width,
+    low-end correlation, bands and side-minus-mid; with `reference` (a file
+    path) the bands more than 3 dB off its balance; with kick and bass, their
+    40-120 Hz overlap (0 separate or sidechained .. 1 fully stacked; flagged
+    above 0.5 unless the quieter part is more than 20 dB down). Over the whole capture, the spectral change between 4-bar
+    blocks, flagging runs of more than 8 bars where nothing changes.
+
+    Writes mix_report.json and mix_report.md (default: next to the master
+    file) and returns the report. Local only; needs the `listen` extra.
+    """
+    listen = _listen()
+    ref = _audio_file(reference) if reference else None
+    try:
+        return json.dumps(listen.mix_report(manifest, ref, out_dir), indent=2)
+    except MemoryError:
+        raise LiveError("not enough memory for this capture; report fewer sections at a time")
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, ArithmeticError) as e:
+        raise LiveError("cannot build the mix report: %s: %s" % (type(e).__name__, e))
+
+
 def main() -> None:
     mcp.run(transport="stdio")
 

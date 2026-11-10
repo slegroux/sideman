@@ -33,7 +33,7 @@ reachable without shipping new code.
 
 - **[docs/TUTORIAL.md](docs/TUTORIAL.md)** — build a 4-bar house loop from an empty Set. **Start here.**
 - **[The course](https://sideman-course.sideman-course.workers.dev/)** — a melodic house track from an empty Set in ten lessons; one path for musicians (prompts only), one for programmers (executed notebooks).
-- **[docs/TOOLS.md](docs/TOOLS.md)** — all 32 tools with signatures (generated)
+- **[docs/TOOLS.md](docs/TOOLS.md)** — all 33 tools with signatures (generated)
 - **[docs/PROTOCOL.md](docs/PROTOCOL.md)** — wire protocol, threading contract, how to add an op
 - **[docs/CLIENT.md](docs/CLIENT.md)** — the `sideman.Live` Python client, method by method (generated)
 - **[docs/CONVENTIONS.md](docs/CONVENTIONS.md)** — paths, `__path__`, batches vs transactions, observers, and the gotchas measured against Live
@@ -50,7 +50,7 @@ Method, numbers and what is out of scope: **[docs/COVERAGE.md](docs/COVERAGE.md)
 ## Architecture
 
 ```
-Claude ──MCP──► mcp_server/server.py          32 tools
+Claude ──MCP──► mcp_server/server.py          33 tools
                     │ JSON/TCP :9878          (not 9877 — coexists with others)
                     ▼
                 remote_script/AbletonLOM/
@@ -133,7 +133,7 @@ appear.
 
 ## Tools
 
-32 tools. Generic first — the typed ones exist only where generic access
+33 tools. Generic first — the typed ones exist only where generic access
 genuinely cannot work. Full signatures in **[docs/TOOLS.md](docs/TOOLS.md)**.
 
 | Tool | Purpose |
@@ -151,7 +151,7 @@ genuinely cannot work. Full signatures in **[docs/TOOLS.md](docs/TOOLS.md)**.
 | `arrangement_create_clip` / `duplicate_clip` / `list_clips` | Arrangement authoring |
 | `clip_set_warp_markers` | Audio warp map (typed — JSON cannot carry a WarpMarker) |
 | `lom_observe` / `lom_poll_events` / `lom_observers` / `lom_unobserve*` | Change notification |
-| `audio_analyze` / `audio_compare` | Loudness, peaks, spectrum and stereo of an audio file, vs a reference (local; `listen` extra) |
+| `audio_analyze` / `audio_compare` / `mix_report` | Loudness, peaks, spectrum and stereo of an audio file, vs a reference; per-section report of a capture (local; `listen` extra) |
 
 **Observers are unique to this server.** Nothing else in the field reports
 changes *the user* makes in the GUI.
@@ -258,7 +258,7 @@ without the MCP layer in the way. See **[docs/PROTOCOL.md](docs/PROTOCOL.md)**
 for the protocol and how to add an op.
 
 Deliberately **no curated per-feature tool layer**. The plan called for ~30 sugar
-verbs; at 32 generic tools that would mean 64, and tool overload degrades
+verbs; at 33 generic tools that would mean 66, and tool overload degrades
 selection. The skill buys the same ergonomics at zero tool cost.
 
 ## License
