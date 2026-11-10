@@ -55,6 +55,7 @@ GROUPS = [
                      "arrangement_duplicate_clip"]),
     ("Observers", ["lom_observe", "lom_unobserve", "lom_observers",
                    "lom_unobserve_all", "lom_poll_events"]),
+    ("Listening", ["audio_analyze", "audio_compare", "mix_report"]),
 ]
 
 
