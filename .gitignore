@@ -10,3 +10,6 @@ docs/.quarto/
 site/learn/
 docs/img/
 uv.lock
+
+# built Max for Live devices (scripts/build_amxd.py)
+/build/

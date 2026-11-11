@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import threading
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -708,6 +709,82 @@ def mix_report(manifest: dict[str, Any] | str, reference: str | None = None,
         raise LiveError("not enough memory for this capture; report fewer sections at a time")
     except (OSError, RuntimeError, ValueError, KeyError, TypeError, ArithmeticError) as e:
         raise LiveError("cannot build the mix report: %s: %s" % (type(e).__name__, e))
+
+
+# ------------------------------------------------------------------ live listening
+# Rows from "Sideman Listen" Max for Live devices arrive over UDP on
+# 127.0.0.1:9071. The receiver starts on the first listen_* call: the first
+# Sideman process to bind the port owns the stream (a daemon thread) and shares
+# it with later ones over a 0600 Unix socket. Nothing is sent anywhere.
+
+_receiver = None
+_receiver_lock = threading.Lock()
+
+
+def _stream():
+    try:
+        from sideman import stream
+    except ImportError as e:
+        raise LiveError("%s (%s)" % (LISTEN_HINT, e))
+    return stream
+
+
+def _get_receiver():
+    global _receiver
+    stream = _stream()
+    with _receiver_lock:
+        if _receiver is None:
+            r = stream.Receiver()
+            try:
+                r.start()
+            except stream.PortInUse as e:
+                raise LiveError(str(e))
+            _receiver = r
+        return _receiver
+
+
+@mcp.tool()
+def listen_snapshot(seconds: float = 3.0, slots: list[int] | None = None) -> str:
+    """What each Sideman Listen device heard over the last `seconds` (default 3).
+
+    A "Sideman Listen" Max for Live device (Suite only) on a track sends that
+    track's loudness and level every 100 ms; this reads them, keyed by the
+    device's Slot number. Readings are pre-fader: the device sits at the end of
+    the track's chain, before the mixer.
+
+    Per slot: momentary_lufs (last 400 ms), short_term_lufs (last 3 s),
+    integrated / short-term max / momentary max LUFS over the window,
+    sample_peak_db, rms_db, crest_db. `stale` lists slots silent for over a
+    second; `ambiguous` lists slots heard from two devices at once (a duplicated
+    track). The first call starts the receiver, so it may return nothing yet.
+    Local only; needs the `listen` extra.
+    """
+    stream = _stream()
+    r = _get_receiver()
+    try:
+        return json.dumps(_snapshot(stream, r, seconds, slots), indent=2)
+    except stream.PortInUse as e:      # the owning session vanished and the port is held
+        raise LiveError(str(e))
+
+
+def _snapshot(stream, r, seconds: float, slots: list[int] | None) -> dict:
+    info = r.slots()
+    want = sorted(info) if slots is None else list(slots)
+    out: dict[str, Any] = {"slots": {}, "stale": [], "ambiguous": [],
+                           "unheard": [s for s in want if s not in info],
+                           "port": r.port}
+    for s in want:
+        if s not in info:
+            continue
+        d = info[s]
+        if not d["nonces"]:
+            out["stale"].append(s)
+        if len(d["nonces"]) > 1:
+            out["ambiguous"].append(s)
+        a = stream.analyze_rows(r.rows(s, last_s=seconds))
+        a["sr"], a["seq_gaps"], a["last_seen_s"] = d["sr"], d["seq_gaps"], d["last_seen_s"]
+        out["slots"][str(s)] = a
+    return out
 
 
 def main() -> None:

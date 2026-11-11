@@ -1,0 +1,139 @@
+// Sideman Listen: per-block sums for the Sideman MCP server.
+// Built into "Sideman Listen.amxd" by scripts/build_amxd.py, which fills in
+// the at-sign placeholders (row width, ring size, kill-test load). sideman/stream.py's blocks_from_array is the numpy
+// model of this code; the two must agree (tests/test_stream.py).
+//
+// Inputs: in1 L, in2 R, in3 beat (plugsync~ 1 PPQ), in4 host sample count
+// (plugsync~, as one 64-bit signal), in5 transport playing (0/1), in6 this
+// track's playing_slot_index. The control inputs update every ~10 ms; the
+// sample count is carried forward sample by sample between updates, so a
+// block's stamp is not up to 10 ms stale.
+// Every n = round(samplerate * 0.1) samples a block closes and one row of
+// @W@ values is written to the ring buffer (@RING@ rows); frame 0 holds the
+// number of rows written, which listen.js polls. Blocks free-run: they close
+// with the transport stopped too. Stamps are latched at a block's start.
+//
+// Row layout: seq playing playing_slot beat hs_hi hs_lo sr n | @NVALUES@ values
+// (pow_l pow_r pow_lr k_pow_l k_pow_r peak true_peak third_oct[29] band6[18]
+// lo[3] lo_sub[20]). Device v0 fills the first six values.
+//
+// The per-sample state (filters, accumulators, counters) is read into locals
+// and written back once, so the result does not depend on whether a History
+// write is visible later in the same sample. The sample-rate block at the top
+// is the exception; it runs once per rate change.
+// A rate change (and the first sample) resets the counters, the filters and
+// the ring count to 0: listen.js sees the count go back and draws a new nonce,
+// so the server starts a new ring.
+
+Buffer ring("sml_ring");
+History cur_sr(0), nblk(4800);
+History s1b0(0), s1b1(0), s1b2(0), s1a1(0), s1a2(0), s2a1(0), s2a2(0);
+History l1x1(0), l1x2(0), l1y1(0), l1y2(0), l2x1(0), l2x2(0), l2y1(0), l2y2(0);
+History r1x1(0), r1x2(0), r1y1(0), r1y2(0), r2x1(0), r2x2(0), r2y1(0), r2y2(0);
+History cnt(0), seq(0);
+History a_ll(0), a_rr(0), a_lr(0), a_kl(0), a_kr(0), a_pk(0), a_dm(0);
+History t_beat(0), t_hs(0), t_play(0), t_slot(-1);
+History hs_last(-1), hs_since(0);
+@DUMMY_DECL@
+
+if (cur_sr != samplerate) {
+	// BS.1770 K-weighting from the analog prototype, as listen.k_weighting(sr).
+	fc = 1681.974450955533;
+	gdb = 3.999843853973347;
+	q = 0.7071752369554196;
+	k = tan(pi * fc / samplerate);
+	vh = pow(10, gdb / 20);
+	vb = pow(vh, 0.4996667741545416);
+	a0 = 1 + k / q + k * k;
+	s1b0 = (vh + vb * k / q + k * k) / a0;
+	s1b1 = 2 * (k * k - vh) / a0;
+	s1b2 = (vh - vb * k / q + k * k) / a0;
+	s1a1 = 2 * (k * k - 1) / a0;
+	s1a2 = (1 - k / q + k * k) / a0;
+	fc2 = 38.13547087602444;
+	q2 = 0.5003270373238773;
+	k2 = tan(pi * fc2 / samplerate);
+	a02 = 1 + k2 / q2 + k2 * k2;
+	s2a1 = 2 * (k2 * k2 - 1) / a02;
+	s2a2 = (1 - k2 / q2 + k2 * k2) / a02;
+	nblk = round(samplerate * 0.1);
+	cur_sr = samplerate;
+	cnt = 0; seq = 0;
+	a_ll = 0; a_rr = 0; a_lr = 0; a_kl = 0; a_kr = 0; a_pk = 0; a_dm = 0;
+	l1x1 = 0; l1x2 = 0; l1y1 = 0; l1y2 = 0; l2x1 = 0; l2x2 = 0; l2y1 = 0; l2y2 = 0;
+	r1x1 = 0; r1x2 = 0; r1y1 = 0; r1y2 = 0; r2x1 = 0; r2x2 = 0; r2y1 = 0; r2y2 = 0;
+	poke(ring, 0, 0);
+}
+
+l = in1;
+r = in2;
+// host sample count now: the last control value plus samples since it came
+hin = in4;
+hl = hs_last;
+hsn = hs_since + 1;
+if (hin != hl) {
+	hl = hin;
+	hsn = 0;
+}
+hs_last = hl;
+hs_since = hsn;
+c0 = cnt;
+if (c0 == 0) {
+	t_beat = in3;
+	t_hs = hl + hsn;
+	t_play = in5;
+	t_slot = in6;
+}
+
+// K-weighting, left: shelf then high-pass (b = 1, -2, 1).
+ly1 = s1b0 * l + s1b1 * l1x1 + s1b2 * l1x2 - s1a1 * l1y1 - s1a2 * l1y2;
+ly2 = ly1 - 2 * l2x1 + l2x2 - s2a1 * l2y1 - s2a2 * l2y2;
+l1x2 = l1x1; l1x1 = l; l1y2 = l1y1; l1y1 = ly1;
+l2x2 = l2x1; l2x1 = ly1; l2y2 = l2y1; l2y1 = ly2;
+// right
+ry1 = s1b0 * r + s1b1 * r1x1 + s1b2 * r1x2 - s1a1 * r1y1 - s1a2 * r1y2;
+ry2 = ry1 - 2 * r2x1 + r2x2 - s2a1 * r2y1 - s2a2 * r2y2;
+r1x2 = r1x1; r1x1 = r; r1y2 = r1y1; r1y1 = ry1;
+r2x2 = r2x1; r2x1 = ry1; r2y2 = r2y1; r2y1 = ry2;
+
+dm = 0;
+@DUMMY_BODY@
+
+c = c0 + 1;
+s_ll = a_ll + l * l;
+s_rr = a_rr + r * r;
+s_lr = a_lr + l * r;
+s_kl = a_kl + ly2 * ly2;
+s_kr = a_kr + ry2 * ry2;
+s_pk = max(a_pk, max(abs(l), abs(r)));
+s_dm = a_dm + dm;
+
+if (c >= nblk) {
+	base = 1 + (seq % @RING@) * @W@;
+	poke(ring, seq, base + 0);
+	poke(ring, t_play, base + 1);
+	poke(ring, t_slot, base + 2);
+	poke(ring, t_beat, base + 3);
+	hi = floor(t_hs / 65536);
+	poke(ring, hi, base + 4);
+	poke(ring, t_hs - hi * 65536, base + 5);
+	poke(ring, samplerate, base + 6);
+	poke(ring, c, base + 7);
+	poke(ring, s_ll / c, base + 8);
+	poke(ring, s_rr / c, base + 9);
+	poke(ring, s_lr / c, base + 10);
+	poke(ring, s_kl / c, base + 11);
+	poke(ring, s_kr / c, base + 12);
+	poke(ring, s_pk, base + 13);
+	poke(ring, 0, base + 14);
+	poke(ring, s_dm / c, base + 15);
+	poke(ring, seq + 1, 0);
+	seq = seq + 1;
+	cnt = 0;
+	a_ll = 0; a_rr = 0; a_lr = 0; a_kl = 0; a_kr = 0; a_pk = 0; a_dm = 0;
+} else {
+	cnt = c;
+	a_ll = s_ll; a_rr = s_rr; a_lr = s_lr; a_kl = s_kl; a_kr = s_kr; a_pk = s_pk; a_dm = s_dm;
+}
+
+out1 = 0;
