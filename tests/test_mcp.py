@@ -120,8 +120,9 @@ def test_every_tool_maps_to_the_right_op():
 
 
 # Tools that run in the server process and send no op of their own (the
-# listening tools read audio files; a clip path costs one `get`).
-LOCAL_TOOLS = {"audio_analyze", "audio_compare", "mix_report"}
+# listening tools read audio files; a clip path costs one `get`; listen_snapshot
+# reads rows the Sideman Listen devices send over UDP).
+LOCAL_TOOLS = {"audio_analyze", "audio_compare", "mix_report", "listen_snapshot"}
 
 
 def test_tool_count_matches_registry():
@@ -360,6 +361,27 @@ def test_listen_tools_without_the_extra_give_the_install_hint():
             sys.modules["sideman.listen"] = saved
         if attr is not None:
             sideman.listen = attr
+
+
+def test_listen_snapshot_without_the_extra_gives_the_install_hint():
+    import sideman
+    saved = sys.modules.get("sideman.stream", "absent")
+    attr = sideman.__dict__.pop("stream", None)
+    sys.modules["sideman.stream"] = None        # makes the import raise ImportError
+    try:
+        S.listen_snapshot()
+        check("listen_snapshot without the extra raises", False, "no raise")
+    except S.LiveError as e:
+        check("listen_snapshot install hint names the extra",
+              "listen" in str(e) and "pip install" in str(e), str(e))
+    finally:
+        if saved == "absent":
+            del sys.modules["sideman.stream"]
+        else:
+            sys.modules["sideman.stream"] = saved
+        if attr is not None:
+            sideman.stream = attr
+    check("no receiver was started", S._receiver is None, S._receiver)
 
 
 def test_audio_file_resolves_a_clip_path_with_one_get():
