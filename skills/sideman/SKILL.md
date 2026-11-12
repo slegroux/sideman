@@ -162,6 +162,22 @@ lom_get("live_set tracks 0 devices 0", "parameters", limit=25)
 lom_call(dev, "get_parameter_names", limit=50)   # a plugin's real param list
 ```
 
+**Match a synth to a sample** — measure, don't tune by ear alone. Record the
+synth, then compare the take to the reference:
+```
+sample_compare("live_set tracks 9 clip_slots 0 clip", "/abs/ref/tom.wav")
+```
+`readings` lists what differs, largest first, in synth terms: "body pitch 2.1
+st below the reference", "3rd harmonic 6 dB low", "falls 20 dB in 80 ms,
+reference 140 ms". Change the patch for the first lines, record again,
+compare again. Stop when the list is empty or the user says it is close
+enough: an exact match is rarely the goal. The take can hold several hits
+(`hit_a=` picks one). To record it: a scratch audio track with its input set
+to the instrument track, monitoring Off, armed; fire an empty slot on it and
+the test clip, stop, and read the new clip's `file_path`. Recording plays
+audio, so get the user's yes first, and delete the scratch track afterwards.
+`sample_analyze(file)` gives one hit's numbers when there is no reference.
+
 **Third-party plugins expose one parameter** — a VST/AU device's `parameters`
 holds only `Device On` until the user exposes controls via Live's **Configure**
 button, which is GUI-only and has no API. `get_parameter_names` still reports

@@ -233,6 +233,59 @@ the sample rate produces a map that looks plausible and plays wrong. Every clip
 carries one warp marker Live refuses to delete, so `remove_failed: 1` is
 expected, not a failure.
 
+## Drum one-shots
+
+`sample_analyze` and `sample_compare` measure a single drum hit in the terms
+a synth is programmed in. They run on files, in the MCP server, and need the
+`listen` extra. What the numbers mean:
+
+- **Everything is relative to the hit itself.** Times run from the onset (the
+  first 1 ms within 40 dB of the loudest 1 ms) and levels are against the hit's own
+  peak or total. Two files at different levels, with different silence before
+  the hit, or at different sample rates, measure the same.
+- **Fall times start at the envelope peak**, not the onset: `attack_ms` is
+  onset to peak, `fall_20_ms` is peak to the last moment within 20 dB. On a
+  hit that beats, the level can dip under −20 dB and come back; the fall time
+  is the last moment above.
+- **The pitch is the fundamental, not the loudest partial.** `pitch_body_hz`
+  is read on the body (40–150 ms, shorter on short hits). `pitch_start_hz` is
+  read from zero crossings in the first milliseconds, and `pitch_start_at_ms`
+  says how far in. A drop that is over in under 5 ms is a click (a stick
+  transient); the same drop over tens of milliseconds is a kick's glide.
+- **`pitched: false` is an answer, not a failure.** Hats, claps, shakers and
+  cymbals have no fundamental; rims and bells have partials but no harmonic
+  series. The profile then lists the partials, and a comparison reads the band
+  balance in place of harmonics.
+- **`None` means it could not be measured**, and `notes` says why: the file
+  ends before the hit has fallen 40 dB, the body is shorter than four periods,
+  the pitch cannot be followed back to the onset.
+- **A take with several hits** reports `hits` and `onsets_ms`; `hit=` picks
+  one, and the default is the first that is not cut off by the next hit or the
+  end of the file. Rolls faster than about 100 ms are not split.
+
+`readings` in `sample_compare` holds one line per difference past its
+threshold, largest first. An empty list means the two hits match within the
+thresholds, not that they are identical. Two drops whose starts were read at
+different times are compared from the later one; two pitches an octave or a
+twelfth apart on the same partials are one line, not a pitch difference.
+
+**Limits** (known, not yet handled):
+
+- A file's own noise floor is not measured: a hit recorded quietly (say
+  −50 dBFS in 16 bits) can read a shorter `duration_ms` or more noise than
+  the same hit recorded hot.
+- A fundamental under about 36 Hz never gets harmonics: the 40–150 ms body
+  window holds fewer than four of its periods.
+- A ghost note under a hit's tail, and a roll faster than about 100 ms, are
+  measured as one hit with no note; their fall times run long.
+- A tone that fades in over a few milliseconds can read a pitch drop or rise
+  at its start that is not there: the first zero crossings of a ramp are
+  unevenly spaced.
+- A partial beating within about 15 Hz of another can move the body's noise
+  share by tens of dB between sample rates.
+- At 22.05 kHz the bands above 11 kHz are empty, so a hat compared with a
+  44.1 kHz file reads "highs low".
+
 ## Racks and plug-ins
 
 Two walls, both real, and both worth stating to the user rather than working
