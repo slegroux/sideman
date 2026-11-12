@@ -9,9 +9,10 @@ Choices that are not obvious from the code:
 
 - The onset is the first 1 ms frame within 40 dB of the hit's loudest 1 ms
   (and in it, the first sample at that level); everything before it is
-  dropped and every time is counted from it. A DC offset (the mean of the
-  quietest 10 ms blocks, where the hit has decayed or not begun) above
-  -60 dB of the peak is removed first.
+  dropped and every time is counted from it. A DC offset is removed first
+  when the file shows one: the quietest 10 ms blocks are quiet and share a
+  mean above -60 dB of the peak (see _dc; a file with digital silence, or a
+  low tone still sounding at its end, has none).
 - Decay uses a power envelope smoothed over whole periods of the body pitch
   (5 ms for an unpitched hit), so partials beating against each other do not
   read as decay. A fall time is the last moment the envelope is still above
@@ -423,16 +424,31 @@ def _segments(x: np.ndarray, sr: int) -> list[tuple[int, int]]:
 
 
 def _dc(x: np.ndarray, sr: int) -> np.ndarray:
-    """Per-channel DC offset: the mean of the quietest tenth of the 10 ms
-    blocks (lowest variance, which DC does not add to), where the hit has
-    decayed or not yet begun. A decaying hit's own mean is not DC."""
+    """Per-channel DC offset, read where the hit has decayed or not yet
+    begun: the mean of the quietest tenth of the 10 ms blocks (lowest
+    variance, which DC does not add to). It counts only when those blocks
+    really are quiet (each block's spread under the offset itself, or under
+    -40 dB of the peak) and agree with each other (spread of their means under
+    a fifth of the offset; at least three blocks): a low tone still sounding
+    at the end of the file has no quiet block, and a slice of its lobe is
+    not DC. A file with any digitally silent block, or under 30 ms, has no
+    offset."""
     n = max(1, int(round(0.010 * sr)))
     m = x.shape[0] // n
-    if m < 1:
-        return x.mean(axis=0) if len(x) else np.zeros(x.shape[1])
+    zero = np.zeros(x.shape[1])
+    if m < 3:
+        return zero
     blocks = x[:m * n].reshape(m, n, x.shape[1])
-    quiet = np.argsort(blocks.var(axis=1).sum(axis=1))[:max(1, m // 10)]
-    return blocks[quiet].mean(axis=(0, 1))
+    var = blocks.var(axis=1)                                  # [m, channels]
+    if (var.sum(axis=1) == 0).any():
+        return zero
+    quiet = np.argsort(var.sum(axis=1))[:max(3, m // 10)]      # at least three, to see them agree
+    means = blocks[quiet].mean(axis=1)                        # [quiet, channels]
+    dc = means.mean(axis=0)
+    spread = np.sqrt(var[quiet]).max(axis=0)
+    peak = np.abs(x).max()
+    real = ((spread < np.abs(dc)) | (spread < 0.01 * peak)) & (means.std(axis=0) < 0.2 * np.abs(dc))
+    return np.where(real, dc, 0.0)
 
 
 def _onset(x: np.ndarray, mag: np.ndarray, sr: int, after_hit: bool) -> int:
@@ -453,6 +469,18 @@ def _onset(x: np.ndarray, mag: np.ndarray, sr: int, after_hit: bool) -> int:
     return first + (int(inside[0]) if len(inside) else 0)
 
 
+def _starts_inside(x: np.ndarray, mag: np.ndarray, sr: int, segs: list) -> bool:
+    """Whether the take begins inside a hit that started before the file did:
+    its first 1 ms is already within FAST_DB of hit 0's loudest 1 ms, and a
+    later hit's peak is more than 3 dB above hit 0's."""
+    s, e = segs[0]
+    frame = max(1, int(round(0.001 * sr)))
+    c = np.concatenate([[0.0], np.cumsum((x[s:e] ** 2).mean(axis=1))])
+    fwd = (c[frame:] - c[:-frame]) / frame if e - s > frame else c[-1:]
+    later = max(float(mag[a:b].max()) for a, b in segs[1:])
+    return fwd[0] >= fwd.max() * 10 ** (-FAST_DB / 10) and later > float(mag[s:e].max()) * 10 ** (3 / 20)
+
+
 def profile_array(x: np.ndarray, sr: int, hit: int | None = None) -> dict:
     """The one-shot profile of one signal [n, channels]: of hit `hit` (from 0)
     when it holds several, by default the first that is not cut off. See profile()."""
@@ -471,14 +499,22 @@ def profile_array(x: np.ndarray, sr: int, hit: int | None = None) -> dict:
         raise ValueError("hit %r is out of range: the take has %d hit%s (0-%d)"
                          % (hit, len(segs), "" if len(segs) == 1 else "s", len(segs) - 1))
     onsets = [_onset(x[s:e], mag[s:e], sr, s > 0) + s for s, e in segs]
-    picked, extra = None, []
-    for k in ([hit] if hit is not None else range(len(segs))):
+    order, extra = list(range(len(segs))), []
+    if hit is not None:
+        order = [hit]
+    elif len(segs) > 1 and _starts_inside(x, mag, sr, segs):
+        order = order[1:]
+        extra.append("the take starts inside a hit: hit 0 is its tail and a louder hit follows, so the "
+                     "default is hit 1 (pass hit=0 to measure the tail)")
+    picked = None
+    for k in order:
         cut = "the file ends" if k == len(segs) - 1 else "the next hit starts"
         try:
             got = _measure(x[onsets[k]:segs[k][1]], sr, cut)
         except ValueError:
-            if hit is not None or k == len(segs) - 1:
+            if hit is not None or (picked is None and k == order[-1]):
                 raise
+            extra.append("hit %d is too short to measure" % k)
             continue
         if picked is None:
             picked = (k, got)
@@ -486,7 +522,8 @@ def profile_array(x: np.ndarray, sr: int, hit: int | None = None) -> dict:
             picked = (k, got)
             break
     else:
-        extra.append("every hit is cut off before it falls 40 dB: this is the first")
+        if len(order) > 1:
+            extra.append("every hit is cut off before it falls 40 dB: this is the first")
     k, got = picked
     out = {"sample_rate": sr, "channels": x.shape[1], "hits": len(segs),
            "onsets_ms": [_ms(o, sr) for o in onsets], "hit": k, "onset_ms": _ms(onsets[k], sr)}
@@ -504,6 +541,7 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
         raise ValueError("the hit is shorter than %g ms" % (1000 * FRAME_S[0]))
     if len(y) > MAX_S * sr:
         y = y[:int(MAX_S * sr)]
+        cut = "the %g s limit is reached" % MAX_S
         notes.append("only the first %g s after the onset are measured" % MAX_S)
     n, nyq_hi = len(y), min(20000.0, 0.45 * sr)
     power = (y ** 2).mean(axis=1)

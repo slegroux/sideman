@@ -606,3 +606,60 @@ def test_noise_cut_off_at_2khz_is_unpitched_at_its_edge(seed):
     x = 0.3 * np.fft.irfft(spec, n) * np.exp(-np.arange(n) / SR / 0.05)
     r = oneshot.profile_array(x[:, None], SR)
     assert r["pitched"] is False and r["pitch_body_hz"] is None and r["harmonics_db"] is None
+
+
+# ---------------------------------------------------------------- second review
+
+def kick_glide(t):
+    """45 + 115 e^(-t / 12 ms): 160 Hz at the onset down to a 45 Hz body."""
+    return 45 + 115 * np.exp(-np.asarray(t) / 0.012)
+
+
+def pad(x, ms=30):
+    return np.concatenate([np.zeros((int(ms * SR / 1000), x.shape[1])), x])
+
+
+@pytest.mark.parametrize("name", ["808 45 Hz", "clipped kick", "kick cut at 150 ms"])
+def test_envelope_low_tone_still_sounding_is_not_dc(name):
+    # none of these files has a quiet block at its end, so no DC is invented: the hit
+    # behind 30 ms of zeros reads exactly as the hit
+    x = {"808 45 Hz": hit(45, 0.3), "clipped kick": np.clip(3 * hit(kick_glide, 0.2), -1, 1),
+         "kick cut at 150 ms": hit(kick_glide, 0.12, seconds=0.15)}[name]
+    a, b = oneshot.profile_array(x, SR), oneshot.profile_array(pad(x), SR)
+    assert oneshot.compare(b, a)["readings"] == []
+    assert a["attack_ms"] <= 1.0 and b["attack_ms"] <= 1.0
+    if name == "kick cut at 150 ms":
+        assert a["fall_10_ms"] == pytest.approx(120 * math.log(10 ** 0.5), abs=6)     # 138.2 ms
+        assert a["pitch_drop_st"] == pytest.approx(12 * math.log2(160 / 45), abs=2)
+
+
+def test_envelope_cut_45hz_take_keeps_its_fall():
+    # tau 120 ms falls 10 dB at 120 ln(10^0.5) = 138.2 ms, inside the 150 ms the file holds
+    r = oneshot.profile_array(hit(45, 0.12, seconds=0.15), SR)
+    assert r["fall_10_ms"] == pytest.approx(120 * math.log(10 ** 0.5), abs=6)
+    assert not any("every hit is cut off" in n for n in r["notes"])      # one hit: no such note
+
+
+def test_hits_take_starting_inside_a_hit_defaults_to_the_next():
+    # the file starts 26.5 ms into a hit (-4.6 dB down), then a full hit at 300 ms
+    full = hit(100, 0.05, seconds=0.5, partials={1: 1, 3: 0.3})
+    take = np.concatenate([full[1272:1272 + 14400], full])
+    r = oneshot.profile_array(take, SR)
+    assert r["hits"] == 2 and r["hit"] == 1 and r["onset_ms"] == pytest.approx(300, abs=0.5)
+    assert any("starts inside a hit" in n for n in r["notes"])
+    assert r["fall_20_ms"] == pytest.approx(50 * math.log(10), abs=6)
+    assert oneshot.profile_array(take, SR, hit=0)["hit"] == 0
+
+
+def test_hits_too_short_last_one_keeps_the_hit_picked():
+    take = np.concatenate([hit(100, 0.1, seconds=0.2), hit(100, 0.1, seconds=0.2), hit(100, 0.1, seconds=0.003)])
+    r = oneshot.profile_array(take, SR)
+    assert r["hits"] == 3 and r["hit"] == 0 and r["truncated"] is True
+    assert any("hit 2 is too short" in n for n in r["notes"])
+    assert any("every hit is cut off" in n for n in r["notes"])
+
+
+def test_envelope_capped_file_blames_the_limit():
+    r = oneshot.profile_array(hit(100, 20.0, seconds=10.5), SR)
+    assert any("10 s limit is reached before the hit falls 20 dB" in n for n in r["notes"])
+    assert not any("file ends" in n for n in r["notes"])
