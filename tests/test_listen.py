@@ -922,16 +922,18 @@ def test_elements_a_trace_is_listed_and_never_a_gap_or_a_one_side_role(tmp_path)
     assert "Traces" in pathlib.Path(run(plain)["md_path"]).read_text()
 
 
-def stereo_set(tmp_path, folder, kick_gain=1.0, pan=0.3, bars_n=16):
-    """kick (centre), bass (centre) and a synth panned `pan` (right = pan * left): real width."""
+def stereo_set(tmp_path, folder, kick_gain=1.0, pan=0.3, bars_n=16, synth_lr=None):
+    """kick (centre), bass (centre) and a synth panned `pan` (right = pan * left): real width.
+    `synth_lr` = (left gain, right gain) sets the synth's two channels directly."""
     d = tmp_path / folder
     d.mkdir()
     k = level_sine(50, [0.0] * bars_n) * kick_gain
     b = level_sine(110, [-6.0] * bars_n)
     sy = level_sine(1500, [-12.0] * bars_n)
-    mix = np.stack([k + b + sy, k + b + pan * sy], axis=1)
+    gl, gr = synth_lr or (1.0, pan)
+    mix = np.stack([k + b + gl * sy, k + b + gr * sy], axis=1)
     return {"kick": write(d, "kick.wav", stereo(k)), "bass": write(d, "bass.wav", stereo(b)),
-            "synth": write(d, "synth.wav", np.stack([sy, pan * sy], axis=1)), "mix": write(d, "mix.wav", mix),
+            "synth": write(d, "synth.wav", np.stack([gl * sy, gr * sy], axis=1)), "mix": write(d, "mix.wav", mix),
             "mix_array": mix}
 
 
@@ -1103,3 +1105,36 @@ def test_profile_a_phrase_in_four_of_eight_bars_is_present_and_one_bar_in_eight_
     assert not r["pair"]["absent"] and not r["pair"]["trace"]                 # exactly a quarter of the bars
     assert r["stray"] == {"absent": True}                                     # one bar in eight is under a quarter
     assert not r["quiet_phrase"]["absent"] and r["quiet_phrase"]["trace"]      # -50 dB: a quarter within 60, none within 40
+
+
+def test_elements_a_role_panned_wider_on_our_side_is_one_width_gap_and_no_level_gap(tmp_path):
+    secs = [{"name": "A", "start_bar": 0, "bars": 8}, {"name": "B", "start_bar": 8, "bars": 8}]
+    ref = stereo_set(tmp_path, "ref")                                  # synth (1, 0.3): width 0.35
+    prof = listen.reference_profile(ref["mix"], {k: ref[k] for k in ("kick", "bass", "synth")}, TEMPO, T0, secs)
+    # the same power, 1 + 0.3^2 = 1.09, spread as (0.934, -0.467): 0.934^2 + 0.467^2 = 1.09, width 0.75
+    ours = stereo_set(tmp_path, "ours", synth_lr=(0.934, -0.467))
+    m = {"tempo": TEMPO, "offset_s": T0, "sections": secs,
+         "sources": {"master": str(ours["mix"]), "kick": str(ours["kick"]), "bass": str(ours["bass"]),
+                     "synth": str(ours["synth"])}}
+    r = listen.mix_report(m, reference=prof, out_dir=tmp_path / "out")
+    for s in r["sections"]:
+        e = s["elements"]
+        assert e["gaps"] == [], e["gaps"]                              # the level is the same
+        assert [g["role"] for g in e["width_gaps"]] == ["synth"], e["width_gaps"]
+        g = e["width_gaps"][0]
+        assert abs(g["reference"] - 0.35) <= 0.02 and abs(g["ours"] - 0.75) <= 0.02 and abs(g["difference"] - 0.40) <= 0.03
+        row = {t["role"]: t for t in e["table"]}
+        assert row["bass"]["reference_width"] == row["bass"]["ours_width"] == 0.0         # centred on both sides
+    md = pathlib.Path(r["md_path"]).read_text()
+    assert "Width (ref / ours)" in md and "Width gaps (more than 0.1 apart): synth 0.35 -> 0.75." in md
+    m["sections"] = [{"name": "A", "start_bar": 0, "bars": 4}]           # a partial section: the note says whole section
+    e = listen.mix_report(m, reference=prof)["sections"][0]["elements"]
+    assert "widths and loudness are for the whole section" in e["notes"][0] and e["width_gaps"][0]["role"] == "synth"
+
+
+def test_elements_mono_on_both_sides_has_no_width_gap(tmp_path):
+    ref = stem_set(tmp_path, "ref")
+    r = listen.mix_report(capture_of(stem_set(tmp_path, "ours")), reference=profile_of(tmp_path, ref))
+    for s in r["sections"]:
+        assert s["elements"]["width_gaps"] == []
+        assert all(t["reference_width"] == t["ours_width"] == 0.0 for t in s["elements"]["table"])

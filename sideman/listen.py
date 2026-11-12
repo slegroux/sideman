@@ -511,6 +511,7 @@ TRACE_DB = 40.0            # ...and between this and ABSENT_DB under the mix it 
 EDGE_GUARD_S = 0.010       # a section's, and a bar's, first and last 10 ms are left out of a role's level:
                            # a note starting just before the grid line must not read into the section before
 ELEMENT_GAP_DB = 1.0       # an element's ratio to the kick differing by more than this is a gap
+WIDTH_GAP = 0.1            # an element's width (0 mono .. 1 all side) differing by more than this is a width gap
 CAPTURE_IS_REF_DB = 0.3    # a master capture is the reference when, with the level offset removed,
 CAPTURE_IS_REF_WIDTH = 0.01  # its per-bar curve and bands agree within this and its width within this
 STALE_MTIME_S = 2.0        # an input whose mtime moved by less than this (a cloud re-sync) is not changed
@@ -819,7 +820,7 @@ def _pair(prof: dict, sec: dict, name: str) -> tuple[dict | None, int, list]:
                                              max(0, psec["bars"] - fb))]
     notes = []
     if fb or sec["bars"] != psec["bars"]:
-        notes.append("paired with bars %d-%d of the profile's %r (%d bars); the reference's bands, width "
+        notes.append("paired with bars %d-%d of the profile's %r (%d bars); the reference's bands, widths "
                      "and loudness are for the whole section, so the capture-is-the-reference check is "
                      "not made" % (fb + 1, fb + sec["bars"], pname, psec["bars"]))
     return psec, fb, notes
@@ -875,14 +876,16 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
         else:
             ref_kind[role] = _presence(e["per_bar_db"][rng], mix_lv)
             ref_lv[role] = None if ref_kind[role] == "absent" else _mean_db(e["per_bar_db"][rng])
-    ours, ours_lv, ours_kind = {}, {}, {}
+    ours, ours_lv, ours_kind, ours_width = {}, {}, {}, {}
     for role in audio:
         if role == "master":                     # sits after the master chain: never ratioed against elements
             continue
         seg = _stereo(_slice(audio[role][0], sr, t0, t0 + n * bar_s))
         ours[role] = _bar_levels(seg, sr, 0.0, bar_s, 0, n)
         ours_kind[role] = _presence(ours[role], a["rms_db"])
-        ours_lv[role] = None if ours_kind[role] == "absent" else _level_db(_slice(seg, sr, *_guard(0.0, n * bar_s)))
+        gseg = _slice(seg, sr, *_guard(0.0, n * bar_s))
+        ours_lv[role] = None if ours_kind[role] == "absent" else _level_db(gseg)
+        ours_width[role] = None if ours_kind[role] == "absent" else _bands_width(gseg, sr)[1]
 
     def kick_out(lv):
         """Whether the kick is absent or far under the loudest other role in `lv`."""
@@ -920,7 +923,8 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
         elif rk == "present" and ok == "present":
             if yard:
                 table.append({"role": role, "reference_db": r_ratio, "ours_db": o_ratio,
-                              "difference_db": round(o_ratio - r_ratio, 2)})
+                              "difference_db": round(o_ratio - r_ratio, 2),
+                              "reference_width": psec["roles"][role]["width"], "ours_width": ours_width[role]})
                 if n > CHANGE_BLOCK_BARS:
                     arc[role] = {"reference": _arc(psec["roles"][role]["per_bar_db"][rng],
                                                    psec["roles"][yard]["per_bar_db"][rng]),
@@ -935,10 +939,15 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
             silent_both.append(role)
     gaps = sorted(({"role": t["role"], "difference_db": t["difference_db"]} for t in table
                    if abs(t["difference_db"]) > ELEMENT_GAP_DB), key=lambda g: -abs(g["difference_db"]))
+    width_gaps = sorted(({"role": t["role"], "reference": t["reference_width"], "ours": t["ours_width"],
+                          "difference": round(t["ours_width"] - t["reference_width"], 3)} for t in table
+                         if t["reference_width"] is not None and t["ours_width"] is not None
+                         and abs(t["ours_width"] - t["reference_width"]) > WIDTH_GAP),
+                        key=lambda g: -abs(g["difference"]))
     el = {"paired": True, "paired_with": {"section": psec["name"], "from_bar": fb, "bars": n},
           "notes": notes, "capture_is_reference": bool(is_ref), "yardstick": yard,
           "kick_out": kick_is_out,
-          "table": table if yard else None, "gaps": gaps if yard else [],
+          "table": table if yard else None, "gaps": gaps if yard else [], "width_gaps": width_gaps if yard else [],
           "reference_only": ref_only, "ours_only": ours_only, "traces": traces, "silent_in_both": silent_both,
           "arc": arc if yard else {}}
     return vs, el
@@ -997,20 +1006,23 @@ def mix_report(manifest: dict | str | pathlib.Path,
     "reference": {"section": <profile section name>, "from_bar": N} (both
     optional) to pair with another section, or N bars into it. The range must
     fit inside the profile's section: a shorter manifest section pairs with its
-    first bars (noted; the reference's bands, width and loudness are then those of
+    first bars (noted; the reference's bands, widths and loudness are then those of
     the whole section, and the capture-is-the-reference check is not made); a
     section with no match, or a longer one, reports the mix layer only, with a note.
     A paired section gets the mix compared with the profile's section (bands,
     width, loudness), an `elements` layer and a `drums` layer.
     `elements`: each source in both the manifest and the profile as a ratio to the
     kick (reference, ours, difference), roles in one side only, the ratio per 4 bars,
-    and `gaps` (ratios differing by more than ELEMENT_GAP_DB, largest first). Where
+    and `gaps` (ratios differing by more than ELEMENT_GAP_DB, largest first); each row
+    also carries the element's width on both sides (0 mono .. 1 all side; the reference's
+    is the whole section's) and `width_gaps` lists those more than WIDTH_GAP apart, apart
+    from the level gaps. Where
     the kick is out on either side (absent, or KICK_OUT_DB under the loudest other
     role) the yardstick is the loudest role present on both sides, named in
     `yardstick` (none: the table is left out with a note). The `master` source is never
     ratioed against the elements: it sits after the master chain. A master capture
-    whose level and width equal the reference mix's is flagged ("the capture is the
-    reference: check solos"). Without a `kick` source (or kick stem) the table is left
+    that is the reference mix, level offset aside (per-bar curve and bands within 0.3 dB,
+    width within 0.01), is flagged ("the capture is the reference: check solos"). Without a `kick` source (or kick stem) the table is left
     out with a note; the mix layer still reports.
     `drums`: for each of DRUM_ROLES in both the manifest's sources and the profile's
     stems, the `oneshot.compare` readings between the clean hit of our audio and of the
@@ -1122,12 +1134,16 @@ def _elements_markdown(r: dict) -> list:
             lines.append("")
             continue
         if e["table"] is not None:
-            lines += ["| Element | Reference | Ours | Diff |", "|---|---|---|---|"]
-            lines += ["| %s | %s | %s | %s |" % (t["role"], _fmt(t["reference_db"]), _fmt(t["ours_db"]),
-                                                 "%+.1f" % t["difference_db"]) for t in e["table"]]
+            lines += ["| Element | Reference | Ours | Diff | Width (ref / ours) |", "|---|---|---|---|---|"]
+            lines += ["| %s | %s | %s | %s | %s / %s |" % (
+                t["role"], _fmt(t["reference_db"]), _fmt(t["ours_db"]), "%+.1f" % t["difference_db"],
+                _fmt(t["reference_width"], 2), _fmt(t["ours_width"], 2)) for t in e["table"]]
             lines.append("")
             lines.append("Gaps, largest first: " + ("; ".join("%s %+.1f dB" % (g["role"], g["difference_db"])
                                                              for g in e["gaps"]) or "none") + ".")
+            lines.append("Width gaps (more than %g apart): " % WIDTH_GAP + ("; ".join(
+                "%s %s -> %s" % (g["role"], _fmt(g["reference"], 2), _fmt(g["ours"], 2)) for g in e["width_gaps"])
+                or "none") + ".")
         if e["traces"]:
             lines.append("Traces (%g to %g dB under the mix, never a gap): " % (TRACE_DB, ABSENT_DB) + "; ".join(
                 "%s (reference %s, ours %s)" % (t["role"], t["reference"], t["ours"]) for t in e["traces"]) + ".")

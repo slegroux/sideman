@@ -521,8 +521,11 @@ the mix compared with the reference's section (bands, width, loudness) and:
 `elements`: every source in both the manifest and the profile as a ratio to
 the kick in dB (reference, ours, difference; negative = quieter than the
 kick), roles in the reference only / in ours only, the ratio per 4 bars, and
-`gaps` (ratios more than 1 dB apart, largest first); a role only 40 to 60 dB
-under the mix on either side is a `trace`, listed apart and never a gap.
+`gaps` (ratios more than 1 dB apart, largest first); each row also has the
+element's width on both sides (0 mono .. 1 all side; the reference's is the
+whole section's) and `width_gaps` lists those more than 0.1 apart, separate
+from the level gaps. A role only 40 to 60 dB under the mix on either side is a
+`trace`, listed apart and never a gap.
 Where the kick is out
 on either side (absent, or 30 dB under the loudest other role) the
 `yardstick` is the loudest role in both ("Elements against the bass (kick
