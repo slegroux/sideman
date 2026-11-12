@@ -716,3 +716,14 @@ def test_pitch_tom_over_any_rumble_stays_at_150(rumble):
     assert r["pitched"] is True and r["pitch_body_hz"] == pytest.approx(150, rel=0.01)
     assert r["partials"][0]["hz"] == pytest.approx(rumble, rel=0.01)
     assert r["partials"][0]["db"] == pytest.approx(20 * math.log10(0.2), abs=1)          # -14 dB
+
+
+@pytest.mark.parametrize("f0, tau", [(1000, 0.002), (300, 0.003), (200, 0.012), (60, 0.020)])
+def test_compare_half_the_decay_of_a_fast_hit_reads_only_decay(f0, tau):
+    # the same pure tone at tau and 2 tau: only the falls and the length differ, each
+    # by the ratio of the time constants
+    a = oneshot.profile_array(hit(f0, tau, seconds=0.3), SR)
+    b = oneshot.profile_array(hit(f0, 2 * tau, seconds=0.3), SR)
+    c = oneshot.compare(a, b)
+    assert c["readings"] and all(r.startswith(("falls", "lasts")) for r in c["readings"]), c["readings"]
+    assert c["diff"]["fall_20_ms"]["ratio"] == pytest.approx(0.5, abs=0.07)

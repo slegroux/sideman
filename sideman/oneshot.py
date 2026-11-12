@@ -733,7 +733,7 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
     partials = [t for t in tonal if t[1] >= tonal[0][1] - PARTIALS_DB and not (pitched and _harmonic(t[0], f0))]
     out["partials"] = [{"hz": round(t[0], 1), "db": round(t[1] - ref, 1)} for t in partials[:MAX_PARTIALS]]
     a1 = min(n, int(ATTACK_S * sr))
-    att = _spectrum(y, 0, a1, sr)
+    att = _spectrum(y, 0, a1, sr, level=env)     # flattened: a fast decay is not noise
     out["noise_db"], out["flatness"] = {}, {}
     for name, s in (("attack", att), ("body", None if few else body)):
         if s is None:
