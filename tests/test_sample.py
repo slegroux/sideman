@@ -413,3 +413,38 @@ def test_hits_out_of_range_is_refused(tmp_path):
     assert json.loads(S.sample_analyze(str(p), hit=1))["onset_ms"] == pytest.approx(500, abs=0.5)
     c = json.loads(S.sample_compare(str(p), str(p), hit_a=0, hit_b=1))
     assert c["readings"] == []
+
+
+# ---------------------------------------------------------------- review fixes
+
+def test_envelope_dc_offset_does_not_change_the_falls():
+    # a DC offset is no part of the decay: + 0.05 (-26 dB) must read as the plain hit
+    for dc in (0.05, -0.2, 0.005):
+        r = oneshot.profile_array(hit(100, 0.050) + dc, SR)
+        assert r["fall_20_ms"] == pytest.approx(50 * math.log(10), abs=6), dc
+        assert r["fall_40_ms"] == pytest.approx(50 * math.log(100), abs=6), dc
+        assert r["bands_db"]["sub"] < -10, dc
+
+
+def test_envelope_onset_ignores_a_lone_spike_before_the_hit():
+    # a single sample at -38 dB, 8 ms before a hit that starts at 10 ms: its 1 ms frame
+    # is 38 + 10 log10(48) = 55 dB down, so the onset is the hit's
+    x = np.concatenate([np.zeros((480, 1)), hit(100, 0.050)])
+    x[96] = 10 ** (-38 / 20)
+    assert oneshot.profile_array(x, SR)["onset_ms"] == pytest.approx(10.0, abs=0.05)
+
+
+def test_envelope_nan_or_inf_is_refused():
+    x = hit(100, 0.05, seconds=1.0)
+    for bad in (np.nan, np.inf):
+        y = x.copy()
+        y[100] = bad
+        with pytest.raises(ValueError, match="NaN or infinite"):
+            oneshot.profile_array(y, SR)
+
+
+def test_envelope_5ms_file_is_none_with_reasons_not_numbers():
+    r = oneshot.profile_array(hit(200, 0.05, seconds=0.005), SR)
+    assert r["fall_20_ms"] is None and r["fall_40_ms"] is None and r["truncated"] is True
+    assert r["pitch_body_hz"] is None and r["harmonics_db"] is None
+    assert any("too short" in n for n in r["notes"])

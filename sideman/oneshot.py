@@ -7,8 +7,11 @@ different leading silence profile alike. Local only; needs the `listen` extra.
 
 Choices that are not obvious from the code:
 
-- The onset is the first sample within 40 dB of the file's peak; everything
-  before it is dropped and every time is counted from it.
+- The onset is the first 1 ms frame within 40 dB of the hit's loudest 1 ms
+  (and in it, the first sample at that level); everything before it is
+  dropped and every time is counted from it. A DC offset (the mean of the
+  quietest 10 ms blocks, where the hit has decayed or not begun) above
+  -60 dB of the peak is removed first.
 - Decay uses a power envelope smoothed over whole periods of the body pitch
   (5 ms for an unpitched hit), so partials beating against each other do not
   read as decay. A fall time is the last moment the envelope is still above
@@ -53,7 +56,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 from .listen import BANDS, FLOOR_DB, _check_channels, _db, load
 
-ONSET_DB = 40.0          # the onset is the first sample within this of the peak
+ONSET_DB = 40.0          # the onset is the first 1 ms frame within this of the loudest
 FALLS_DB = (10, 20, 40)
 END_DB = 60.0            # duration runs to the last moment within this of the peak
 GATE_DB = 50.0           # pitch frames must end before the hit falls this far
@@ -73,6 +76,7 @@ NOISY_DB = -3.0          # a body whose noise share is above this is unpitched
 PARTIALS_DB = 40.0       # inharmonic partials are listed down to this under the strongest peak
 MAX_PARTIALS = 5
 CLICK_HZ = 2000.0
+DC_REL = 1e-3            # a DC offset under -60 dB of the peak is left alone
 MAX_S = 10.0             # a one-shot longer than this is cut, with a note
 RISE_S = 0.010           # hits: a new hit rises RISE_DB within this...
 RISE_DB = 15.0
@@ -281,11 +285,47 @@ def _segments(x: np.ndarray, sr: int) -> list[tuple[int, int]]:
     return list(zip(starts, starts[1:] + [x.shape[0]]))
 
 
+def _dc(x: np.ndarray, sr: int) -> np.ndarray:
+    """Per-channel DC offset: the mean of the quietest tenth of the 10 ms
+    blocks (lowest variance, which DC does not add to), where the hit has
+    decayed or not yet begun. A decaying hit's own mean is not DC."""
+    n = max(1, int(round(0.010 * sr)))
+    m = x.shape[0] // n
+    if m < 1:
+        return x.mean(axis=0) if len(x) else np.zeros(x.shape[1])
+    blocks = x[:m * n].reshape(m, n, x.shape[1])
+    quiet = np.argsort(blocks.var(axis=1).sum(axis=1))[:max(1, m // 10)]
+    return blocks[quiet].mean(axis=(0, 1))
+
+
+def _onset(x: np.ndarray, mag: np.ndarray, sr: int, after_hit: bool) -> int:
+    """Index of a hit's onset in x: the first 1 ms frame whose mean power is
+    within ONSET_DB of the hit's loudest 1 ms, and in that frame the first
+    sample at that level, so a lone click or dither spike does not count.
+    After an earlier hit, the level must also be twice its tail's."""
+    frame = max(1, int(round(0.001 * sr)))
+    c = np.concatenate([[0.0], np.cumsum((x ** 2).mean(axis=1))])
+    fwd = (c[frame:] - c[:-frame]) / frame if len(x) > frame else c[-1:] / max(1, len(x))
+    floor = fwd.max() * 10 ** (-ONSET_DB / 10)
+    level = math.sqrt(floor)
+    if after_hit:              # rise out of the tail: four times its power, twice its peak
+        floor = max(floor, 4.0 * float(fwd[0]))
+        level = max(level, 2.0 * float(mag[:frame].max()))
+    first = int(np.argmax(fwd >= floor))
+    inside = np.nonzero(mag[first:first + frame] >= level)[0]
+    return first + (int(inside[0]) if len(inside) else 0)
+
+
 def profile_array(x: np.ndarray, sr: int, hit: int | None = None) -> dict:
     """The one-shot profile of one signal [n, channels]: of hit `hit` (from 0)
     when it holds several, by default the first that is not cut off. See profile()."""
     _check_channels(x)
     x = np.asarray(x, dtype=np.float64)
+    if not np.isfinite(x).all():
+        raise ValueError("the file holds NaN or infinite samples")
+    dc = _dc(x, sr)            # a DC offset would read as level that never decays
+    if len(x) and np.abs(dc).max() > DC_REL * np.abs(x).max():
+        x = x - dc
     mag = np.abs(x).max(axis=1)
     if not len(mag) or mag.max() <= 0:
         raise ValueError("the file is silent")
@@ -293,12 +333,7 @@ def profile_array(x: np.ndarray, sr: int, hit: int | None = None) -> dict:
     if hit is not None and not 0 <= hit < len(segs):
         raise ValueError("hit %r is out of range: the take has %d hit%s (0-%d)"
                          % (hit, len(segs), "" if len(segs) == 1 else "s", len(segs) - 1))
-    onsets = []
-    for s, e in segs:          # each hit starts at its first sample within ONSET_DB of its own peak
-        level = mag[s:e].max() * 10 ** (-ONSET_DB / 20)
-        if s > 0:              # and, over a previous hit's tail, at twice the tail's level
-            level = max(level, 2.0 * float(mag[s:s + max(1, int(0.001 * sr))].max()))
-        onsets.append(s + int(np.argmax(mag[s:e] >= level)))
+    onsets = [_onset(x[s:e], mag[s:e], sr, s > 0) + s for s, e in segs]
     picked, extra = None, []
     for k in ([hit] if hit is not None else range(len(segs))):
         cut = "the file ends" if k == len(segs) - 1 else "the next hit starts"
@@ -491,7 +526,7 @@ def profile(path: str | pathlib.Path, hit: int | None = None) -> dict:
     hits, onsets_ms the hits found in the file and where each starts
     hit             which one this profile is (from 0): `hit`, by default the first
                     that is not cut off
-    onset_ms        where the hit starts in the file (first sample within 40 dB of its peak)
+    onset_ms        where the hit starts in the file (first 1 ms within 40 dB of its loudest)
     truncated       the next hit or the end of the file cuts it before it falls 40 dB
     peak_db         sample peak, dBFS (the only absolute level here)
     attack_ms       onset to the envelope peak (first within 1 dB of it)
