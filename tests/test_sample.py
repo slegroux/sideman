@@ -134,10 +134,10 @@ def test_pitch_sweep_from_200_to_100_hz():
     assert r["pitch_start_hz"] == pytest.approx(200, abs=6)
     assert r["pitch_body_hz"] == pytest.approx(100, abs=2)
     assert r["pitch_drop_st"] == pytest.approx(12, abs=0.5)
-    # within 0.5 st of 100 Hz once 200 - 100 t / 30 ms <= 100 * 2^(0.5/12); a 3-period
-    # (30 ms) frame centred on t sees up to 15 ms later
+    # within 0.5 st of 100 Hz once 200 - 100 t / 30 ms <= 100 * 2^(0.5/12); a 4-period
+    # (40 ms) frame centred on t sees up to 20 ms later
     settle = 30 * (2 - 2 ** (0.5 / 12))                                    # 29.1 ms
-    assert settle <= r["pitch_settle_ms"] <= settle + 15
+    assert settle <= r["pitch_settle_ms"] <= settle + 20
     track = r["pitch_track_hz"]
     for ms in (0, 5, 10, 20):                                               # 200, 183.3, 166.7, 133.3 Hz
         assert track[ms] == pytest.approx(200 - 100 * ms / 30, abs=6), ms
@@ -166,11 +166,12 @@ def test_pitch_start_of_a_steady_sawtooth():
 
 def test_pitch_track_before_the_first_frame_is_none_not_a_copy():
     # sin + 2 sin(3x) crosses zero six times a period, so the crossings give no pitch:
-    # the points before the first frame (15 ms) are None with a note, not its value
+    # the points before the first frame (4 periods long, centred 2 periods = 20 ms in)
+    # are None with a note, not its value
     r = oneshot.profile_array(hit(100, 0.2, partials={1: 1.0, 3: 2.0}), SR)
-    assert r["pitch_start_at_ms"] == pytest.approx(15, abs=1)
+    assert r["pitch_start_at_ms"] == pytest.approx(20, abs=1)
     assert [r["pitch_track_hz"][ms] for ms in (0, 5, 10)] == [None, None, None]
-    assert any("no value before 15 ms" in n for n in r["notes"])
+    assert any("no value before 20 ms" in n for n in r["notes"])
 
 
 def test_pitch_that_never_holds_still_has_no_settle_time():
@@ -678,3 +679,13 @@ def test_pitch_steady_tone_has_no_drop_at_any_phase_or_rate(f0):
     for a in profiles:
         for b in profiles:
             assert not [t for t in oneshot.compare(a, b)["readings"] if "pitch" in t], (a["pitch_start_hz"], b["pitch_start_hz"])
+
+
+@pytest.mark.parametrize("partials", [{1: 0.33, 2: 1.0}, {1: 1.0, 2: 1.0}, {1: 0.5, 2: 1.0, 3: 0.5}])
+def test_pitch_steady_tone_with_a_loud_2nd_harmonic_has_no_drop(partials):
+    # a louder 2nd harmonic adds zero crossings in long-short turns: they must not read
+    # as a pitch, and the frames must not be pulled by its lobe (4 % with 3-period frames)
+    r = oneshot.profile_array(hit(100, 0.2, partials=partials), SR)
+    assert r["pitch_body_hz"] == pytest.approx(100, rel=0.01)
+    assert abs(r["pitch_drop_st"]) <= 0.2
+    assert all(v == pytest.approx(100, rel=0.012) for v in r["pitch_track_hz"].values() if v is not None)

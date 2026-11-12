@@ -21,13 +21,14 @@ Choices that are not obvious from the code:
   the start phase and a clipped plateau do not move it, and a linear ramp
   reads at 10^(-1/20) = 89 % of its length.
 - Pitch frames are Hann windows on the analytic signal (no negative-frequency
-  image), three periods long, zero-padded 8x, with parabolic interpolation on
+  image), four periods long, zero-padded 8x, with parabolic interpolation on
   the dB spectrum. A spectral peak must be the maximum within one bin of the
   unpadded FFT, so window sidelobes never count.
 - The track is chained: frames 1 ms apart, from the body window's centre
   back to the onset and on to 300 ms, each sized by and held within 2 st of
   its neighbour's pitch, so it cannot jump to a harmonic or to a thump below.
-  A frame is centred on its time, so the first one sits about 1.5 periods in.
+  A frame is centred on its time, so the first one sits 2 periods in. (Three
+  periods let a 2nd harmonic louder than the fundamental pull a frame 4 %.)
 - Before that, the pitch comes from half-periods between zero crossings
   (hysteresis a tenth of the local amplitude, after a 1/8-period centred
   boxcar), when they follow one pitch: each within 1.8x of the last, and
@@ -78,7 +79,7 @@ TRACK_MS = (0, 5, 10, 20, 40, 80, 150, 300)
 ATTACK_S = 0.030
 ATTACK_DB = 1.0          # the attack ends within this of the envelope peak
 BODY_S = (0.040, 0.150)
-PERIODS = 3.0            # pitch frame length, in periods of the frame's pitch
+PERIODS = 4.0            # pitch frame length, in periods of the frame's pitch (3 let a louder 2nd harmonic pull it 4 %)
 FRAME_S = (0.004, 0.040)
 STRONG_DB = 20.0         # a partial this far under the strongest still counts as the fundamental
 PROMINENT_DB = 15.0      # a peak must stand this far above its local floor to be tonal
@@ -87,6 +88,7 @@ SETTLE_ST = 0.5
 SETTLE_HOLD_S = 0.010    # settled = within SETTLE_ST and still there 10 ms later
 EARLY_SPAN_S = 0.030     # zero crossings are read up to the first frame's centre + this
 EARLY_RATIO = 1.8        # one half-period may differ from the last by this factor (a fast kick: 1.5)
+EARLY_ZIGZAG = 0.04      # half-periods that step up and down by more than this are not one pitch
 EARLY_STEP_ST = 0.3      # the first half-periods are extended to the onset only for a step this big
 EARLY_ST = 1.5           # and they must meet the first frame within this
 STEP_ST = 2.0            # a track frame may move this far from the one 1 ms before it
@@ -278,7 +280,7 @@ def _crossings(v: np.ndarray, sr: int, period: float, from_zero: float | None) -
 
 def _early_pitch(y: np.ndarray, sr: int, f1: float, t1: float) -> tuple | None:
     """The pitch before the first pitch frame's centre t1, from half-periods
-    between zero crossings (a frame needs about three periods; a half-period
+    between zero crossings (a frame needs four periods; a half-period
     needs half of one). ([(midpoint s, Hz)], the time they cover from (0
     when the onset is a crossing or they are extended to it), a click skipped) or None when the crossings do not follow one pitch: each
     half-period within EARLY_RATIO of the last, reaching t1 within EARLY_ST
@@ -306,6 +308,10 @@ def _early_pitch(y: np.ndarray, sr: int, f1: float, t1: float) -> tuple | None:
         run += 1
     mid, f = mid[first:run + 1], f[first:run + 1]
     if len(f) < 3 or mid[-1] < t1 or abs(12 * math.log2(np.interp(t1, mid, f) / f1)) > EARLY_ST:
+        return None
+    step = np.diff(f) / f[:-1]          # long and short half-periods in turn: a strong overtone adds
+    turns = np.sign(step[np.abs(step) > EARLY_ZIGZAG])        # crossings, so they are not the
+    if np.any(turns[1:] != turns[:-1]):                       # half-periods of one pitch
         return None
     points = [(float(t), float(v)) for t, v in zip(mid, f)]
     since = float(tz[first])               # the first half-period starts here (0 or just before)
