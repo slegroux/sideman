@@ -12,9 +12,10 @@ Choices that are not obvious from the code:
 - Decay uses a power envelope smoothed over whole periods of the body pitch
   (5 ms for an unpitched hit), so partials beating against each other do not
   read as decay. A fall time is the last moment the envelope is still above
-  the threshold, measured from the envelope's peak. The attack time is the
-  loudest moment of a 1 ms-smoothed power envelope instead: its largest
-  crest, so it is good to about half a period of a low tone. (An analytic
+  the threshold, measured from the envelope's peak. The attack time is where
+  a 1 ms-smoothed power envelope first comes within 1 dB of its peak: a
+  crest, so it is good to about half a period of a low tone (and reads a
+  linear ramp about 11 % short). (An analytic
   envelope was tried: it dips 6 dB or spikes 5 dB at an abrupt onset.)
 - Pitch frames are Hann windows on the analytic signal (no negative-frequency
   image), three periods long, zero-padded 8x, with parabolic interpolation on
@@ -58,6 +59,7 @@ END_DB = 60.0            # duration runs to the last moment within this of the p
 GATE_DB = 50.0           # pitch frames must end before the hit falls this far
 TRACK_MS = (0, 5, 10, 20, 40, 80, 150, 300)
 ATTACK_S = 0.030
+ATTACK_DB = 1.0          # the attack ends within this of the envelope peak
 BODY_S = (0.040, 0.150)
 PERIODS = 3.0            # pitch frame length, in periods of the frame's pitch
 FRAME_S = (0.004, 0.040)
@@ -72,6 +74,26 @@ PARTIALS_DB = 40.0       # inharmonic partials are listed down to this under the
 MAX_PARTIALS = 5
 CLICK_HZ = 2000.0
 MAX_S = 10.0             # a one-shot longer than this is cut, with a note
+RISE_S = 0.010           # hits: a new hit rises RISE_DB within this...
+RISE_DB = 15.0
+FAST_DB = 6.0            # ...reaching within this of its peak (the max over PEAK_S)...
+PEAK_S = 0.050
+JUMP_DB = 6.0            # ...and tops the CEILING_S before it by this
+CEILING_S = 0.050
+MIN_GAP_S = 0.050
+# compare(): a difference past one of these is a reading
+PITCH_ST = 0.3           # body pitch
+DROP_ST = 1.0            # pitch drop
+TIME_RATIO = 0.15        # attack, falls, duration, settle: 15 %...
+TIME_FLOOR_MS = 2.0      # ...and at least this, so 0.3 vs 0.4 ms is not a reading
+LEVEL_DB = 3.0           # harmonics, noise share
+CLICK_STEP_DB = 6.0
+WIDTH_STEP = 0.1
+# compare(): below these on both sides a difference is the method's floor, not the sound
+HARM_FLOOR_DB = -50.0    # a harmonic must be above this...
+HARM_CLEAR_DB = PROMINENT_DB  # ...and stand clear of its own spectral floor like a tonal peak
+NOISE_FLOOR_DB = -25.0   # a pure decaying tone reads -26 to -42 from window leakage
+CLICK_FLOOR_DB = -40.0
 
 
 def _boxcar(p: np.ndarray, length: int) -> np.ndarray:
@@ -124,14 +146,21 @@ def _interp(s: dict, i: int) -> tuple[float, float]:
     return float((i + off) * s["sr"] / s["nfft"]), level
 
 
-def _tonal(s: dict, hi_hz: float) -> list[tuple[float, float, int]]:
-    """Peaks standing PROMINENT_DB above the median of a ring 2-10 bins away
-    (outside their own main lobe), as (Hz, dB, bin), strongest first."""
+def _floor(s: dict, i: int) -> float | None:
+    """Local spectral floor at bin i: the median (dB) of a ring 2-10 bins away,
+    outside the main lobe of a peak at i."""
     d, h = s["d"], s["bin"]
+    ring = np.r_[d[max(0, i - 10 * h):max(0, i - 2 * h)], d[i + 2 * h + 1:i + 10 * h + 1]]
+    return float(np.median(ring)) if len(ring) else None
+
+
+def _tonal(s: dict, hi_hz: float) -> list[tuple[float, float, int]]:
+    """Peaks standing PROMINENT_DB above their local floor, as (Hz, dB, bin),
+    strongest first."""
     out = []
     for i in _peaks(s, hi_hz):
-        ring = np.r_[d[max(0, i - 10 * h):max(0, i - 2 * h)], d[i + 2 * h + 1:i + 10 * h + 1]]
-        if len(ring) and d[i] - np.median(ring) >= PROMINENT_DB:
+        floor = _floor(s, i)
+        if floor is not None and s["d"][i] - floor >= PROMINENT_DB:
             out.append(_interp(s, i) + (int(i),))
     return sorted(out, key=lambda t: -t[1])
 
@@ -225,17 +254,80 @@ def _ms(samples: float, sr: int) -> float:
     return round(1000.0 * samples / sr, 1)
 
 
-def profile_array(x: np.ndarray, sr: int) -> dict:
-    """The one-shot profile of one signal [n, channels]. See profile()."""
+def _segments(x: np.ndarray, sr: int) -> list[tuple[int, int]]:
+    """[start, end) sample ranges of the hits in a take. A new hit is a rise of
+    RISE_DB that comes within FAST_DB of its peak inside RISE_S and tops the
+    CEILING_S before it by JUMP_DB, at least MIN_GAP_S after the last one, so a
+    tremolo, a tom's beating or a slow swell does not split a hit. A hit that
+    starts before the last one has fallen 15 dB (a fast roll) is not split
+    off either."""
+    hop = max(1, int(round(0.001 * sr)))                     # the envelope on a 1 ms grid
+    env = _boxcar((x ** 2).mean(axis=1), max(1, int(0.005 * sr)))[::hop]
+    e = 10.0 * np.log10(env / env.max() + 1e-30)
+    rise, gap, ahead, ceil = (int(round(v * 1000)) for v in (RISE_S, MIN_GAP_S, PEAK_S, CEILING_S))
+    first = int(np.argmax(e >= -ONSET_DB))
+    starts, last = [0], first
+    for j in range(first + 1, len(e)):
+        if j - last < gap or e[j] < -ONSET_DB:
+            continue
+        jm = j - rise + int(np.argmin(e[j - rise:j])) if j >= rise else int(np.argmin(e[:j]))
+        if e[j] - e[jm] < RISE_DB:
+            continue
+        top = e[jm:jm + ahead].max()
+        if e[jm:jm + rise + 1].max() < top - FAST_DB or top < e[max(0, jm - ceil):jm].max() + JUMP_DB:
+            continue
+        starts.append(jm * hop)
+        last = jm
+    return list(zip(starts, starts[1:] + [x.shape[0]]))
+
+
+def profile_array(x: np.ndarray, sr: int, hit: int | None = None) -> dict:
+    """The one-shot profile of one signal [n, channels]: of hit `hit` (from 0)
+    when it holds several, by default the first that is not cut off. See profile()."""
     _check_channels(x)
     x = np.asarray(x, dtype=np.float64)
-    notes = []
     mag = np.abs(x).max(axis=1)
-    peak = float(mag.max()) if len(mag) else 0.0
-    if peak <= 0:
+    if not len(mag) or mag.max() <= 0:
         raise ValueError("the file is silent")
-    onset = int(np.argmax(mag >= peak * 10 ** (-ONSET_DB / 20)))
-    y = x[onset:]
+    segs = _segments(x, sr)
+    if hit is not None and not 0 <= hit < len(segs):
+        raise ValueError("hit %r is out of range: the take has %d hit%s (0-%d)"
+                         % (hit, len(segs), "" if len(segs) == 1 else "s", len(segs) - 1))
+    onsets = []
+    for s, e in segs:          # each hit starts at its first sample within ONSET_DB of its own peak
+        level = mag[s:e].max() * 10 ** (-ONSET_DB / 20)
+        if s > 0:              # and, over a previous hit's tail, at twice the tail's level
+            level = max(level, 2.0 * float(mag[s:s + max(1, int(0.001 * sr))].max()))
+        onsets.append(s + int(np.argmax(mag[s:e] >= level)))
+    picked, extra = None, []
+    for k in ([hit] if hit is not None else range(len(segs))):
+        cut = "the file ends" if k == len(segs) - 1 else "the next hit starts"
+        try:
+            got = _measure(x[onsets[k]:segs[k][1]], sr, cut)
+        except ValueError:
+            if hit is not None or k == len(segs) - 1:
+                raise
+            continue
+        if picked is None:
+            picked = (k, got)
+        if hit is not None or not got["truncated"]:
+            picked = (k, got)
+            break
+    else:
+        extra.append("every hit is cut off before it falls 40 dB: this is the first")
+    k, got = picked
+    out = {"sample_rate": sr, "channels": x.shape[1], "hits": len(segs),
+           "onsets_ms": [_ms(o, sr) for o in onsets], "hit": k, "onset_ms": _ms(onsets[k], sr)}
+    out.update(got)
+    out["notes"] = extra + out["notes"]
+    return out
+
+
+def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
+    """The profile of one hit y [n, channels], which starts at its onset and
+    ends where `cut` says ("the file ends" or "the next hit starts")."""
+    notes = []
+    peak = float(np.abs(y).max())
     if len(y) < FRAME_S[0] * sr:
         raise ValueError("the hit is shorter than %g ms" % (1000 * FRAME_S[0]))
     if len(y) > MAX_S * sr:
@@ -243,8 +335,7 @@ def profile_array(x: np.ndarray, sr: int) -> dict:
         notes.append("only the first %g s after the onset are measured" % MAX_S)
     n, nyq_hi = len(y), min(20000.0, 0.45 * sr)
     power = (y ** 2).mean(axis=1)
-    out = {"sample_rate": sr, "channels": x.shape[1], "onset_ms": _ms(onset, sr),
-           "peak_db": round(_db(peak * peak), 2)}
+    out = {"peak_db": round(_db(peak * peak), 2)}
 
     # a first, pitch-blind envelope places the body window and the pitch gate
     rough = _boxcar(power, max(1, int(0.005 * sr)))
@@ -279,10 +370,12 @@ def profile_array(x: np.ndarray, sr: int) -> dict:
     pitched = f0 is not None
     out["pitched"] = pitched
 
-    # envelope: attack at the loudest 1 ms (its largest crest, so within half
-    # a period of a low tone), falls on whole periods of the body pitch
+    # envelope: the attack ends where a 1 ms envelope first comes within
+    # ATTACK_DB of its peak (a crest, so within half a period of a low tone;
+    # the argmax itself wanders between near-equal crests when noise rides on
+    # them), falls on whole periods of the body pitch
     fine = _boxcar(power, max(1, int(0.001 * sr)))
-    out["attack_ms"] = _ms(int(np.argmax(fine)), sr)
+    out["attack_ms"] = _ms(int(np.argmax(fine >= fine.max() * 10 ** (-ATTACK_DB / 10))), sr)
     if pitched:
         period = sr / f0
         length = int(round(period * math.ceil(0.0025 * f0)))
@@ -294,11 +387,12 @@ def profile_array(x: np.ndarray, sr: int) -> dict:
         k = _last_above(env, ip, env[ip] * 10 ** (-drop / 10))
         out["fall_%d_ms" % drop] = None if k is None else _ms(k - ip, sr)
         if k is None:
-            notes.append("the file ends before the hit falls %d dB" % drop)
+            notes.append("%s before the hit falls %d dB" % (cut, drop))
+    out["truncated"] = out["fall_40_ms"] is None
     k = _last_above(env, ip, env[ip] * 10 ** (-END_DB / 10))
     out["duration_ms"] = _ms(n if k is None else k, sr)
     if k is None:
-        notes.append("duration is the file's length: the hit does not fall %d dB before it ends" % END_DB)
+        notes.append("%s before the hit falls %d dB: duration runs to there" % (cut, END_DB))
     end = n if k is None else max(1, int(k))
 
     # pitch: start, body, drop, settle, track
@@ -338,18 +432,20 @@ def profile_array(x: np.ndarray, sr: int) -> dict:
         notes.append("unpitched: no pitch track and no harmonics")
 
     # tone: harmonics, inharmonic partials, noise, flatness, click
-    out["harmonics_db"] = None
+    out["harmonics_db"] = out["harmonics_floor_db"] = None
     if pitched:
-        h = {}
+        h, fl = {}, {}
         for k in range(2, 9):
             target = k * f0
             if target > nyq_hi:
-                h[k] = None
+                h[k] = fl[k] = None
                 continue
             sel = np.nonzero(np.abs(body["hz"] - target) <= max(HARM_TOL * target, body["hz"][1]))[0]
             i = int(sel[np.argmax(body["d"][sel])])
             h[k] = round(max(FLOOR_DB, _interp(body, i)[1] - l1), 1)
-        out["harmonics_db"] = h
+            floor = _floor(body, i)
+            fl[k] = None if floor is None else round(max(FLOOR_DB, floor - l1), 1)
+        out["harmonics_db"], out["harmonics_floor_db"] = h, fl
     ref = l1 if pitched else (tonal[0][1] if tonal else None)
     partials = [t for t in tonal if t[1] >= tonal[0][1] - PARTIALS_DB and not (pitched and _harmonic(t[0], f0))]
     out["partials"] = [{"hz": round(t[0], 1), "db": round(t[1] - ref, 1)} for t in partials[:MAX_PARTIALS]]
@@ -363,15 +459,14 @@ def profile_array(x: np.ndarray, sr: int) -> dict:
         nz, fl = _noise_flatness(s, _tonal(s, nyq_hi) if s is att else tonal, nyq_hi)
         out["noise_db"][name] = None if nz is None else round(nz, 1)
         out["flatness"][name] = None if fl is None else round(fl, 3)
-    out["click_db"] = None
-    if body is not None:
-        nfft = 1 << int(math.ceil(math.log2(max(2, 2 * n))))
-        spec = np.fft.rfft(y, nfft, axis=0)
-        spec[np.fft.rfftfreq(nfft, 1.0 / sr) < CLICK_HZ] = 0
-        hf = np.fft.irfft(spec, nfft, axis=0)[:a1]
-        pb = float(power[b0:b1].mean())
-        if pb > 0:
-            out["click_db"] = round(_db(float((hf ** 2).mean()) / pb), 1)
+    # click: the attack's power above 2 kHz against the attack's own power, so
+    # the decay and the body's level do not move it
+    nfft = 1 << int(math.ceil(math.log2(max(2, 2 * n))))
+    spec = np.fft.rfft(y, nfft, axis=0)
+    spec[np.fft.rfftfreq(nfft, 1.0 / sr) < CLICK_HZ] = 0
+    hf = np.fft.irfft(spec, nfft, axis=0)[:a1]
+    pa = float(power[:a1].mean())
+    out["click_db"] = round(_db(float((hf ** 2).mean()) / pa), 1) if pa > 0 else None
 
     # balance and width over the whole hit
     hit = y[:end]
@@ -390,12 +485,16 @@ def profile_array(x: np.ndarray, sr: int) -> dict:
     return out
 
 
-def profile(path: str | pathlib.Path) -> dict:
+def profile(path: str | pathlib.Path, hit: int | None = None) -> dict:
     """Envelope, pitch and tone of a one-shot file, relative to the hit itself.
 
-    onset_ms        where the hit starts in the file (first sample within 40 dB of the peak)
+    hits, onsets_ms the hits found in the file and where each starts
+    hit             which one this profile is (from 0): `hit`, by default the first
+                    that is not cut off
+    onset_ms        where the hit starts in the file (first sample within 40 dB of its peak)
+    truncated       the next hit or the end of the file cuts it before it falls 40 dB
     peak_db         sample peak, dBFS (the only absolute level here)
-    attack_ms       onset to the envelope peak
+    attack_ms       onset to the envelope peak (first within 1 dB of it)
     fall_10/20/40_ms  envelope peak to the last moment above peak - 10/20/40 dB
     duration_ms     onset to the last moment above peak - 60 dB
     pitched         false for noise or an inharmonic sound: no pitch, no harmonics
@@ -405,16 +504,126 @@ def profile(path: str | pathlib.Path) -> dict:
     pitch_settle_ms when the pitch comes within 0.5 st of the body pitch and stays 10 ms
     pitch_track_hz  pitch at 0, 5, 10, 20, 40, 80, 150, 300 ms (None once the hit is 50 dB down)
     harmonics_db    harmonics 2-8 against the fundamental, on the body (None past 20 kHz)
+    harmonics_floor_db  the spectral floor around each of those, so a value near it
+                    is the floor, not a harmonic
     partials        strongest peaks that are not harmonics: Hz and dB against the
                     fundamental (or the strongest peak when unpitched)
     noise_db        energy outside the tonal peaks against the total, attack (0-30 ms) and body
     flatness        spectral flatness, attack and body: 0 pure tones .. ~0.56 white noise
-    click_db        attack-window power above 2 kHz against the body's mean power
+    click_db        attack-window (0-30 ms) power above 2 kHz against the attack's
+                    total: a click, or any bright attack (a broadband noise layer too)
     bands_db        six-band balance against the hit's 20 Hz-20 kHz total
     width           0 = mono, 0.5 = equal mid and side, 1 = all side
     notes           why a value is None
     """
     x, sr = load(path)
     out = {"file": str(path)}
-    out.update(profile_array(x, sr))
+    out.update(profile_array(x, sr, hit))
     return out
+
+
+TIMES = (("attack_ms", "attack %s ms, reference %s ms"),
+         ("fall_10_ms", "falls 10 dB in %s ms, reference %s ms"),
+         ("fall_20_ms", "falls 20 dB in %s ms, reference %s ms"),
+         ("fall_40_ms", "falls 40 dB in %s ms, reference %s ms"),
+         ("duration_ms", "lasts %s ms, reference %s ms"),
+         ("pitch_settle_ms", "pitch settles in %s ms, reference %s ms"))
+
+
+def _key(d: dict, k: int):
+    """d[k] for a profile fresh from profile() (int keys) or read back from JSON (str keys)."""
+    return d.get(k, d.get(str(k)))
+
+
+def _num(v: float) -> str:
+    return "%.1f" % v if abs(v) < 10 else "%.0f" % v
+
+
+def _ordinal(k: int) -> str:
+    return {2: "2nd", 3: "3rd"}.get(k, "%dth" % k)
+
+
+def compare(a: dict, b: dict) -> dict:
+    """How profile `a` (the candidate, e.g. a synth take) differs from profile
+    `b` (the reference). `diff` holds a - b for every measure both sides have:
+    pitch in semitones, times as {"ms", "ratio"} (a / b), the rest in their
+    own units. `readings` is one line per difference past its threshold,
+    largest first relative to that threshold. A measure that is None on
+    either side gives no reading, and levels below the method's floor on both
+    sides (harmonics under -50 dB or near the noise, noise share under -25 dB,
+    click under -40 dB) are not read."""
+    diff, found = {}, []
+
+    def add(score, text):
+        found.append((score, text))
+
+    if a.get("pitched") != b.get("pitched"):
+        add(math.inf, "pitched (%s Hz), the reference is not" % _num(a["pitch_body_hz"]) if a.get("pitched")
+            else "unpitched, the reference is pitched (%s Hz)" % _num(b["pitch_body_hz"]))
+    for key, name in (("pitch_body_hz", "pitch_body_st"), ("pitch_start_hz", "pitch_start_st")):
+        va, vb = a.get(key), b.get(key)
+        diff[name] = round(12 * math.log2(va / vb), 2) if va and vb else None
+    d = diff["pitch_body_st"]
+    if d is not None and abs(d) > PITCH_ST:
+        add(abs(d) / PITCH_ST, "body pitch %.1f st %s the reference (%s Hz, reference %s Hz)"
+            % (abs(d), "above" if d > 0 else "below", _num(a["pitch_body_hz"]), _num(b["pitch_body_hz"])))
+    va, vb = a.get("pitch_drop_st"), b.get("pitch_drop_st")
+    diff["pitch_drop_st"] = round(va - vb, 2) if va is not None and vb is not None else None
+    d = diff["pitch_drop_st"]
+    if d is not None and abs(d) > DROP_ST:
+        add(abs(d) / DROP_ST, "pitch drops %.1f st, reference %.1f st" % (va, vb))
+
+    for key, text in TIMES:
+        va, vb = a.get(key), b.get(key)
+        if va is None or vb is None:
+            diff[key] = None
+            continue
+        d, ratio = va - vb, (va / vb if vb > 0 else None)
+        diff[key] = {"ms": round(d, 1), "ratio": None if ratio is None else round(ratio, 3)}
+        if abs(d) > TIME_FLOOR_MS and (ratio is None or abs(ratio - 1) > TIME_RATIO):
+            line = text % (_num(va), _num(vb))
+            if ratio is not None:
+                line += " (%d %% %s)" % (round(abs(ratio - 1) * 100), "longer" if d > 0 else "shorter")
+            add(abs(ratio - 1) / TIME_RATIO if ratio is not None else abs(d) / TIME_FLOOR_MS, line)
+
+    ha, hb = a.get("harmonics_db"), b.get("harmonics_db")
+    diff["harmonics_db"] = None
+    if ha and hb:
+        diff["harmonics_db"] = {}
+
+        def heard(p, h, k):
+            v, floor = _key(h, k), _key(p.get("harmonics_floor_db") or {}, k)
+            return v is not None and v > HARM_FLOOR_DB and (floor is None or v - floor >= HARM_CLEAR_DB)
+        for k in range(2, 9):
+            va, vb = _key(ha, k), _key(hb, k)
+            diff["harmonics_db"][k] = None if va is None or vb is None else round(va - vb, 1)
+            d = diff["harmonics_db"][k]
+            if d is not None and abs(d) > LEVEL_DB and (heard(a, ha, k) or heard(b, hb, k)):
+                add(abs(d) / LEVEL_DB, "%s harmonic %.1f dB %s (%s dB, reference %s dB)"
+                    % (_ordinal(k), abs(d), "high" if d > 0 else "low", _num(va), _num(vb)))
+
+    for key, floor, step, word in (("noise_db", NOISE_FLOOR_DB, LEVEL_DB, "noise"),
+                                   ("flatness", None, None, None)):
+        diff[key] = {}
+        for part in ("attack", "body"):
+            va, vb = (a.get(key) or {}).get(part), (b.get(key) or {}).get(part)
+            diff[key][part] = None if va is None or vb is None else round(va - vb, 3 if word is None else 1)
+            d = diff[key][part]
+            if word and d is not None and abs(d) > step and max(va, vb) > floor:
+                add(abs(d) / step, "%s %.1f dB %s than the reference in the %s (%s dB of the total, reference %s dB)"
+                    % (word, abs(d), "more" if d > 0 else "less", part, _num(va), _num(vb)))
+    va, vb = a.get("click_db"), b.get("click_db")
+    diff["click_db"] = round(va - vb, 1) if va is not None and vb is not None else None
+    d = diff["click_db"]
+    if d is not None and abs(d) > CLICK_STEP_DB and max(va, vb) > CLICK_FLOOR_DB:
+        add(abs(d) / CLICK_STEP_DB, "click %.1f dB %s than the reference" % (abs(d), "stronger" if d > 0 else "weaker"))
+    va, vb = a.get("width"), b.get("width")
+    diff["width"] = round(va - vb, 3) if va is not None and vb is not None else None
+    d = diff["width"]
+    if d is not None and abs(d) > WIDTH_STEP:
+        add(abs(d) / WIDTH_STEP, "width %.2f, reference %.2f (%s)" % (va, vb, "wider" if d > 0 else "narrower"))
+    ba, bb = a.get("bands_db"), b.get("bands_db")
+    diff["bands_db"] = {k: round(ba[k] - bb[k], 1) for k in ba if k in bb} if ba and bb else None
+    va, vb = a.get("peak_db"), b.get("peak_db")
+    diff["peak_db"] = round(va - vb, 2) if va is not None and vb is not None else None
+    return {"a": a, "b": b, "diff": diff, "readings": [t for _, t in sorted(found, key=lambda f: -f[0])]}

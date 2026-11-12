@@ -3,6 +3,7 @@
 Needs the `listen` extra:  uv run --extra listen pytest tests/test_sample.py -q
 Skipped (not failed) when numpy or soundfile is missing.
 """
+import json
 import math
 import pathlib
 import sys
@@ -68,7 +69,8 @@ def test_envelope_and_pitch_ignore_leading_silence():
     a = oneshot.profile_array(x, SR)
     b = oneshot.profile_array(np.concatenate([np.zeros((int(0.030 * SR), 1)), x]), SR)
     assert b["onset_ms"] == 30.0 and a["onset_ms"] == 0.0
-    a.pop("onset_ms"), b.pop("onset_ms")
+    for k in ("onset_ms", "onsets_ms"):
+        a.pop(k), b.pop(k)
     assert a == b
 
 
@@ -239,3 +241,175 @@ def test_profile_reads_a_file(tmp_path):
     r = oneshot.profile(p)
     assert r["file"] == str(p) and r["sample_rate"] == SR and r["channels"] == 1
     assert r["fall_20_ms"] == pytest.approx(50 * math.log(10), abs=6)
+
+
+# ---------------------------------------------------------------- compare
+# The base hit uses the sweep above (200 Hz held 10 ms, then a glide to 100 Hz),
+# so pitch drop and settle are compared too.
+
+BASE = {1: 1.0, 2: 0.3, 3: 0.2}
+
+
+def up2(t):
+    return sweep(t) * 2 ** (2 / 12)
+
+
+def lowpassed_noise(n, hz, seed):
+    spec = np.fft.rfft(np.random.default_rng(seed).standard_normal(n))
+    spec[np.fft.rfftfreq(n, 1 / SR) >= hz] = 0
+    v = np.fft.irfft(spec, n)
+    return v / np.sqrt((v ** 2).mean())
+
+
+def with_noise(x, noise):
+    # the same envelope as the tone; the tone's power is 0.5 * (1 + 0.09 + 0.04),
+    # so noise at 1/100 of it sits 20 dB down: a noise share of 1/101 = -20.04 dB
+    t = np.arange(len(x)) / SR
+    return x + (noise * np.exp(-t / 0.1) * math.sqrt(0.5 * 1.13 / 100))[:, None]
+
+
+def test_compare_level_silence_and_sample_rate_give_no_reading():
+    x = hit(sweep, 0.1, partials=BASE)
+    ref = oneshot.profile_array(x, SR)
+    quieter = oneshot.compare(oneshot.profile_array(x * 10 ** (-6 / 20), SR), ref)
+    assert quieter["readings"] == []
+    assert quieter["diff"]["peak_db"] == pytest.approx(-6.0, abs=0.01)
+    late = oneshot.profile_array(np.concatenate([np.zeros((int(0.030 * SR), 1)), x]), SR)
+    assert oneshot.compare(late, ref)["readings"] == []
+    # the same hit synthesised at 44.1 kHz, not resampled
+    at44 = oneshot.profile_array(hit(sweep, 0.1, partials=BASE, sr=44100), 44100)
+    assert oneshot.compare(at44, ref)["readings"] == []
+
+
+def test_compare_two_semitones_up_reads_only_the_pitch():
+    a = oneshot.profile_array(hit(sweep, 0.1, partials=BASE), SR)
+    b = oneshot.profile_array(hit(up2, 0.1, partials=BASE), SR)
+    c = oneshot.compare(a, b)
+    assert c["diff"]["pitch_body_st"] == pytest.approx(-2.0, abs=0.1)
+    assert len(c["readings"]) == 1 and c["readings"][0].startswith("body pitch 2.0 st below the reference")
+    # a profile read back from JSON (string keys) compares the same
+    assert oneshot.compare(json.loads(json.dumps(a)), json.loads(json.dumps(b)))["readings"] == c["readings"]
+
+
+def test_compare_half_the_decay_reads_only_decay():
+    a = oneshot.profile_array(hit(sweep, 0.05, partials=BASE), SR)
+    b = oneshot.profile_array(hit(sweep, 0.1, partials=BASE), SR)
+    c = oneshot.compare(a, b)
+    assert c["readings"] and all(r.startswith(("falls", "lasts")) for r in c["readings"]), c["readings"]
+    assert any(r.startswith("falls 20 dB") and "shorter" in r for r in c["readings"])
+    # an exponential's fall times scale with its time constant: 50 / 100 ms
+    for k in ("fall_10_ms", "fall_20_ms", "fall_40_ms"):
+        assert c["diff"][k]["ratio"] == pytest.approx(0.5, abs=0.05), k
+
+
+def test_compare_noise_added_reads_only_the_noise():
+    # noise kept under 2 kHz: white noise also brightens the attack, which
+    # click_db rightly reads (next test), so this isolates the noise share
+    x = hit(sweep, 0.1, partials=BASE)
+    noisy = oneshot.profile_array(with_noise(x, lowpassed_noise(len(x), 2000, 7)), SR)
+    c = oneshot.compare(noisy, oneshot.profile_array(x, SR))
+    assert noisy["noise_db"]["body"] == pytest.approx(-20.04, abs=1.5)
+    assert len(c["readings"]) == 1, c["readings"]
+    assert c["readings"][0].startswith("noise") and "more than the reference in the body" in c["readings"][0]
+
+
+def test_compare_white_noise_reads_noise_and_a_brighter_attack():
+    x = hit(sweep, 0.1, partials=BASE)
+    white = np.random.default_rng(8).standard_normal(len(x))
+    c = oneshot.compare(oneshot.profile_array(with_noise(x, white), SR), oneshot.profile_array(x, SR))
+    kinds = sorted(r.split()[0] for r in c["readings"])
+    assert kinds == ["click", "noise"], c["readings"]       # no harmonic reading from the noise floor
+
+
+def test_compare_pitched_against_unpitched_is_a_reading():
+    t = np.arange(int(0.6 * SR)) / SR
+    noise = (np.random.default_rng(9).standard_normal(len(t)) * np.exp(-t / 0.1) * 0.3)[:, None]
+    c = oneshot.compare(oneshot.profile_array(hit(100, 0.1), SR), oneshot.profile_array(noise, SR))
+    assert c["readings"][0].startswith("pitched (100 Hz), the reference is not")
+    assert c["diff"]["pitch_body_st"] is None and c["diff"]["harmonics_db"] is None
+
+
+def test_compare_floors_none_and_order():
+    a = {"pitched": True, "pitch_body_hz": 100.0 * 2 ** (0.6 / 12), "attack_ms": 0.4, "fall_20_ms": 100.0,
+         "fall_40_ms": None, "pitch_settle_ms": 0.0, "harmonics_db": {2: -55.0, 3: -10.0},
+         "harmonics_floor_db": {2: -90.0, 3: -90.0}, "noise_db": {"attack": -30.0, "body": None},
+         "click_db": -45.0, "width": 0.30}
+    b = {"pitched": True, "pitch_body_hz": 100.0, "attack_ms": 0.3, "fall_20_ms": 200.0,
+         "fall_40_ms": 300.0, "pitch_settle_ms": 1.5, "harmonics_db": {2: -60.0, 3: -10.0},
+         "harmonics_floor_db": {2: -90.0, 3: -90.0}, "noise_db": {"attack": -40.0, "body": -20.0},
+         "click_db": -60.0, "width": 0.15}
+    c = oneshot.compare(a, b)
+    # body pitch 0.6 st = 2x its threshold, fall-20 50 % shorter = 3.3x, width 0.15 = 1.5x;
+    # attack 0.1 ms and settle 1.5 ms are under the 2 ms floor, the 2nd harmonic is under
+    # -50 dB, attack noise under -25 dB and click under -40 dB on both sides
+    assert [r.split()[0] for r in c["readings"]] == ["falls", "body", "width"], c["readings"]
+    assert c["diff"]["fall_40_ms"] is None and c["diff"]["noise_db"]["body"] is None
+    assert c["diff"]["attack_ms"] == {"ms": pytest.approx(0.1), "ratio": pytest.approx(4 / 3, abs=1e-3)}
+
+
+# ---------------------------------------------------------------- hits
+
+def test_hits_four_at_500ms_and_the_third_alone():
+    one = hit(100, 0.050, seconds=0.5, partials={n: 1.0 / n for n in range(1, 16, 2)})
+    take = np.concatenate([one] * 4)
+    r = oneshot.profile_array(take, SR, hit=2)
+    assert r["hits"] == 4 and r["hit"] == 2 and r["truncated"] is False
+    assert r["onsets_ms"] == pytest.approx([0, 500, 1000, 1500], abs=0.5)
+    assert r["onset_ms"] == pytest.approx(1000, abs=0.5)
+    # the single hit's numbers, as items 1 and 2 derive them
+    assert r["fall_20_ms"] == pytest.approx(50 * math.log(10), abs=6)
+    assert r["pitch_body_hz"] == pytest.approx(100, rel=0.02)
+    assert r["harmonics_db"][3] == pytest.approx(20 * math.log10(1 / 3), abs=1)
+    assert r["harmonics_db"][5] == pytest.approx(20 * math.log10(1 / 5), abs=1)
+    assert oneshot.profile_array(take, SR)["hit"] == 0
+
+
+def test_hits_file_ending_60ms_into_a_300ms_decay_is_truncated():
+    # fall-40 of e^(-t/tau) is tau ln(100): 300 ms for tau = 65.1 ms
+    r = oneshot.profile_array(hit(100, 0.300 / math.log(100), seconds=0.060), SR)
+    assert r["hits"] == 1 and r["truncated"] is True and r["fall_40_ms"] is None
+    assert any("file ends before the hit falls 40 dB" in n for n in r["notes"])
+
+
+def test_hits_next_hit_cuts_the_one_before():
+    # two hits 200 ms apart, each falling 40 dB only after 100 ln(100) = 460 ms
+    take = np.concatenate([hit(100, 0.1, seconds=0.2), hit(100, 0.1, seconds=0.8)])
+    first = oneshot.profile_array(take, SR, hit=0)
+    assert first["hits"] == 2 and first["truncated"] is True and first["fall_40_ms"] is None
+    assert any("next hit starts before the hit falls 40 dB" in n for n in first["notes"])
+    assert first["fall_10_ms"] == pytest.approx(100 * math.log(10 ** 0.5), abs=6)    # 115 ms, before the cut
+    default = oneshot.profile_array(take, SR)
+    assert default["hit"] == 1 and default["truncated"] is False
+
+
+def test_hits_fast_roll_is_split_at_120ms():
+    # each hit is 21 dB down (8.686 * 120 / 50) when the next starts
+    take = np.concatenate([hit(100, 0.05, seconds=0.12)] * 5 + [hit(100, 0.05, seconds=0.5)])
+    r = oneshot.profile_array(take, SR)
+    assert r["hits"] == 6
+    assert r["onsets_ms"] == pytest.approx([0, 120, 240, 360, 480, 600], abs=1)
+
+
+@pytest.mark.parametrize("kind", ["tremolo 6 Hz", "tremolo 20 Hz", "beating 4 Hz", "beating 15 Hz"])
+def test_hits_tremolo_or_beating_is_not_split(kind):
+    t = np.arange(int(1.0 * SR)) / SR
+    rate = float(kind.split()[1])
+    if kind.startswith("tremolo"):         # 99 % depth: 40 dB troughs
+        x = np.sin(2 * np.pi * 200 * t) * np.exp(-t / 0.3) * (1 - 0.99 * (0.5 - 0.5 * np.cos(2 * np.pi * rate * t)))
+    else:                                  # two equal modes: true nulls `rate` times a second
+        x = (np.sin(2 * np.pi * 100 * t) + np.sin(2 * np.pi * (100 + rate) * t)) * np.exp(-t / 0.4)
+    assert oneshot.profile_array(x[:, None], SR)["hits"] == 1
+
+
+def test_hits_out_of_range_is_refused(tmp_path):
+    take = np.concatenate([hit(100, 0.05, seconds=0.5)] * 2)
+    with pytest.raises(ValueError, match="hit 2 is out of range: the take has 2 hits"):
+        oneshot.profile_array(take, SR, hit=2)
+    p = tmp_path / "take.wav"
+    sf.write(str(p), take, SR, subtype="FLOAT")
+    import mcp_server.server as S
+    with pytest.raises(S.LiveError, match="out of range"):
+        S.sample_analyze(str(p), hit=5)
+    assert json.loads(S.sample_analyze(str(p), hit=1))["onset_ms"] == pytest.approx(500, abs=0.5)
+    c = json.loads(S.sample_compare(str(p), str(p), hit_a=0, hit_b=1))
+    assert c["readings"] == []
