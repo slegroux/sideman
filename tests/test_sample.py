@@ -935,10 +935,10 @@ def test_clean_hit_skips_a_complete_hit_with_less_than_90_percent_of_the_median_
 
 
 def test_clean_hit_leaves_out_a_ghost_note_and_hits_before_the_span():
-    # two hits at full level and a ghost 14 dB down with the most room: the ghost is not within 6 dB
-    loud, ghost = take([0.2, 0.8], 2.4), 0.2 * take([1.4], 2.4)
+        # three ghosts first (the median hit is a ghost), then two full-level hits: only the 6 dB band picks a loud one
+    loud, ghost = take([1.4, 1.9], 2.4), 0.2 * take([0.2, 0.7, 1.0], 2.4)
     r = oneshot.profile_array(loud + ghost, SR, hit="clean")
-    assert r["hits"] == 3 and r["hit"] == 0 and r["onset_ms"] == pytest.approx(200, abs=3)
+    assert r["hits"] == 5 and r["hit"] == 3 and r["onset_ms"] == pytest.approx(1400, abs=3)
     # within= keeps hits that start before the span out (the tail of a hit from the section before)
     r = oneshot.profile_array(take([0.0, 0.7, 1.4], 2.1, tau=0.05), SR, hit="clean", within=(0.5, 2.1))
     assert r["hit"] == 1 and r["onset_ms"] == pytest.approx(700, abs=3)
@@ -972,3 +972,16 @@ def test_clean_hit_through_the_tools(tmp_path):
         q = tmp_path / "roll.wav"
         sf.write(str(q), take([0, 0.06, 0.12], 0.2, tau=0.1), SR, subtype="FLOAT")
         S.sample_analyze(str(q), hit="clean")
+
+
+def test_clean_hit_near_a_position_is_judged_against_the_span_not_a_louder_hit_at_its_edge():
+    # a full-level hit starts 20 ms before the span (inside the 30 ms slack of near=), the hit in the span is
+    # 8 dB down: it is the only candidate inside, so near= must still find it. (A louder edge hit that set the
+    # 6 dB band would have dropped it.)
+    x = take([0.48], 2.4) + 0.4 * take([1.4], 2.4)
+    inside = oneshot.profile_array(x, SR, hit="clean", within=(0.5, 2.4))
+    assert inside["hit"] == 1 and inside["onset_ms"] == pytest.approx(1400, abs=3)
+    near = oneshot.profile_array(x, SR, hit="clean", within=(0.5, 2.4), near=1.40)
+    assert near["hit"] == 1 and "requested position" in near["notes"][0]
+    nothing_inside = oneshot.profile_array(x[:int(1.0 * SR)], SR, hit="clean", within=(0.5, 1.0), near=0.49)
+    assert nothing_inside["hit"] == 0                  # only an edge hit exists, and it is the one asked for

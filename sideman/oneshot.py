@@ -542,22 +542,25 @@ def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray
             continue
         room = (onsets[k + 1] if k + 1 < len(segs) else x.shape[0]) - onsets[k]
         complete.append({"k": k, "got": got, "room": room, "at": onsets[k] / sr})
+    inside = complete
     if within is not None:
+        inside = [c for c in complete if within[0] <= c["at"] < within[1]]
         slack = NEAR_S if near is not None else 0.0
         complete = [c for c in complete if within[0] - slack <= c["at"] < within[1] + slack]
-    if not complete:
+    if not inside and near is not None:
+        inside = complete                      # nothing inside the span, but a hit at the edge may be the one asked for
+    if not inside:
         raise ValueError("no clean hit: none of the %d hit%s is complete (not cut off before falling 40 dB), "
                          "starts from quiet, and lies inside the span asked for"
                          % (len(segs), "" if len(segs) == 1 else "s"))
-    loud = max(c["got"]["peak_db"] for c in complete)
-    cands = [c for c in complete if c["got"]["peak_db"] >= loud - CLEAN_BAND_DB]
+    loud = max(c["got"]["peak_db"] for c in inside)       # the span's own loudest hit sets the band, not a hit at its edge
+    keep = lambda c: c["got"]["peak_db"] >= loud - CLEAN_BAND_DB       # noqa: E731
+    cands = [c for c in inside if keep(c)]
     if near is not None:
-        close = [c for c in cands if abs(c["at"] - near) <= NEAR_S]
+        close = [c for c in complete if keep(c) and abs(c["at"] - near) <= NEAR_S]
         if close:
             c = min(close, key=lambda c: abs(c["at"] - near))
             return c["k"], c["got"], int(round(_ms(c["room"], sr))), "the hit at the requested position"
-    if within is not None:
-        cands = [c for c in cands if within[0] <= c["at"] < within[1]] or cands
     med_room = float(np.median([c["room"] for c in cands]))
     med_peak = float(np.median([c["got"]["peak_db"] for c in cands]))
     typical = [c for c in cands if c["room"] >= ROOM_FRAC * med_room
