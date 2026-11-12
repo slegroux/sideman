@@ -505,12 +505,14 @@ def change_rate(x: np.ndarray, sr: int, bar_s: float, offset_s: float, first_bar
 # a gain the stems and the mix share.
 
 PROFILE_KIND = "reference_profile"
-PROFILE_VERSION = 5        # 5: windows start GRID_LEAD_S early (no edge guard); 4: `stems_sum`, per-bar levels for absent roles
+PROFILE_VERSION = 6        # 6: `core_bar_db` (presence on each bar's core); 5: windows start GRID_LEAD_S early (no edge guard)
 ABSENT_DB = 60.0           # a role with under a quarter of its bars within this of the stems' sum is absent, not -120 dB
 TRACE_DB = 40.0            # ...and within ABSENT_DB but not this of it, a trace: listed, not a gap against an absent one
-GRID_LEAD_S = 0.020        # every section and bar window starts this early, on both sides: a hit that starts a few
-                           # ms before the grid line (real drums do, and a capture is never sample-aligned) belongs to
-                           # its own bar, and a note starting 5 ms before a line is not in the section before it
+GRID_LEAD_S = 0.020        # a hit that starts up to this long before a grid line (real drums do, and a capture is never
+                           # sample-aligned) belongs to the bar after it, on both sides: a bar's level window starts at
+                           # such a hit's onset, otherwise on the line, so a note or a tail that ends on the line stays
+                           # in the bar before. Presence is judged on each bar's core, this far inside both of its lines:
+                           # what sounds within it of a line never makes a role present in a bar or a section
 ELEMENT_GAP_DB = 1.0       # an element's ratio to the kick differing by more than this is a gap
 WIDTH_GAP = 0.1            # an element's width (0 mono .. 1 all side) differing by more than this is a width gap
 CAPTURE_IS_REF_DB = 0.3    # a master capture is the reference when, with the level offset removed,
@@ -525,23 +527,42 @@ def _level_db(x: np.ndarray) -> float:
     return _db_amp(_peak_rms(x)[1])
 
 
-def _bar_levels(x: np.ndarray, sr: int, t0: float, bar_s: float, first_bar: int, n: int) -> list:
-    """Level in dBFS of each of `n` bars from `first_bar` (bar 0 at t0 s); None for a silent bar.
-    Callers pass t0 already moved GRID_LEAD_S early."""
+def _line_start(x: np.ndarray, sr: int, t: float) -> int:
+    """Sample of x [n, channels] where the level window of the bar beginning at line t (s) starts: the onset
+    of a hit that rises within GRID_LEAD_S before the line (oneshot's onset rule: out of the loudest 1 ms of
+    the 20 ms before), else the line itself. A line under 2 * GRID_LEAD_S into x has no lead."""
+    from .oneshot import _onset
+    g, line = int(round(GRID_LEAD_S * sr)), int(round(t * sr))
+    if line < 2 * g or line >= len(x):
+        return max(0, min(line, len(x)))
+    win = x[line - 2 * g:line + g]
+    i = _onset(win, np.abs(win).max(axis=1), sr, True, GRID_LEAD_S)
+    return line - 2 * g + i if g <= i < 2 * g else line
+
+
+def _bar_levels(x: np.ndarray, sr: int, t0: float, bar_s: float, first_bar: int, n: int, core: bool = False) -> list:
+    """Level in dBFS of each of `n` bars from `first_bar` (bar 0 at t0 s); None for a silent bar. A bar's
+    window runs from its _line_start to the next one's; with `core`, from GRID_LEAD_S after its line to
+    GRID_LEAD_S before the next (presence)."""
     out = []
+    lines = [t0 + (first_bar + i) * bar_s for i in range(n + 1)]
+    edges = None if core else [_line_start(x, sr, t) for t in lines]
     for i in range(n):
-        a = t0 + (first_bar + i) * bar_s
-        lv = _level_db(_slice(x, sr, a, a + bar_s))
+        if core:
+            seg = _slice(x, sr, lines[i] + GRID_LEAD_S, lines[i + 1] - GRID_LEAD_S)
+        else:
+            seg = x[edges[i]:edges[i + 1]]
+        lv = _level_db(seg)
         out.append(None if lv <= FLOOR_DB else round(lv, 2))
     return out
 
 
 def _presence(per_bar: list, mix_level: float | None) -> str:
-    """"present", "trace" or "absent" from the per-bar levels against a reference level (the power sum
-    of the stems, or of our element sources; never the mix or the master capture). Present when at
-    least a quarter of the bars (and one) are within TRACE_DB of it; otherwise a trace when at least a
-    quarter are within ABSENT_DB of it; otherwise absent. A phrase in a few bars counts; a note that
-    starts a few ms before a section line is in the next section's window, not this one's."""
+    """"present", "trace" or "absent" from the per-bar levels of the bars' cores against a reference
+    level (the power mean of the per-bar cores of the stems' sum, or of our element sources' sum; never
+    the mix or the master capture). Present when at least a quarter of the bars (and one) are within
+    TRACE_DB of it; otherwise a trace when at least a quarter are within ABSENT_DB of it; otherwise
+    absent. A phrase in a few bars counts; what sounds within GRID_LEAD_S of a line does not."""
     if mix_level is None or not per_bar:
         return "absent"
     need = max(1.0, len(per_bar) / 4.0)
@@ -598,8 +619,10 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
     mix, so a master's make-up gain does not change it. A role with under a quarter of its
     bars (and one) within ABSENT_DB of the stems' sum is {"absent": true, "per_bar_db": [...]}
     there, with no other numbers; with a quarter within ABSENT_DB but not within TRACE_DB the
-    entry carries "trace": true. Section and bar windows for the roles and the per-bar levels
-    start GRID_LEAD_S early (the mix's bands, width and LUFS use the window itself). Files must share one sample rate
+    entry carries "trace": true. Presence is judged on each bar's core (`core_bar_db`, GRID_LEAD_S
+    inside both lines, for every role and the stems' sum). For the roles' levels, bands and widths and
+    all per-bar levels a section or bar window starts at the onset of a hit that rises within GRID_LEAD_S
+    before its line, else on the line (the mix's bands, width and LUFS use the plain window). Files must share one sample rate
     (refused otherwise); of different lengths they are trimmed to the shortest
     and `notes` says so.
 
@@ -670,7 +693,7 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
         a = analyze_array(_slice(x, sr, *span(sec)), sr)
         mix_rows.append({"level_db": a["rms_db"], "integrated_lufs": a["integrated_lufs"],
                          "width": a["width"], "bands_db": a["bands_db"],
-                         "per_bar_db": _bar_levels(_stereo(x), sr, t0 - GRID_LEAD_S, bar_s, sec["start_bar"], sec["bars"])})
+                         "per_bar_db": _bar_levels(_stereo(x), sr, t0, bar_s, sec["start_bar"], sec["bars"])})
     nsec = len(sections)
     measured: dict[str, list] = {}
     for role, paths in files.items():
@@ -680,31 +703,37 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
             y = z.copy() if y is None else y + z
         measured[role] = []
         for sec in sections:
-            seg = _slice(y, sr, span(sec)[0] - GRID_LEAD_S, span(sec)[1] - GRID_LEAD_S)
+            seg = y[_line_start(y, sr, span(sec)[0]):_line_start(y, sr, span(sec)[1])]
             lv = _level_db(seg)
             bands, width = _bands_width(seg, sr)
             measured[role].append({"level": lv, "bands": bands, "width": width,
-                                   "bars": _bar_levels(y, sr, t0 - GRID_LEAD_S, bar_s, sec["start_bar"], sec["bars"])})
+                                   "bars": _bar_levels(y, sr, t0, bar_s, sec["start_bar"], sec["bars"]),
+                                   "core": _bar_levels(y, sr, t0, bar_s, sec["start_bar"], sec["bars"], core=True)})
     # presence is judged against the stems together, not the mix: the mix can carry a master's make-up gain
+    def bar_sum(i, key, n):
+        power = [sum(0.0 if m[i][key][j] is None else 10 ** (m[i][key][j] / 10) for m in measured.values())
+                 for j in range(n)]
+        return [round(_db(v), 2) if v > 0 else None for v in power]
+
     sums = []
     for i, sec in enumerate(sections):
-        power = [sum(0.0 if m[i]["bars"][j] is None else 10 ** (m[i]["bars"][j] / 10) for m in measured.values())
-                 for j in range(sec["bars"])]
         total = sum(10 ** (m[i]["level"] / 10) for m in measured.values() if m[i]["level"] > FLOOR_DB)
-        sums.append({"level_db": round(_db(total), 2), "per_bar_db": [round(_db(v), 2) if v > 0 else None for v in power]})
+        sums.append({"level_db": round(_db(total), 2), "per_bar_db": bar_sum(i, "bars", sec["bars"]),
+                     "core_bar_db": bar_sum(i, "core", sec["bars"])})
     role_rows: dict[str, list] = {}
     raw: dict[str, list] = {}
     for role, rows in measured.items():
         role_rows[role], raw[role] = [], []
         for i in range(nsec):
             m, per_bar = rows[i], rows[i]["bars"]
-            kind = _presence(per_bar, sums[i]["level_db"])
+            kind = _presence(m["core"], _mean_db(sums[i]["core_bar_db"]))
             if kind == "absent":
-                role_rows[role].append({"absent": True, "per_bar_db": per_bar})
+                role_rows[role].append({"absent": True, "per_bar_db": per_bar, "core_bar_db": m["core"]})
                 raw[role].append(None)
                 continue
             role_rows[role].append({"absent": False, "trace": kind == "trace", "level_db": round(m["level"], 2),
-                                    "vs_kick_db": None, "per_bar_db": per_bar, "bands_db": m["bands"],
+                                    "vs_kick_db": None, "per_bar_db": per_bar, "core_bar_db": m["core"],
+                                    "bands_db": m["bands"],
                                     "width": m["width"]})
             raw[role].append(m["level"])
     if "kick" in files:
@@ -777,9 +806,10 @@ def _check_profile(prof: dict) -> None:
             need(num(m["level_db"]) and len(m["per_bar_db"]) == n and "width" in m and "integrated_lufs" in m)
             need(all(num(m["bands_db"][name]) for name, _, _ in BANDS))
             need(num(sec["stems_sum"]["level_db"]) and len(sec["stems_sum"]["per_bar_db"]) == n)
+            need(len(sec["stems_sum"]["core_bar_db"]) == n)
             need(isinstance(sec["roles"], dict))
             for e in sec["roles"].values():
-                need(isinstance(e["absent"], bool) and len(e["per_bar_db"]) == n)
+                need(isinstance(e["absent"], bool) and len(e["per_bar_db"]) == n and len(e["core_bar_db"]) == n)
                 if not e["absent"]:
                     need(isinstance(e["trace"], bool) and num(e["level_db"]) and "width" in e)
                     need(all(name in e["bands_db"] for name, _, _ in BANDS))
@@ -862,49 +892,53 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
     """(vs_reference, elements) for one manifest section paired with `psec` of the profile
     (starting `fb` bars in). Levels are ratios to the kick, or, where the kick is out on either
     side (absent, or KICK_OUT_DB under the loudest other role), to the loudest role present on
-    both sides, the same one for both: `yardstick` says which. Presence is judged against our
-    element sources together and the profile's stems together, never the master capture. A role
+    both sides, the same one for both: `yardstick` says which. Presence is judged on the bars' cores
+    against our element sources together and the profile's stems together, never the master capture;
+    levels on windows that start at a hit rising within GRID_LEAD_S before a line (_line_start). A role
     present on one side and a trace on the other is compared (`trace_side` says which); a role that
     is a trace or absent on both sides is listed in `traces`. A kick out on one side only is
     listed in the one-side lists as well."""
     n = sec["bars"]
     partial = bool(fb) or n != psec["bars"]
-    lead_t0 = t0 - GRID_LEAD_S                           # our windows start as early as the profile's
+    a0 = max(0, int(round((t0 - 2 * GRID_LEAD_S) * sr)))     # our windows are read as the profile's: with
+    a1 = int(round((t0 + n * bar_s + GRID_LEAD_S) * sr))     # the 40 ms before each line and 20 ms after
+    rel = t0 - a0 / sr
     pm = psec["mix"]
     c = compare(a, {"bands_db": pm["bands_db"], "side_minus_mid_db": {},
                     "integrated_lufs": pm["integrated_lufs"], "width": pm["width"]})
     vs = {"band_balance_db": c["band_balance_db"], "flagged_bands": [f["band"] for f in c["flagged_bands"]],
           "lufs_diff": c["diff"].get("integrated_lufs"), "width_diff": c["diff"].get("width")}
     notes = list(notes)
-    master_bars = _bar_levels(_stereo(_slice(audio["master"][0], sr, lead_t0, lead_t0 + n * bar_s)), sr, 0.0, bar_s, 0, n)
+    master_bars = _bar_levels(_stereo(audio["master"][0][a0:a1]), sr, rel, bar_s, 0, n)
     is_ref = not partial and _same_shape(a, pm, master_bars, pm["per_bar_db"])
     if is_ref:
         notes.append("the capture is the reference: check solos")
     rng = slice(fb, fb + n)
 
-    # the reference side: presence from the paired bars against the stems' sum
-    sum_lv = psec["stems_sum"]["level_db"] if not partial else _mean_db(psec["stems_sum"]["per_bar_db"][rng])
+    # the reference side: presence from the paired bars' cores against the stems' sum
+    sum_lv = _mean_db(psec["stems_sum"]["core_bar_db"][rng])
     ref_lv, ref_kind, ref_width = {}, {}, {}
     for role, e in psec["roles"].items():
         if role == "master":
             continue
         bars = e["per_bar_db"][rng]
-        ref_kind[role] = _presence(bars, sum_lv)
+        ref_kind[role] = _presence(e["core_bar_db"][rng], sum_lv)
         ref_lv[role] = None if ref_kind[role] == "absent" else (_mean_db(bars) if partial else e["level_db"])
         ref_width[role] = e.get("width")
     # our side: the same, against our element sources together
-    ours, raw_lv, ours_kind = {}, {}, {}
+    ours, core, raw_lv, ours_kind = {}, {}, {}, {}
     for role in audio:
         if role == "master":                     # sits after the master chain: never ratioed against elements
             continue
-        seg = _stereo(_slice(audio[role][0], sr, lead_t0, lead_t0 + n * bar_s))
-        ours[role] = _bar_levels(seg, sr, 0.0, bar_s, 0, n)
-        raw_lv[role] = seg
-    ours_power = [sum(0.0 if v[j] is None else 10 ** (v[j] / 10) for v in ours.values()) for j in range(n)]
+        y = _stereo(audio[role][0][a0:a1])
+        ours[role] = _bar_levels(y, sr, rel, bar_s, 0, n)
+        core[role] = _bar_levels(y, sr, rel, bar_s, 0, n, core=True)
+        raw_lv[role] = y[_line_start(y, sr, rel):_line_start(y, sr, rel + n * bar_s)]
+    ours_power = [sum(0.0 if v[j] is None else 10 ** (v[j] / 10) for v in core.values()) for j in range(n)]
     ours_sum = _mean_db([round(_db(p), 2) if p > 0 else None for p in ours_power])
     ours_lv, ours_width = {}, {}
     for role, seg in raw_lv.items():
-        ours_kind[role] = _presence(ours[role], ours_sum)
+        ours_kind[role] = _presence(core[role], ours_sum)
         if ours_kind[role] == "absent":
             ours_lv[role], ours_width[role] = None, None
         else:

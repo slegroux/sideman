@@ -527,7 +527,9 @@ whole section's) and `width_gaps` lists those more than 0.1 apart, separate
 from the level gaps. Presence is judged against our element sources together
 and the profile's stems together (never the master capture, which carries the
 master chain's gain): present when a quarter of the bars are within 40 dB of
-them, a `trace` when a quarter are within 60 dB. A trace on both sides, or a
+them, a `trace` when a quarter are within 60 dB, read on each bar's core (20 ms
+inside both lines, so a note ending on a line or a hit just before it never
+makes a role present in the bar or section before). A trace on both sides, or a
 trace against an absent role, is listed apart and never a gap; a present role
 against a trace is compared and can be a gap (`trace_side` says which side).
 Where the kick is out on either side (absent, or 30 dB under the loudest other
@@ -545,7 +547,9 @@ readings between a typical clean hit of ours and of the reference stem over the
 section. Each side is cut with a beat of pre-roll and post-roll and only hits
 that start inside the section count; the reference's hit is picked first and
 ours is the one at the same place in the section (within 30 ms) when there is
-one. No clean hit on a side gives a note and no readings. `reference_stale` names profile
+one, else a hit rising within 30 ms of that place (noted), else our own with a
+note that the hits are not at the same place. A hit's earliness plus the
+capture's read offset must stay within 20 ms. No clean hit on a side gives a note and no readings. `reference_stale` names profile
 inputs that changed since it was built (a drum role whose stem changed is
 skipped). The numbers are measurements, not moves: the ear decides which
 gaps matter.
@@ -577,10 +581,12 @@ per-bar levels, bands and width. A role is present in a section when at least
 a quarter of its bars (and one) are within 40 dB of the stems' power sum, a
 trace when a quarter are within 60 dB (listed, not a gap against an absent
 role in mix_report), else absent there (not -120 dB); the mix is not the
-reference for this, so a limiter's make-up gain does not move it. Section and
-bar windows start 20 ms early, so a hit that starts a few ms before a grid
-line belongs to its own bar (the same lead is used on the capture side);
-every role keeps its per-bar levels, absent ones too.
+reference for this, so a limiter's make-up gain does not move it. Presence is
+read on each bar's core, 20 ms inside both lines (`core_bar_db`). A section or
+bar's level window starts at the onset of a hit that rises within 20 ms before
+its line, so a hit that starts a few ms early belongs to its own bar, and a
+note ending on the line stays in the bar before (the same rules on the capture
+side); every role keeps its per-bar levels, absent ones too.
 
 Writes <mix name>.profile.json next to the mix (`out`: a .json path or a
 folder), which holds everything above plus each input's path, mtime and

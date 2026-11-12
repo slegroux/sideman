@@ -308,10 +308,13 @@ layers:
   a peak within 3 dB of the median; the earliest of those. Each side is cut with
   a beat of pre-roll and post-roll, only hits that start inside the section (its
   window starting 20 ms early, as below) count, the reference's is picked first,
-  and ours is the one within 30 ms of the same place when there is one (else its
-  own, with a note that the readings compare different hits). The two hits are
-  then measured again on cuts made from the hits themselves, so the same audio
-  gives the same readings however it is offset against the grid.
+  and ours is the one within 30 ms of the same place when there is one. When our
+  own hit-finding offers none there, a hit that rises out of what comes before
+  it within 30 ms of that place is measured, with a note; otherwise our own
+  typical hit, with a note that the hits are not at the same place (where each
+  is) and that the readings compare different hits. The two hits are then
+  measured again on cuts made from the hits themselves, of the same length, so
+  the same audio gives the same readings however it is offset against the grid.
 
 **The reference profile** is built once with `reference_profile(mix, stems,
 tempo, t0, sections)`. `stems` maps a role to a file or a list of files that
@@ -344,11 +347,23 @@ master capture: its make-up gain would move the line. Absent is not reported as
 −120 dB. A trace on both sides, or against an absent element, is listed and
 never counted as a gap or as "in the reference only", because separation bleed
 lives there; an element present on one side and a trace on the other is
-compared and can be a gap. Every section and bar window, on both sides, starts
-20 ms before its grid line, so a hit that starts a few ms early (real drums do,
-and a capture is never sample-aligned with the reference) belongs to its own
-section and bar, and a note that starts just before the line is not in the
-section before it.
+compared and can be a gap. Presence is judged on the core of each bar, from
+20 ms after its grid line to 20 ms before the next, on both sides: whatever
+sounds within 20 ms of a line (a note ending on it, a hit starting just before
+it) never makes an element present in a bar or a section. Levels are read over
+the whole bar, except that a bar's window starts at the onset of a hit that
+rises within 20 ms before its line (real drums start a few ms early, and a
+capture is never sample-aligned with the reference): that hit belongs to its
+own bar and section, while a note or a tail that ends on the line stays in the
+bar before.
+
+**Timing tolerance.** A hit's earliness against the grid plus the capture's
+read offset (how far `offset_s` sits from where the audio really is, either
+way) must stay within 20 ms. Flare-like drums start 3-9 ms early, which leaves
+11-17 ms for the offset. Past 20 ms a hit at a section line counts in the
+section before it (it can make an element present there, "in ours only"), and
+a drum hit's place differs by more than the 30 ms the drum layer allows when
+the earliness and offset together pass 30 ms ("not at the same place").
 
 **Pairing.** Sections pair by name: the manifest section "E05" with the
 profile's "E05". A manifest section may carry `"reference": {"section":

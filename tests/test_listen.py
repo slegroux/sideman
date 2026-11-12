@@ -429,10 +429,6 @@ def gain(db):
 def level_sine(freq, db_by_bar):
     """A sine at KICK_AMP * gain(db) per bar (None = silent), T0 of silence in front."""
     amp = np.repeat([0.0 if d is None else KICK_AMP * gain(d) for d in db_by_bar], bars(1))
-    per = [0.0 if d is None else KICK_AMP * gain(d) for d in db_by_bar]
-    for i in range(len(per) - 1):              # the windows start 20 ms early, so the last 20 ms of a block that is
-        if per[i + 1] < 0.3 * per[i]:          # followed by a much quieter one would count in the next bar: end it
-            amp[(i + 1) * bars(1) - int(0.025 * SR):(i + 1) * bars(1)] = per[i + 1]      # 25 ms short
     t = np.arange(len(amp)) / SR
     return np.concatenate([np.zeros(int(T0 * SR)), amp * np.sin(2 * np.pi * freq * t)])
 
@@ -481,7 +477,8 @@ def test_profile_ratios_to_the_kick_match_the_gains_in_every_section(tmp_path):
 def test_profile_a_silent_role_is_absent_not_minus_120(tmp_path):
     p = profile_of(tmp_path, stem_set(tmp_path, "ref"))
     b = p["sections"][1]["roles"]["synth"]
-    assert b["absent"] and set(b) == {"absent", "per_bar_db"} and b["per_bar_db"] == [None] * 8     # no level, bars kept
+    assert b["absent"] and set(b) == {"absent", "per_bar_db", "core_bar_db"} and b["per_bar_db"] == [None] * 8   # no level, bars kept
+    assert b["core_bar_db"] == [None] * 8
     assert all(not s["roles"][r]["absent"] for s in p["sections"] for r in ("kick", "bass", "drums"))
     assert not p["sections"][0]["roles"]["synth"]["absent"]
 
@@ -1099,11 +1096,8 @@ def test_profile_a_phrase_in_four_of_eight_bars_is_present_and_one_bar_in_eight_
     sig = {"kick": level_sine(50, [0.0] * 8),
            "phrase": level_sine(1500, [-6.0 if i in (0, 1, 5, 6) else None for i in range(8)]),     # 4 of 8 bars
            "pair": level_sine(3000, [-6.0 if i in (2, 5) else None for i in range(8)]),             # 2 of 8: a quarter
-           "stray": level_sine(110, [-6.0 if i == 3 else None for i in range(8)]),                  # 1 of 8 (see below)
+           "stray": level_sine(110, [-6.0 if i == 3 else None for i in range(8)]),                  # 1 of 8
            "quiet_phrase": level_sine(200, [-50.0 if i < 4 else None for i in range(8)])}           # 4 bars, trace zone
-    # the windows start 20 ms early, so the last 20 ms of a block that ends on a bar line belong to the next bar:
-    # stop the stray note 30 ms short, or it would count as two bars
-    sig["stray"][int((T0 + 8.0) * SR) - int(0.03 * SR):int((T0 + 8.0) * SR)] = 0.0
     paths = {k: write(d, k + ".wav", stereo(v)) for k, v in sig.items()}
     mix = write(d, "mix.wav", stereo(sum(sig.values())))
     r = listen.reference_profile(mix, paths, TEMPO, T0, SECTIONS[:1])["sections"][0]["roles"]
@@ -1585,3 +1579,82 @@ def test_drum_layer_the_reference_hit_last_in_its_slice_is_compared_over_the_sam
     toms = listen.mix_report(m, reference=prof, out_dir=tmp_path / "out")["sections"][0]["drums"]["roles"][0]
     assert toms["readings"] == [] and toms["ours_hit"] is not None and toms["notes"] == [], toms
     assert abs(toms["reference_at_ms"] - 1500.0) <= 1 and abs(toms["ours_at_ms"] - (1500.0 - 1000 * delta)) <= 1, toms
+
+
+@pytest.mark.parametrize("fade_ms", [0.0, 4.0])
+def test_profile_a_note_in_one_bar_of_eight_ending_on_the_bar_line_is_one_bar_and_absent(tmp_path, fade_ms):
+    """A note at -6 dB against the kick in bar 4 of 8 only, ending exactly on the line into bar 5 (and with Live's 4 ms
+    declick fade before it). One bar in eight is under a quarter: absent. No bar but bar 4 holds any of it, in the
+    level windows or the cores."""
+    d = tmp_path / "one"
+    d.mkdir()
+    note = level_sine(110, [-6.0 if i == 3 else None for i in range(8)])
+    end, f = int((T0 + 8.0) * SR), int(fade_ms / 1000 * SR)
+    if f:
+        note[end - f:end] *= np.linspace(1.0, 0.0, f)
+    sig = {"kick": level_sine(50, [0.0] * 8), "note": note}
+    paths = {k: write(d, k + ".wav", stereo(v)) for k, v in sig.items()}
+    mix = write(d, "mix.wav", stereo(sum(sig.values())))
+    r = listen.reference_profile(mix, paths, TEMPO, T0, SECTIONS[:1])["sections"][0]["roles"]["note"]
+    assert r["absent"], r
+    assert [i for i, v in enumerate(r["per_bar_db"]) if v is not None] == [3], r
+    assert [i for i, v in enumerate(r["core_bar_db"]) if v is not None] == [3], r
+
+
+@pytest.mark.parametrize("ref_stop,ours_stop", [(0.0, 0.005), (0.0, 0.015), (0.030, 0.0), (-0.010, 0.0)])
+def test_elements_a_bass_that_stops_on_the_section_line_is_not_in_the_next_section(tmp_path, ref_stop, ours_stop):
+    """The kick plays through A and B (4 bars each, 120 BPM); the bass (-6 dB against the kick) plays through A and stops
+    on the A|B line in one side and 5, 15 or 30 ms before it (or 10 ms after it) in the other. B has no bass on either
+    side: no gap, no one-side role, no trace; A's bass rows agree within 0.1 dB (30 ms of 8 s is 0.02 dB)."""
+    def files(folder, stop):
+        d = tmp_path / folder
+        d.mkdir()
+        kick = level_sine(50, [0.0] * 8)
+        t = np.arange(len(kick)) / SR
+        bass = np.where((t >= T0) & (t < T0 + 8.0 - stop), KICK_AMP * gain(-6.0) * np.sin(2 * np.pi * 110 * t), 0.0)
+        return {"kick": write(d, "kick.wav", stereo(kick)), "bass": write(d, "bass.wav", stereo(bass)),
+                "mix": write(d, "mix.wav", stereo(kick + bass))}
+
+    ref, ours = files("ref", ref_stop), files("ours", ours_stop)
+    secs = [{"name": "A", "start_bar": 0, "bars": 4}, {"name": "B", "start_bar": 4, "bars": 4}]
+    prof = listen.reference_profile(ref["mix"], {"kick": ref["kick"], "bass": ref["bass"]}, TEMPO, T0, secs)
+    assert prof["sections"][1]["roles"]["bass"]["absent"]
+    m = {"tempo": TEMPO, "offset_s": T0, "sections": secs,
+         "sources": {"master": str(ours["mix"]), "kick": str(ours["kick"]), "bass": str(ours["bass"])}}
+    a, b = (s["elements"] for s in listen.mix_report(m, reference=prof, out_dir=tmp_path / "out")["sections"])
+    assert b["presence"]["bass"] == {"reference": "absent", "ours": "absent"}, b["presence"]
+    assert b["gaps"] == [] and b["reference_only"] == [] and b["ours_only"] == [] and b["traces"] == [], b
+    assert a["gaps"] == [] and abs(a["table"][0]["difference_db"]) <= 0.1, a["table"]
+
+
+def house_files(tmp_path, folder, early):
+    """124 BPM house, 0.6 s lead-in: a kick on every beat 4 ms early; toms only from bar 5 on: one long tom (tau 400 ms)
+    on the downbeat of bar 5, `early` s before the line, and a four-tom fill on the last beat of bar 8."""
+    d = tmp_path / folder
+    d.mkdir()
+    beat = 60.0 / 124.0
+    total = 0.6 + 32 * beat + 1.5
+    kick = 0.8 * hit_train(55, 0.08, [0.6 + b * beat - 0.004 for b in range(32)], total)
+    toms = 0.5 * hit_train(100, 0.4, [0.6 + 16 * beat - early], total)
+    toms = toms + 0.5 * sum(hit_train(140 - 10 * k, 0.2, [0.6 + 31 * beat + k * beat / 4], total) for k in range(4))
+    return {"kick": write(d, "kick.wav", stereo(kick)), "toms": write(d, "toms.wav", stereo(toms)),
+            "mix": write(d, "mix.wav", stereo(kick + toms))}
+
+
+@pytest.mark.parametrize("early,deltas", [(0.007, (0.0, 0.007, 0.013)), (0.016, (0.004,))])
+def test_elements_a_tom_just_before_the_line_into_the_section_with_toms_is_not_in_the_section_before(tmp_path, early, deltas):
+    """The same house audio on both sides; toms are silent through section A (bars 1-4) and start on the A|B downbeat,
+    7 ms (16 ms) early. Read up to 13 ms (4 ms) late, the tom's earliness plus the read offset is at most 20 ms: no
+    side has toms in A, so nothing is "in ours only" or "in the reference only"; B and C have toms on both sides."""
+    ref, ours = house_files(tmp_path, "ref", early), house_files(tmp_path, "ours", early)
+    secs = [{"name": "A", "start_bar": 0, "bars": 4}, {"name": "B", "start_bar": 4, "bars": 2},
+            {"name": "C", "start_bar": 6, "bars": 2}]
+    prof = listen.reference_profile(ref["mix"], {"kick": ref["kick"], "toms": ref["toms"]}, 124.0, 0.6, secs)
+    for delta in deltas:
+        m = {"tempo": 124.0, "offset_s": 0.6 + delta, "sections": secs,
+             "sources": {"master": str(ours["mix"]), "kick": str(ours["kick"]), "toms": str(ours["toms"])}}
+        a, b, c = (s["elements"] for s in listen.mix_report(m, reference=prof, out_dir=tmp_path / "out")["sections"])
+        assert a["presence"]["toms"] == {"reference": "absent", "ours": "absent"}, (delta, a["presence"])
+        for e in (a, b, c):
+            assert e["ours_only"] == [] and e["reference_only"] == [] and e["gaps"] == [], (delta, e)
+        assert b["presence"]["toms"] == c["presence"]["toms"] == {"reference": "present", "ours": "present"}, delta
