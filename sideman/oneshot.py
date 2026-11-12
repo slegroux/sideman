@@ -117,6 +117,10 @@ HARM_FLOOR_DB = -50.0    # a harmonic must be above this...
 HARM_CLEAR_DB = PROMINENT_DB  # ...and stand clear of its own spectral floor like a tonal peak
 NOISE_FLOOR_DB = -25.0   # a pure decaying tone reads -26 to -42 from window leakage
 CLICK_FLOOR_DB = -40.0
+BAND_FLOOR_DB = -30.0    # a band this far under the hit's total on both sides is not read
+FAST_SETTLE_MS = 5.0     # a pitch drop over in less than this is a click, not a glide
+BAND_NAMES = {"sub": "sub (20-60 Hz)", "bass": "bass (60-250 Hz)", "low_mid": "low mids (250-500 Hz)",
+              "mid": "mids (500 Hz-2 kHz)", "high_mid": "high mids (2-6 kHz)", "high": "highs (6-20 kHz)"}
 
 
 def _boxcar(p: np.ndarray, length: int) -> np.ndarray:
@@ -179,12 +183,16 @@ def _interp(s: dict, i: int) -> tuple[float, float]:
     return float((i + off) * s["sr"] / s["nfft"]), level
 
 
-def _floor(s: dict, i: int) -> float | None:
+def _floor(s: dict, i: int, both: bool = False) -> float | None:
     """Local spectral floor at bin i: the median (dB) of a ring 2-10 bins away,
-    outside the main lobe of a peak at i."""
+    outside the main lobe of a peak at i. With `both`, the higher of the two
+    sides' medians: the edge of band-limited noise has nothing above it, and
+    against the whole ring it reads as a peak standing clear of its floor."""
     d, h = s["d"], s["bin"]
-    ring = np.r_[d[max(0, i - 10 * h):max(0, i - 2 * h)], d[i + 2 * h + 1:i + 10 * h + 1]]
-    return float(np.median(ring)) if len(ring) else None
+    sides = [r for r in (d[max(0, i - 10 * h):max(0, i - 2 * h)], d[i + 2 * h + 1:i + 10 * h + 1]) if len(r)]
+    if not sides:
+        return None
+    return max(float(np.median(r)) for r in sides) if both else float(np.median(np.concatenate(sides)))
 
 
 def _tonal(s: dict, hi_hz: float) -> list[tuple[float, float, int]]:
@@ -521,7 +529,7 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
         f0, l1, i0, said = _fundamental(tonal)
         notes += said
         series = sum(10 ** (t[1] / 10) for t in tonal if _harmonic(t[0], f0))
-        stands = body["d"][i0] - (_floor(body, i0) or -np.inf)
+        stands = body["d"][i0] - (_floor(body, i0, both=True) or -np.inf)
         if series < 0.5 * sum(10 ** (t[1] / 10) for t in tonal):
             f0 = None
             notes.append("no harmonic series: the partials are listed, no pitch is given")
@@ -746,6 +754,18 @@ TIMES = (("attack_ms", "attack %s ms, reference %s ms"),
          ("pitch_settle_ms", "pitch settles in %s ms, reference %s ms"))
 
 
+def _drop(p: dict) -> str:
+    """A profile's pitch drop in words, with how long it takes: a 17 st drop
+    over 3 ms is a click, the same drop over 40 ms is a kick's glide."""
+    d, t = p["pitch_drop_st"], p.get("pitch_settle_ms")
+    text = "%s %.1f st" % ("drops" if d >= 0 else "rises", abs(d))
+    if t is not None and abs(d) > DROP_ST:
+        text += " over %s ms" % _num(t)
+        if t < FAST_SETTLE_MS:
+            text += " (a click)"
+    return text
+
+
 def _key(d: dict, k: int):
     """d[k] for a profile fresh from profile() (int keys) or read back from JSON (str keys)."""
     return d.get(k, d.get(str(k)))
@@ -767,7 +787,9 @@ def compare(a: dict, b: dict) -> dict:
     largest first relative to that threshold. A measure that is None on
     either side gives no reading, and levels below the method's floor on both
     sides (harmonics under -50 dB or near the noise, noise share under -25 dB,
-    click under -40 dB) are not read."""
+    click under -40 dB) are not read. The six-band balance is read only when
+    a side is unpitched: between two pitched hits it mostly restates the
+    pitch. A pitch-drop line gives the time each drop takes."""
     diff, found = {}, []
 
     def add(score, text):
@@ -787,7 +809,8 @@ def compare(a: dict, b: dict) -> dict:
     diff["pitch_drop_st"] = round(va - vb, 2) if va is not None and vb is not None else None
     d = diff["pitch_drop_st"]
     if d is not None and abs(d) > DROP_ST:
-        add(abs(d) / DROP_ST, "pitch drops %.1f st, reference %.1f st" % (va, vb))
+        add(abs(d) / DROP_ST, "pitch %s, reference %s" % (_drop(a), _drop(b)))
+    drop_read = d is not None and abs(d) > DROP_ST
 
     for key, text in TIMES:
         va, vb = a.get(key), b.get(key)
@@ -796,6 +819,8 @@ def compare(a: dict, b: dict) -> dict:
             continue
         d, ratio = va - vb, (va / vb if vb > 0 else None)
         diff[key] = {"ms": round(d, 1), "ratio": None if ratio is None else round(ratio, 3)}
+        if key == "pitch_settle_ms" and drop_read:
+            continue                # the pitch-drop line already gives both times
         if abs(d) > TIME_FLOOR_MS and (ratio is None or abs(ratio - 1) > TIME_RATIO):
             line = text % (_num(va), _num(vb))
             if ratio is not None:
@@ -840,6 +865,16 @@ def compare(a: dict, b: dict) -> dict:
         add(abs(d) / WIDTH_STEP, "width %.2f, reference %.2f (%s)" % (va, vb, "wider" if d > 0 else "narrower"))
     ba, bb = a.get("bands_db"), b.get("bands_db")
     diff["bands_db"] = {k: round(ba[k] - bb[k], 1) for k in ba if k in bb} if ba and bb else None
+    if diff["bands_db"] and not (a.get("pitched") and b.get("pitched")):
+        # with no pitch or harmonics to go by, the band balance is the tone. Read it
+        # against the median band difference, as listen.compare does: losing the
+        # highs must not read as every other band being louder
+        offset = float(np.median(list(diff["bands_db"].values())))
+        for k, d in diff["bands_db"].items():
+            d -= offset
+            if abs(d) > LEVEL_DB and max(ba[k], bb[k]) > BAND_FLOOR_DB:
+                add(abs(d) / LEVEL_DB, "%s %.1f dB %s against the other bands"
+                    % (BAND_NAMES.get(k, k), abs(d), "high" if d > 0 else "low"))
     va, vb = a.get("peak_db"), b.get("peak_db")
     diff["peak_db"] = round(va - vb, 2) if va is not None and vb is not None else None
     return {"a": a, "b": b, "diff": diff, "readings": [t for _, t in sorted(found, key=lambda f: -f[0])]}

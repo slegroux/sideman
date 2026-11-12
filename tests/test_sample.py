@@ -559,3 +559,50 @@ def test_harmonic_short_decay_shows_no_fake_harmonic_or_noise(f0, tau):
     else:
         assert r["harmonics_db"][2] < -40
         assert r["noise_db"]["body"] < -30
+
+
+def test_compare_unpitched_hits_read_the_band_balance():
+    # white noise against the same noise with everything above 2 kHz removed: with no
+    # pitch to go by, the tone is the band balance, and only the two bands above 2 kHz
+    # (high_mid 2-6 kHz, high 6-20 kHz) may read low. The four bands below keep their
+    # balance, so none of them reads high.
+    rng = np.random.default_rng(7)
+    n = int(SR * 0.4)
+    env = np.exp(-np.arange(n) / SR / 0.05)
+    white = rng.standard_normal(n)
+    spec = np.fft.rfft(white)
+    spec[np.fft.rfftfreq(n, 1 / SR) > 2000.0] = 0.0
+    dark = np.fft.irfft(spec, n)
+    a = oneshot.profile_array((0.3 * dark * env)[:, None], SR)
+    b = oneshot.profile_array((0.3 * white * env)[:, None], SR)
+    assert a["pitched"] is False and b["pitched"] is False
+    bands = [r for r in oneshot.compare(a, b)["readings"] if "against the other bands" in r]
+    assert sorted(r.split(" (")[0] for r in bands) == ["high mids", "highs"], bands
+    assert all(" low " in r for r in bands), bands
+    # the same hit against itself reads nothing
+    assert oneshot.compare(b, b)["readings"] == []
+
+
+def test_compare_pitch_drop_line_gives_the_time_and_direction():
+    base = {"pitched": True, "pitch_body_hz": 100.0}
+    steady = dict(base, pitch_drop_st=0.0, pitch_settle_ms=0.0)
+    # 12 st down over 40 ms is a glide; 17 st over 3 ms is a click; -5 st is a rise
+    glide_, click, rise = (dict(base, pitch_drop_st=d, pitch_settle_ms=t)
+                           for d, t in ((12.0, 40.0), (17.0, 3.0), (-5.0, 20.0)))
+    assert oneshot.compare(glide_, steady)["readings"] == ["pitch drops 12.0 st over 40 ms, reference drops 0.0 st"]
+    assert oneshot.compare(click, steady)["readings"] == [
+        "pitch drops 17.0 st over 3.0 ms (a click), reference drops 0.0 st"]
+    assert oneshot.compare(rise, steady)["readings"] == ["pitch rises 5.0 st over 20 ms, reference drops 0.0 st"]
+
+
+@pytest.mark.parametrize("seed", [2, 7])
+def test_noise_cut_off_at_2khz_is_unpitched_at_its_edge(seed):
+    # band-limited noise has no pitch. Its brick-wall edge has nothing above it, so a
+    # floor taken from both sides at once made the last bins read as a 2 kHz tone
+    # (these two seeds did, before the floor took the higher side).
+    n = int(SR * 0.4)
+    spec = np.fft.rfft(np.random.default_rng(seed).standard_normal(n))
+    spec[np.fft.rfftfreq(n, 1 / SR) > 2000.0] = 0.0
+    x = 0.3 * np.fft.irfft(spec, n) * np.exp(-np.arange(n) / SR / 0.05)
+    r = oneshot.profile_array(x[:, None], SR)
+    assert r["pitched"] is False and r["pitch_body_hz"] is None and r["harmonics_db"] is None
