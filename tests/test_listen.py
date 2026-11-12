@@ -406,3 +406,151 @@ def test_manifest_validation_and_relative_sources(tmp_path):
     assert len(listen.mix_report(json.dumps({**m, "sources": {k: str(tmp_path / v) for k, v in m["sources"].items()}}))["sections"]) == 3
     with pytest.raises(ValueError, match="no such manifest"):
         listen.mix_report(str(tmp_path / "nope.json"))
+
+
+# --------------------------------------------------- reference profile / elements
+#
+# Every stem is a sustained sine, so its level is known without the code:
+# amplitude A reads 20*log10(A / sqrt(2)) dBFS, and a role's level against the
+# kick is the dB difference of the amplitudes. The files start T0 seconds
+# before bar 0, so a profile that ignored t0 would read the first bar low.
+
+T0 = 0.5
+KICK_AMP = 0.4
+DRUM_FILE_DB = -16.0      # each of hh and snare, in dB against the kick's amplitude
+DRUMS_VS_KICK = DRUM_FILE_DB + 10 * math.log10(2)    # two equal files: twice the power of one
+ROLE_HZ = {"kick": 50, "bass": 110, "synth": 1500, "hh": 8000, "snare": 3000}
+
+
+def gain(db):
+    return 10 ** (db / 20)
+
+
+def level_sine(freq, db_by_bar):
+    """A sine at KICK_AMP * gain(db) per bar (None = silent), T0 of silence in front."""
+    amp = np.repeat([0.0 if d is None else KICK_AMP * gain(d) for d in db_by_bar], bars(1))
+    t = np.arange(len(amp)) / SR
+    return np.concatenate([np.zeros(int(T0 * SR)), amp * np.sin(2 * np.pi * freq * t)])
+
+
+def stem_set(tmp_path, folder, bass_db=-6.0, bars_n=24):
+    """kick, bass (`bass_db` against the kick, a number or one per bar), synth (12 dB under the
+    kick, silent in bars 8-15), hh + snare (DRUMS_VS_KICK together) and their mix."""
+    d = tmp_path / folder
+    d.mkdir()
+    per_bar = {"kick": [0.0] * bars_n,
+               "bass": list(bass_db) if isinstance(bass_db, (list, tuple)) else [bass_db] * bars_n,
+               "synth": [None if 8 <= b < 16 else -12.0 for b in range(bars_n)],
+               "hh": [DRUM_FILE_DB] * bars_n, "snare": [DRUM_FILE_DB] * bars_n}
+    sig = {k: level_sine(ROLE_HZ[k], v) for k, v in per_bar.items()}
+    paths = {k: write(d, k + ".wav", stereo(v)) for k, v in sig.items()}
+    paths["drums"] = write(d, "drums.wav", stereo(sig["hh"] + sig["snare"]))     # for a capture: one file
+    paths["mix"] = write(d, "mix.wav", stereo(sum(sig.values())))
+    return paths
+
+
+SECTIONS = [{"name": "A", "start_bar": 0, "bars": 8}, {"name": "B", "start_bar": 8, "bars": 8},
+            {"name": "C", "start_bar": 16, "bars": 8}]
+
+
+def profile_of(tmp_path, ref, **kw):
+    return listen.reference_profile(
+        ref["mix"], {"kick": ref["kick"], "bass": ref["bass"], "synth": ref["synth"],
+                     "drums": [ref["hh"], ref["snare"]]},
+        TEMPO, T0, SECTIONS, out=tmp_path / "ref.profile.json", **kw)
+
+
+def test_profile_ratios_to_the_kick_match_the_gains_in_every_section(tmp_path):
+    ref = stem_set(tmp_path, "ref")
+    p = profile_of(tmp_path, ref)
+    assert [s["name"] for s in p["sections"]] == ["A", "B", "C"]
+    for s in p["sections"]:
+        r = s["roles"]
+        assert r["kick"]["vs_kick_db"] == 0.0
+        assert abs(r["bass"]["vs_kick_db"] - (-6.0)) <= 0.1, s["name"]
+        assert abs(r["drums"]["vs_kick_db"] - DRUMS_VS_KICK) <= 0.1, s["name"]
+        assert abs(r["kick"]["level_db"] - 20 * math.log10(KICK_AMP / math.sqrt(2))) <= 0.05
+    for name in ("A", "C"):
+        assert abs(p["sections"][0 if name == "A" else 2]["roles"]["synth"]["vs_kick_db"] - (-12.0)) <= 0.1
+
+
+def test_profile_a_silent_role_is_absent_not_minus_120(tmp_path):
+    p = profile_of(tmp_path, stem_set(tmp_path, "ref"))
+    b = p["sections"][1]["roles"]["synth"]
+    assert b == {"absent": True}
+    assert all(not s["roles"][r]["absent"] for s in p["sections"] for r in ("kick", "bass", "drums"))
+    assert not p["sections"][0]["roles"]["synth"]["absent"]
+
+
+def test_profile_per_bar_curve_follows_t0_and_the_bar_grid(tmp_path):
+    ref = stem_set(tmp_path, "ref", bass_db=[-6.0] * 4 + [-2.0] * 4 + [-6.0] * 16)
+    p = profile_of(tmp_path, ref)
+    curve = p["sections"][0]["roles"]["bass"]["per_bar_db"]
+    want = [20 * math.log10(KICK_AMP * gain(d) / math.sqrt(2)) for d in [-6.0] * 4 + [-2.0] * 4]
+    assert len(curve) == 8 and all(abs(c - w) <= 0.05 for c, w in zip(curve, want)), (curve, want)
+
+
+def test_profile_bands_width_and_mix_are_measured(tmp_path):
+    ref = stem_set(tmp_path, "ref")
+    p = profile_of(tmp_path, ref)
+    s = p["sections"][0]
+    assert s["roles"]["bass"]["bands_db"]["bass"] > s["roles"]["bass"]["bands_db"]["mid"] + 40   # 110 Hz is in 60-250
+    assert s["roles"]["synth"]["bands_db"]["mid"] > s["roles"]["synth"]["bands_db"]["bass"] + 40   # 1.5 kHz is in 500-2k
+    assert s["roles"]["kick"]["width"] == 0.0 and s["mix"]["width"] == 0.0
+    want = 10 * math.log10(sum((KICK_AMP * gain(d)) ** 2 / 2 for d in (0, -6, -12, DRUM_FILE_DB, DRUM_FILE_DB)))
+    assert abs(s["mix"]["level_db"] - want) <= 0.1
+    assert s["mix"]["integrated_lufs"] is not None and len(s["mix"]["per_bar_db"]) == 8
+    wide = write(tmp_path, "wide.wav", np.stack([sine(1000, 4, 0.3), -sine(1000, 4, 0.3)], axis=1))
+    q = listen.reference_profile(wide, {"kick": wide}, TEMPO, 0.0, [{"name": "W", "start_bar": 0, "bars": 2}])
+    assert abs(q["sections"][0]["roles"]["kick"]["width"] - 1.0) <= 0.01      # opposite polarity is all side
+
+
+def test_profile_is_written_with_its_inputs_and_goes_stale_when_one_changes(tmp_path):
+    import json
+    import os
+    ref = stem_set(tmp_path, "ref")
+    p = profile_of(tmp_path, ref)
+    dest = pathlib.Path(p["json_path"])
+    assert dest == (tmp_path / "ref.profile.json").resolve()
+    on_disk = json.loads(dest.read_text())
+    assert on_disk["tempo"] == TEMPO and on_disk["t0"] == T0 and on_disk["sections"][1]["name"] == "B"
+    assert [i["path"] for i in on_disk["inputs"]["stems"]["drums"]] == [str(ref["hh"].resolve()), str(ref["snare"].resolve())]
+    assert on_disk["inputs"]["mix"][0]["mtime"] == ref["mix"].stat().st_mtime
+    assert listen.profile_stale(p) == [] and listen.profile_stale(on_disk) == []
+    st = ref["bass"].stat()
+    os.utime(ref["bass"], (st.st_atime, st.st_mtime + 5))
+    assert [(s["role"], s["reason"]) for s in listen.profile_stale(on_disk)] == [("bass", "changed")]
+    ref["snare"].unlink()
+    assert {(s["role"], s["reason"]) for s in listen.profile_stale(on_disk)} == {("bass", "changed"), ("drums", "missing")}
+
+
+def test_profile_default_path_is_next_to_the_mix(tmp_path):
+    ref = stem_set(tmp_path, "ref")
+    p = listen.reference_profile(ref["mix"], {"kick": ref["kick"]}, TEMPO, T0, SECTIONS[:1])
+    assert pathlib.Path(p["json_path"]) == ref["mix"].resolve().with_name("mix.profile.json")
+    assert pathlib.Path(p["json_path"]).is_file()
+
+
+def test_profile_refuses_mixed_sample_rates_and_trims_different_lengths(tmp_path):
+    ref = stem_set(tmp_path, "ref")
+    odd = write(tmp_path, "odd.wav", stereo(sine(110, 2, 0.1, sr=44100, ), None), sr=44100)
+    with pytest.raises(ValueError, match="sample rate"):
+        listen.reference_profile(ref["mix"], {"kick": ref["kick"], "bass": odd}, TEMPO, T0, SECTIONS[:1])
+    short = write(tmp_path, "short.wav", stereo(level_sine(50, [0.0] * 10)))     # 10 bars + T0, the others 24
+    p = listen.reference_profile(ref["mix"], {"kick": short, "bass": ref["bass"]}, TEMPO, T0,
+                                 [{"name": "A", "start_bar": 0, "bars": 8}])
+    assert any("trimmed" in n and "short.wav" in n for n in p["notes"]), p["notes"]
+    with pytest.raises(ValueError, match="sections run to"):
+        listen.reference_profile(ref["mix"], {"kick": short}, TEMPO, T0, SECTIONS)
+
+
+def test_profile_refuses_bad_input(tmp_path):
+    ref = stem_set(tmp_path, "ref")
+    with pytest.raises(ValueError, match="unique"):
+        listen.reference_profile(ref["mix"], {"kick": ref["kick"]}, TEMPO, T0, [SECTIONS[0], SECTIONS[0]])
+    with pytest.raises(ValueError, match="no such audio file"):
+        listen.reference_profile(ref["mix"], {"kick": tmp_path / "nope.wav"}, TEMPO, T0, SECTIONS[:1])
+    with pytest.raises(ValueError, match="role"):
+        listen.reference_profile(ref["mix"], {"mix": ref["kick"]}, TEMPO, T0, SECTIONS[:1])
+    with pytest.raises(ValueError, match="tempo"):
+        listen.reference_profile(ref["mix"], {"kick": ref["kick"]}, 0, T0, SECTIONS[:1])

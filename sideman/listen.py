@@ -332,6 +332,16 @@ STATIC_MAX_BARS = 8      # flag a run longer than this without a change (the 4/8
 SILENT_DB = -70.0        # a block whose loudest third-octave band is under this is silence
 
 
+def _check_sections(sections: list) -> None:
+    for sec in sections:
+        if not isinstance(sec, dict):
+            raise ValueError("each section must be an object with start_bar and bars, got %r" % (sec,))
+        sb, nb = sec.get("start_bar"), sec.get("bars")
+        if not (isinstance(sb, int) and isinstance(nb, int)) or sb < 0 or nb < 1:
+            raise ValueError("section %r needs whole-number start_bar >= 0 and bars >= 1"
+                             % sec.get("name", sec))
+
+
 def _load_manifest(manifest: dict | str | pathlib.Path) -> tuple[dict, pathlib.Path | None]:
     """The manifest as a dict, with every source resolved to an existing
     absolute path (relative paths are taken from the manifest's folder) and
@@ -358,13 +368,7 @@ def _load_manifest(manifest: dict | str | pathlib.Path) -> tuple[dict, pathlib.P
         raise ValueError("manifest sources need a 'master'")
     if not m["sections"]:
         raise ValueError("manifest has no sections")
-    for sec in m["sections"]:
-        if not isinstance(sec, dict):
-            raise ValueError("each section must be an object with start_bar and bars, got %r" % (sec,))
-        sb, nb = sec.get("start_bar"), sec.get("bars")
-        if not (isinstance(sb, int) and isinstance(nb, int)) or sb < 0 or nb < 1:
-            raise ValueError("section %r needs whole-number start_bar >= 0 and bars >= 1"
-                             % sec.get("name", sec))
+    _check_sections(m["sections"])
     base = mpath.parent if mpath else None
     srcs = {}
     for role, path in m["sources"].items():
@@ -466,6 +470,211 @@ def change_rate(x: np.ndarray, sr: int, bar_s: float, offset_s: float, first_bar
             run_start = i
     return {"block_bars": CHANGE_BLOCK_BARS,
             "steps": steps, "static_runs": flags}
+
+
+# ------------------------------------------------------- reference profile
+#
+# A reference track that comes with stems, measured once per section so a
+# capture of the Set can be compared with it later (mix_report's `reference`).
+# Levels are mean power in dBFS over stereo (mono is centred); a role's
+# "vs_kick_db" is its level minus the kick's in the same section, which cancels
+# a gain the stems and the mix share.
+
+PROFILE_KIND = "reference_profile"
+ABSENT_DB = 60.0           # a role this far under the mix (or exactly silent) is absent, not -120 dB
+ELEMENT_GAP_DB = 1.0       # an element's ratio to the kick differing by more than this is a gap
+CAPTURE_IS_REF_DB = 0.05   # a master capture within this level...
+CAPTURE_IS_REF_WIDTH = 1e-3  # ...and this width of the reference mix is the reference itself
+
+
+def _level_db(x: np.ndarray) -> float:
+    """Mean power of a stereo segment in dBFS; FLOOR_DB when it is silent or empty."""
+    return _db_amp(_peak_rms(x)[1])
+
+
+def _bar_levels(x: np.ndarray, sr: int, t0: float, bar_s: float, first_bar: int, n: int) -> list:
+    """Level in dBFS of each of `n` bars from `first_bar` (bar 0 at t0 s); None for a silent bar."""
+    out = []
+    for i in range(n):
+        lv = _level_db(_slice(x, sr, t0 + (first_bar + i) * bar_s, t0 + (first_bar + i + 1) * bar_s))
+        out.append(None if lv <= FLOOR_DB else round(lv, 2))
+    return out
+
+
+def _bands_width(x: np.ndarray, sr: int) -> tuple[dict, float | None]:
+    """Six-band mean power (dBFS) and width of a stereo segment, as analyze_array reads them."""
+    sp = _spectra(x, sr)
+    lr = (sp["l"] + sp["r"]) / 2.0
+    bands = {name: round(_db(_band(lr, sp["freqs"], lo, hi)), 2) for name, lo, hi in BANDS}
+    pm, ps = float(sp["m"].sum()), float(sp["s"].sum())
+    return bands, (round(math.sqrt(ps) / (math.sqrt(pm) + math.sqrt(ps)), 3) if pm + ps > 0 else None)
+
+
+def _mean_db(vals: list) -> float | None:
+    """Power mean of per-bar dB values (None counts as silence); None when all are silent."""
+    p = float(np.mean([0.0 if v is None else 10.0 ** (v / 10.0) for v in vals])) if vals else 0.0
+    return 10.0 * math.log10(p) if p > 0 else None
+
+
+def _arc(role_bars: list, kick_bars: list) -> list:
+    """The role's level against the kick for each CHANGE_BLOCK_BARS block of bars (None where
+    either is silent)."""
+    out = []
+    for i in range(0, len(role_bars), CHANGE_BLOCK_BARS):
+        r, k = _mean_db(role_bars[i:i + CHANGE_BLOCK_BARS]), _mean_db(kick_bars[i:i + CHANGE_BLOCK_BARS])
+        out.append(None if r is None or k is None else round(r - k, 2))
+    return out
+
+
+def _input(p: pathlib.Path) -> dict:
+    st = p.stat()
+    return {"path": str(p), "mtime": st.st_mtime, "size": st.st_size}
+
+
+def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: float, sections: list,
+                      beats_per_bar: int = 4, out: str | pathlib.Path | None = None) -> dict:
+    """Profile of a reference track and its stems, per section; written as JSON.
+
+    `stems` maps a role to a file path or a list of paths summed into that role
+    (`drums` = hh + snare + toms). Roles are free-form; `kick` is the yardstick
+    for every level against the kick, and "mix" is reserved. `sections` is a list
+    of {"name", "start_bar", "bars"} as in a capture manifest, names unique;
+    `t0` is where bar 0 sits in the files, in seconds.
+
+    Per section: the mix's level (mean power, dBFS), integrated LUFS, six bands,
+    width and per-bar levels; and for each role its level, its level against the
+    kick (`vs_kick_db`), per-bar levels, six bands and width. A role that is
+    silent, or more than ABSENT_DB under the mix, in a section is
+    {"absent": true} there with no numbers. Files must share one sample rate
+    (refused otherwise); of different lengths they are trimmed to the shortest
+    and `notes` says so.
+
+    Writes <mix stem>.profile.json next to the mix (`out`: a file path ending
+    in .json, or a folder) and returns the profile with its `json_path`. The
+    profile records each input's path, mtime and size under `inputs`;
+    profile_stale() says which have changed since."""
+    import json
+    if not isinstance(tempo, (int, float)) or not math.isfinite(tempo) or tempo <= 0:
+        raise ValueError("tempo must be a number above 0, got %r" % (tempo,))
+    if not isinstance(t0, (int, float)) or not math.isfinite(t0) or t0 < 0:
+        raise ValueError("t0 must be a number of seconds >= 0, got %r" % (t0,))
+    if not isinstance(beats_per_bar, (int, float)) or beats_per_bar <= 0:
+        raise ValueError("beats_per_bar must be above 0")
+    if not sections:
+        raise ValueError("no sections")
+    _check_sections(sections)
+    names = [s.get("name", "bar %d" % s["start_bar"]) for s in sections]
+    dup = sorted({n for n in names if names.count(n) > 1})
+    if dup:
+        raise ValueError("section names must be unique (mix_report pairs sections by name): %s" % ", ".join(dup))
+    if not stems:
+        raise ValueError("no stems")
+
+    def existing(label: str, path) -> pathlib.Path:
+        p = pathlib.Path(path).expanduser().resolve()
+        if not p.is_file():
+            raise ValueError("%s: no such audio file: %s" % (label, p))
+        return p
+
+    mixp = existing("mix", mix)
+    files: dict[str, list[pathlib.Path]] = {}
+    for role, v in stems.items():
+        if not isinstance(role, str) or not role or role == "mix":
+            raise ValueError("stem role must be a non-empty name other than 'mix', got %r" % (role,))
+        paths = [v] if isinstance(v, (str, pathlib.Path)) else list(v)
+        if not paths:
+            raise ValueError("stem %r has no files" % role)
+        files[role] = [existing("stem %r" % role, p) for p in paths]
+    infos = {p: sf.info(str(p)) for p in [mixp] + [p for ps in files.values() for p in ps]}
+    rates = {p: i.samplerate for p, i in infos.items()}
+    if len(set(rates.values())) > 1:
+        raise ValueError("files must share one sample rate: " + ", ".join(
+            "%s %d Hz" % (p.name, r) for p, r in rates.items()))
+    sr = next(iter(rates.values()))
+    frames = {p: i.frames for p, i in infos.items()}
+    n = min(frames.values())
+    notes = []
+    if len(set(frames.values())) > 1:
+        shortest = min(frames, key=frames.get)
+        notes.append("files differ in length (%.2f to %.2f s); all trimmed to the shortest, %s (%.2f s)"
+                     % (min(frames.values()) / sr, max(frames.values()) / sr, shortest.name, n / sr))
+    bar_s = float(beats_per_bar) * 60.0 / float(tempo)
+    end_s = t0 + max(s["start_bar"] + s["bars"] for s in sections) * bar_s
+    if n / sr + 0.01 < end_s:
+        raise ValueError("the files are %.2f s long but the sections run to %.2f s" % (n / sr, end_s))
+    if "kick" not in files:
+        notes.append("no kick stem: levels against the kick are left out")
+
+    def span(sec):
+        a = t0 + sec["start_bar"] * bar_s
+        return a, a + sec["bars"] * bar_s
+
+    x, _ = load(mixp)
+    x = x[:n]
+    mix_rows, mix_levels = [], []
+    for sec in sections:
+        a = analyze_array(_slice(x, sr, *span(sec)), sr)
+        mix_levels.append(a["rms_db"])
+        mix_rows.append({"level_db": a["rms_db"], "integrated_lufs": a["integrated_lufs"],
+                         "width": a["width"], "bands_db": a["bands_db"],
+                         "per_bar_db": _bar_levels(_stereo(x), sr, t0, bar_s, sec["start_bar"], sec["bars"])})
+    role_rows: dict[str, list] = {}
+    raw: dict[str, list] = {}
+    for role, paths in files.items():
+        y = None
+        for p in paths:
+            z = _stereo(load(p)[0])[:n]
+            y = z.copy() if y is None else y + z
+        role_rows[role], raw[role] = [], []
+        for sec, mlv in zip(sections, mix_levels):
+            seg = _slice(y, sr, *span(sec))
+            lv = _level_db(seg)
+            if lv <= FLOOR_DB or lv < mlv - ABSENT_DB:
+                role_rows[role].append({"absent": True})
+                raw[role].append(None)
+                continue
+            bands, width = _bands_width(seg, sr)
+            role_rows[role].append({"absent": False, "level_db": round(lv, 2), "vs_kick_db": None,
+                                    "per_bar_db": _bar_levels(y, sr, t0, bar_s, sec["start_bar"], sec["bars"]),
+                                    "bands_db": bands, "width": width})
+            raw[role].append(lv)
+    if "kick" in files:
+        for i in range(len(sections)):
+            for role in files:
+                if raw[role][i] is not None and raw["kick"][i] is not None:
+                    role_rows[role][i]["vs_kick_db"] = round(raw[role][i] - raw["kick"][i], 2)
+    profile = {
+        "kind": PROFILE_KIND, "version": 1, "mix": str(mixp), "tempo": tempo,
+        "beats_per_bar": beats_per_bar, "t0": t0, "sample_rate": sr, "notes": notes,
+        "inputs": {"mix": [_input(mixp)], "stems": {r: [_input(p) for p in ps] for r, ps in files.items()}},
+        "sections": [{"name": nm, "start_bar": sec["start_bar"], "bars": sec["bars"], "mix": mix_rows[i],
+                      "roles": {role: role_rows[role][i] for role in files}}
+                     for i, (nm, sec) in enumerate(zip(names, sections))]}
+    dest = pathlib.Path(out).expanduser() if out else mixp.parent
+    if dest.is_dir() or not str(dest).endswith(".json"):
+        dest = dest / (mixp.stem + ".profile.json")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    profile["json_path"] = str(dest.resolve())
+    dest.write_text(json.dumps(profile, indent=1))
+    return profile
+
+
+def profile_stale(profile: dict) -> list:
+    """The inputs of a reference profile that have changed since it was built, as
+    {"role", "path", "reason"} ("changed": mtime or size differs; "missing"). Empty when
+    the profile still matches its files."""
+    out = []
+    groups = [("mix", profile["inputs"]["mix"])] + list(profile["inputs"]["stems"].items())
+    for role, items in groups:
+        for it in items:
+            p = pathlib.Path(it["path"])
+            if not p.is_file():
+                out.append({"role": role, "path": it["path"], "reason": "missing"})
+                continue
+            st = p.stat()
+            if st.st_mtime != it["mtime"] or st.st_size != it["size"]:
+                out.append({"role": role, "path": it["path"], "reason": "changed"})
+    return out
 
 
 def mix_report(manifest: dict | str | pathlib.Path, reference: str | pathlib.Path | None = None,
