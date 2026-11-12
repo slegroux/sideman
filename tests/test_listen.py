@@ -1377,16 +1377,16 @@ def test_elements_the_kick_out_line_is_30_db(tmp_path):
 
 
 def test_elements_the_capture_is_the_reference_tolerance_is_a_third_of_a_db(tmp_path):
-    secs = [{"name": "A", "start_bar": 0, "bars": 8}]
-    ref = stereo_set(tmp_path, "ref", bars_n=8)
-    prof = listen.reference_profile(ref["mix"], {k: ref[k] for k in ("kick", "bass", "synth")}, TEMPO, T0, secs)
-    sy = level_sine(1500, [-12.0] * 8)
+    """Mono material (width cannot decide it): the bass alone is a little louder in the master. Its band moves
+    by that much against the others, so 0.1 dB is inside the 0.3 dB tolerance and 1.5 dB is outside."""
+    ref = stem_set(tmp_path, "ref")
+    prof = profile_of(tmp_path, ref)
+    bass, _ = sf.read(str(ref["bass"]), dtype="float32")
+    mix, _ = sf.read(str(ref["mix"]), dtype="float32")
 
     def flagged(extra_db, name):
-        mix = ref["mix_array"] + (gain(extra_db) - 1.0) * np.stack([sy, 0.3 * sy], axis=1)       # the synth alone changes
-        m = {"tempo": TEMPO, "offset_s": T0, "sections": secs,
-             "sources": {"master": str(write(tmp_path, name + ".wav", mix)), "kick": str(ref["kick"]),
-                         "bass": str(ref["bass"]), "synth": str(ref["synth"])}}
-        return listen.mix_report(m, reference=prof)["sections"][0]["elements"]["capture_is_reference"]
+        master = write(tmp_path, name + ".wav", mix + (gain(extra_db) - 1.0) * bass)
+        r = listen.mix_report(capture_of(ref, master=master), reference=prof)
+        return [s["elements"]["capture_is_reference"] for s in r["sections"]]
 
-    assert flagged(0.1, "a") and not flagged(1.5, "b")        # 0.1 dB in one band: inside; 1.5 dB: outside
+    assert flagged(0.1, "a") == [True, True, True] and flagged(1.5, "b") == [False, False, False]
