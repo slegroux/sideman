@@ -77,6 +77,7 @@ END_DB = 60.0            # duration runs to the last moment within this of the p
 GATE_DB = 50.0           # pitch frames must end before the hit falls this far
 TRACK_MS = (0, 5, 10, 20, 40, 80, 150, 300)
 ATTACK_S = 0.030
+ATTACK_RANGE_DB = 30.0   # the attack noise window ends this far under the envelope peak
 ATTACK_DB = 1.0          # the attack ends within this of the envelope peak
 BODY_S = (0.040, 0.150)
 PERIODS = 4.0            # pitch frame length, in periods of the frame's pitch (3 let a louder 2nd harmonic pull it 4 %)
@@ -736,7 +737,12 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
     partials = [t for t in tonal if t[1] >= tonal[0][1] - PARTIALS_DB and not (pitched and _harmonic(t[0], f0))]
     out["partials"] = [{"hz": round(t[0], 1), "db": round(t[1] - ref, 1)} for t in partials[:MAX_PARTIALS]]
     a1 = min(n, int(ATTACK_S * sr))
-    att = _spectrum(y, 0, a1, sr, level=env)     # flattened: a fast decay is not noise
+    # the attack window, flattened by the envelope so a fast decay is not noise, ends
+    # where the envelope is ATTACK_RANGE_DB down: past that, flattening would lift the
+    # file's own noise floor (a fast hit recorded quietly)
+    low = np.nonzero(env[ip:a1] < env[ip] * 10 ** (-ATTACK_RANGE_DB / 10))[0]
+    a2 = max(int(FRAME_S[0] * sr), ip + int(low[0])) if len(low) else a1
+    att = _spectrum(y, 0, min(a1, a2), sr, level=env)
     out["noise_db"], out["flatness"] = {}, {}
     for name, s in (("attack", att), ("body", None if few else body)):
         if s is None:

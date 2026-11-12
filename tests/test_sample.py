@@ -796,3 +796,12 @@ def test_compare_hit_resampled_from_48_to_44k_gives_no_reading(name):
     a = oneshot.profile_array(x, SR)
     b = oneshot.profile_array(fft_resample(x, 48000, 44100), 44100)
     assert oneshot.compare(b, a)["readings"] == []
+
+
+def test_noise_fast_hit_recorded_quietly_reads_no_attack_noise():
+    # 1 kHz, tau 2 ms, at -30 dBFS in 16 bits: the attack window stops 30 dB down, before
+    # flattening the decay would lift the quantisation floor into "noise"
+    x = hit(1000, 0.002, seconds=0.3)
+    quiet = np.round(x * 10 ** (-30 / 20) * 32767) / 32767
+    c = oneshot.compare(oneshot.profile_array(quiet, SR), oneshot.profile_array(x, SR))
+    assert not [t for t in c["readings"] if "attack" in t], c["readings"]
