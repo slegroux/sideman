@@ -461,10 +461,12 @@ def _dc(x: np.ndarray, sr: int) -> np.ndarray:
     if m < 3:
         return zero
     blocks = x[:m * n].reshape(m, n, x.shape[1])
-    var = blocks.var(axis=1)                                  # [m, channels]
-    if (var.sum(axis=1) == 0).any():
+    live = np.nonzero(np.abs(blocks).max(axis=(1, 2)) > 0)[0]   # digital zeros lie outside the signal
+    if len(live) < 3:
         return zero
-    quiet = np.argsort(var.sum(axis=1))[:max(3, m // 10)]      # at least three, to see them agree
+    blocks = blocks[live]
+    var = blocks.var(axis=1)                                  # [m, channels]
+    quiet = np.argsort(var.sum(axis=1))[:max(3, len(live) // 10)]      # at least three, to see them agree
     means = blocks[quiet].mean(axis=1)                        # [quiet, channels]
     dc = means.mean(axis=0)
     spread = np.sqrt(var[quiet]).max(axis=0)
@@ -512,7 +514,9 @@ def profile_array(x: np.ndarray, sr: int, hit: int | None = None) -> dict:
         raise ValueError("the file holds NaN or infinite samples")
     dc = _dc(x, sr)            # a DC offset would read as level that never decays
     if len(x) and np.abs(dc).max() > DC_REL * np.abs(x).max():
-        x = x - dc
+        nz = np.nonzero(np.abs(x).max(axis=1) > 0)[0]        # digital zeros around the take keep their 0
+        x = x.copy()
+        x[nz[0]:nz[-1] + 1] -= dc
     mag = np.abs(x).max(axis=1)
     if not len(mag) or mag.max() <= 0:
         raise ValueError("the file is silent")
@@ -521,13 +525,14 @@ def profile_array(x: np.ndarray, sr: int, hit: int | None = None) -> dict:
         raise ValueError("hit %r is out of range: the take has %d hit%s (0-%d)"
                          % (hit, len(segs), "" if len(segs) == 1 else "s", len(segs) - 1))
     onsets = [_onset(x[s:e], mag[s:e], sr, s > 0) + s for s, e in segs]
-    order, extra = list(range(len(segs))), []
+    order, extra, tail = list(range(len(segs))), [], False
     if hit is not None:
         order = [hit]
     elif len(segs) > 1 and _starts_inside(x, mag, sr, segs):
-        order = order[1:]
-        extra.append("the take starts inside a hit: hit 0 is its tail and a louder hit follows, so the "
-                     "default is hit 1 (pass hit=0 to measure the tail)")
+        # hit 0 looks like the tail of a hit that began before the file: try the
+        # others first. A take trimmed at the onset of a fast hit looks the same,
+        # so hit 0 stays the fallback when no later hit is complete.
+        order, tail = order[1:] + [0], True
     picked = None
     for k in order:
         cut = "the file ends" if k == len(segs) - 1 else "the next hit starts"
@@ -547,6 +552,9 @@ def profile_array(x: np.ndarray, sr: int, hit: int | None = None) -> dict:
         if len(order) > 1:
             extra.append("every hit is cut off before it falls 40 dB: this is the first")
     k, got = picked
+    if tail and k != 0:
+        extra.insert(0, "the take probably starts inside a hit: hit 0 starts at full level and a louder "
+                        "hit follows, so the default is hit %d (pass hit=0 to measure hit 0)" % k)
     out = {"sample_rate": sr, "channels": x.shape[1], "hits": len(segs),
            "onsets_ms": [_ms(o, sr) for o in onsets], "hit": k, "onset_ms": _ms(onsets[k], sr)}
     out.update(got)
@@ -591,7 +599,7 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
             f0, l1, i0, said = _fundamental(pool)
             series = sum(10 ** (t[1] / 10) for t in tonal if _harmonic(t[0], f0))
             higher = [t for t in pool if t[0] > f0 * (1 + HARM_TOL)]
-            if series >= 0.5 * total or not any(t[1] >= tonal[0][1] - STRONG_DB for t in higher):
+            if series >= 0.5 * total or l1 >= tonal[0][1] - LONE_DB or not any(t[1] >= tonal[0][1] - STRONG_DB for t in higher):
                 break
             notes.append("%s Hz at %.0f dB holds too little of the energy in its series: "
                          "taken as a rumble" % (_num(f0), l1 - tonal[0][1]))
@@ -634,9 +642,9 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
             notes.append("%s before the hit falls %d dB" % (cut, drop))
     out["truncated"] = out["fall_40_ms"] is None
     k = _last_above(env, ip, env[ip] * 10 ** (-END_DB / 10))
-    out["duration_ms"] = _ms(n if k is None else k, sr)
+    out["duration_ms"] = None if k is None else _ms(k, sr)
     if k is None:
-        notes.append("%s before the hit falls %d dB: duration runs to there" % (cut, END_DB))
+        notes.append("%s before the hit falls %d dB: no duration" % (cut, END_DB))
     end = n if k is None else max(1, int(k))
 
     # pitch: start, body, drop, settle, track
@@ -795,7 +803,7 @@ def profile(path: str | pathlib.Path, hit: int | None = None) -> dict:
     peak_db         sample peak, dBFS (the only absolute level here)
     attack_ms       onset to the envelope peak (first within 1 dB of it, over whole periods)
     fall_10/20/40_ms  envelope peak to the last moment above peak - 10/20/40 dB
-    duration_ms     onset to the last moment above peak - 60 dB
+    duration_ms     onset to the last moment above peak - 60 dB (None on a cut hit)
     pitched         false for noise, a cymbal or an inharmonic sound: no pitch, no
                     harmonics (the fundamental must stand 25 dB above the noise around
                     it, or 15 dB in a body that is not mostly noise)
@@ -890,7 +898,7 @@ def _flip(a: dict, b: dict) -> str | None:
     if not (fa and fb):
         return None
     hi, lo, hi_f, lo_f = (a, b, fa, fb) if fa > fb else (b, a, fb, fa)
-    for k, interval in ((2, "an octave"), (3, "a twelfth")):
+    for k, interval in ((2, "an octave"), (3, "a twelfth"), (4, "two octaves")):
         if abs(12 * math.log2(hi_f / lo_f) - 12 * math.log2(k)) <= PITCH_ST:
             low = [q for q in hi.get("partials") or [] if abs(q["hz"] - lo_f) <= HARM_TOL * lo_f]
             if low:
@@ -971,8 +979,10 @@ def compare(a: dict, b: dict) -> dict:
             continue
         d, ratio = va - vb, (va / vb if vb > 0 else None)
         diff[key] = {"ms": round(d, 1), "ratio": None if ratio is None else round(ratio, 3)}
-        if key == "pitch_settle_ms" and drop_read:
-            continue                # the pitch-drop line already gives both times
+        if key == "pitch_settle_ms" and (drop_read or all(
+                abs(p.get("pitch_drop_st") or 0.0) <= DROP_ST for p in (a, b))):
+            continue                # the pitch-drop line gives both times; with no drop on
+                                    # either side there is nothing to settle from
         # read on |ln ratio|, so 15 % longer and 15 % shorter (ratio 1/1.15) weigh the same
         far = None if not ratio else abs(math.log(ratio)) / math.log(1 + TIME_RATIO)
         if abs(d) > TIME_FLOOR_MS and (far is None or far > 1):

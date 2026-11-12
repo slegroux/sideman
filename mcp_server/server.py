@@ -708,7 +708,7 @@ def sample_analyze(source: str, hit: int | None = None) -> str:
 
     Envelope: peak_db (dBFS), attack_ms (onset to the first moment within
     1 dB of the envelope peak, over whole periods), fall_10_ms / fall_20_ms / fall_40_ms (from the
-    peak to the last moment above peak - 10/20/40 dB), duration_ms (to -60 dB).
+    peak to the last moment above peak - 10/20/40 dB), duration_ms (to -60 dB; None on a cut hit).
     Pitch: `pitched` (false for noise, a cymbal or an inharmonic bell: then no
     pitch and no harmonics, only `partials`), pitch_body_hz (40-150 ms, the
     fundamental: the lowest strong partial, not the loudest, and a weak one

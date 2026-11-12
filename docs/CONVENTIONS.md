@@ -278,6 +278,11 @@ twelfth apart on the same partials are one line, not a pitch difference.
   window holds fewer than four of its periods.
 - A ghost note under a hit's tail, and a roll faster than about 100 ms, are
   measured as one hit with no note; their fall times run long.
+- A tone that fades in over a few milliseconds can read a pitch drop or rise
+  at its start that is not there: the first zero crossings of a ramp are
+  unevenly spaced.
+- A partial beating within about 15 Hz of another can move the body's noise
+  share by tens of dB between sample rates.
 - At 22.05 kHz the bands above 11 kHz are empty, so a hat compared with a
   44.1 kHz file reads "highs low".
 

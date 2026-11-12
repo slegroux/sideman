@@ -817,3 +817,77 @@ def test_pitch_no_start_when_the_track_cannot_reach_the_onset():
     assert r["pitched"] is True and r["pitch_body_hz"] == pytest.approx(300, rel=0.01)
     assert r["pitch_start_hz"] is None and r["pitch_drop_st"] is None
     assert any("cannot be followed back to the onset" in n for n in r["notes"])
+
+
+# ---------------------------------------------------------------- third review
+
+def test_hits_trimmed_take_followed_by_a_louder_cut_hit_keeps_hit_0():
+    # a complete hit trimmed at its onset, then a louder hit cut after 100 ms: hit 0
+    # starts at full level, as a tail would, but it is the only complete hit
+    full = hit(100, 0.05, seconds=0.5, partials={1: 1, 3: 0.3})
+    take = np.concatenate([full, 1.6 * full[:4800]])
+    r = oneshot.profile_array(take, SR)
+    assert r["hits"] == 2 and r["hit"] == 0 and r["truncated"] is False
+    assert r["fall_20_ms"] == pytest.approx(50 * math.log(10), abs=6)        # 115.1 ms
+    assert not any("starts inside a hit" in n for n in r["notes"])
+    # the same take behind 30 ms of silence is the same hit: no readings
+    late = np.concatenate([np.zeros((int(0.03 * SR), 1)), take])
+    assert oneshot.compare(oneshot.profile_array(late, SR), r)["readings"] == []
+
+
+def test_hits_trimmed_take_followed_by_a_3ms_fragment_does_not_raise():
+    # the louder fragment is too short to measure (150 samples = 3.1 ms): hit 0 is kept
+    full = hit(100, 0.05, seconds=0.5, partials={1: 1, 3: 0.3})
+    r = oneshot.profile_array(np.concatenate([full, 1.6 * full[:150]]), SR)
+    assert r["hit"] == 0 and r["fall_20_ms"] == pytest.approx(50 * math.log(10), abs=6)
+
+
+def test_pitch_gliding_kick_with_a_loud_3rd_harmonic_is_not_read_3x_high():
+    # the body pitch at 40-150 ms lies between 55 + 180 e^(-150/30.9) = 56.4 Hz and
+    # 55 + 180 e^(-40/30.9) = 104.3 Hz. Its 3rd harmonic is 3.5 dB louder; taking the
+    # fundamental for a rumble under it read 188 Hz. No pitch is acceptable, 3x is not.
+    r = oneshot.profile_array(hit(lambda t: 55 + 180 * np.exp(-t / 0.0309), 0.2, partials={1: 1, 3: 1.5}), SR)
+    assert r["pitch_body_hz"] is None or 56.4 * 0.97 <= r["pitch_body_hz"] <= 104.3 * 1.03, r["pitch_body_hz"]
+    assert not any("rumble" in n for n in r["notes"])
+
+
+def test_envelope_dc_offset_behind_silence_or_a_constant_lead_in():
+    # the offset must go whether the lead-in is digital zeros or the offset itself
+    tom = hit(150, 0.08, seconds=0.5)
+    ref = oneshot.profile_array(tom, SR)
+    lead = int(0.03 * SR)
+    for pad in (0.0, 0.02):
+        x = np.concatenate([np.full((lead, 1), pad), tom + 0.02])
+        assert oneshot.compare(oneshot.profile_array(x, SR), ref)["readings"] == [], pad
+
+
+def test_compare_two_octave_flip_is_one_line():
+    # the same tone, fundamental just under and just over the level where it stops
+    # being taken for a rumble under its 4th harmonic: one line, not a 24 st pitch
+    # difference and a 4th harmonic 100 dB apart
+    a = oneshot.profile_array(hit(100, 0.1, partials={1: 0.30, 4: 1}), SR)
+    b = oneshot.profile_array(hit(100, 0.1, partials={1: 0.33, 4: 1}), SR)
+    lines = oneshot.compare(a, b)["readings"]
+    if a["pitch_body_hz"] != pytest.approx(b["pitch_body_hz"], rel=0.02):
+        assert len(lines) == 1 and "two octaves" in lines[0], lines
+    else:
+        assert lines == []
+
+
+def test_envelope_cut_hit_has_no_duration():
+    # a 300 ms time constant cut 60 ms in never falls 60 dB inside the file
+    r = oneshot.profile_array(hit(100, 0.3, seconds=0.06), SR)
+    assert r["truncated"] is True and r["duration_ms"] is None and r["fall_40_ms"] is None
+    assert any("no duration" in n for n in r["notes"])
+
+
+def test_compare_settle_time_alone_is_not_a_reading():
+    # two steady tones: neither drops, so when each "settles" says nothing
+    base = {"pitched": True, "pitch_body_hz": 230.0}
+    a = dict(base, pitch_drop_st=0.27, pitch_settle_ms=0.0)
+    b = dict(base, pitch_drop_st=0.27, pitch_settle_ms=7.5)
+    assert oneshot.compare(a, b)["readings"] == []
+    # with a real drop on one side the settle time still reads
+    c = dict(base, pitch_drop_st=3.0, pitch_settle_ms=30.0)
+    d = dict(base, pitch_drop_st=3.0, pitch_settle_ms=7.5)
+    assert [r.split()[1] for r in oneshot.compare(c, d)["readings"]] == ["settles"]
