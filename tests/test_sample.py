@@ -805,3 +805,15 @@ def test_noise_fast_hit_recorded_quietly_reads_no_attack_noise():
     quiet = np.round(x * 10 ** (-30 / 20) * 32767) / 32767
     c = oneshot.compare(oneshot.profile_array(quiet, SR), oneshot.profile_array(x, SR))
     assert not [t for t in c["readings"] if "attack" in t], c["readings"]
+
+
+def test_pitch_no_start_when_the_track_cannot_reach_the_onset():
+    # a hit that is noise for its first 60 ms and a 300 Hz tone after: the track from the
+    # body cannot be followed back to the onset, so there is no start pitch or drop
+    t = np.arange(int(0.5 * SR)) / SR
+    noise = np.random.default_rng(12).standard_normal(len(t)) * (t < 0.06)
+    tone = np.sin(2 * np.pi * 300 * t) * (t >= 0.06) * np.exp(-(t - 0.06) / 0.1)
+    r = oneshot.profile_array((noise * 0.8 + tone)[:, None], SR)
+    assert r["pitched"] is True and r["pitch_body_hz"] == pytest.approx(300, rel=0.01)
+    assert r["pitch_start_hz"] is None and r["pitch_drop_st"] is None
+    assert any("cannot be followed back to the onset" in n for n in r["notes"])

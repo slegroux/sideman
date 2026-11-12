@@ -216,13 +216,17 @@ def _frame_pitch(z: np.ndarray, t: float, sr: int, guess: float, end: int, k: in
     """(Hz, centre in s, clamped) of a frame centred on t, PERIODS periods of
     guess / k long (k: which harmonic is followed, so neighbours stay out of
     its lobe). A frame that would start before the onset starts there
-    (clamped); one that would run past `end` is not read. The pitch is the
+    (clamped); one that would run past `end` is tried at 3 periods (a short
+    hit), and not read if it still does not fit. The pitch is the
     lowest peak within STRONG_DB of the frame's strongest that is also within
     STEP_ST of `guess`, so the track cannot jump to a harmonic or to rumble."""
-    w = int(round(min(max(PERIODS * k / guess, FRAME_S[0]), FRAME_S[1]) * sr))
-    a = int(round(t * sr)) - w // 2
-    clamped, a = a <= 0, max(0, a)
-    if a + w > end:
+    for periods in (PERIODS, PERIODS - 1):
+        w = int(round(min(max(periods * k / guess, FRAME_S[0]), FRAME_S[1]) * sr))
+        a = int(round(t * sr)) - w // 2
+        clamped, a = a <= 0, max(0, a)
+        if a + w <= end:
+            break
+    else:
         return None, None, clamped
     s = _spectrum(z, a, a + w, sr)
     idx = _peaks(s, min(20000.0, 0.45 * sr))
@@ -312,9 +316,10 @@ def _early_pitch(y: np.ndarray, sr: int, f1: float, t1: float) -> tuple | None:
     mid, f = mid[first:run + 1], f[first:run + 1]
     if len(f) < 3 or mid[-1] < t1 or abs(12 * math.log2(np.interp(t1, mid, f) / f1)) > EARLY_ST:
         return None
-    step = np.diff(f) / f[:-1]          # long and short half-periods in turn: a strong overtone adds
-    turns = np.sign(step[np.abs(step) > EARLY_ZIGZAG])        # crossings, so they are not the
-    if np.any(turns[1:] != turns[:-1]):                       # half-periods of one pitch
+    before = f[mid < t1]                # the points that will be used: long and short half-periods
+    step = np.diff(before) / before[:-1]  # in turn mean a strong overtone adds crossings, so they
+    turns = np.sign(step[np.abs(step) > EARLY_ZIGZAG])        # are not the half-periods of one
+    if np.any(turns[1:] != turns[:-1]):                       # pitch
         return None
     points = [(float(t), float(v)) for t, v in zip(mid, f)]
     since = float(tz[first])               # the first half-period starts here (0 or just before)
@@ -663,13 +668,15 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
                                  "is read after them" % (1000 * start_t))
             else:
                 start_t = c
-                notes.append("the start pitch is the first pitch frame's, %.0f ms in: the zero crossings "
-                             "before it do not follow one pitch" % (1000 * c))
-            out["pitch_start_hz"], out["pitch_start_at_ms"] = round(fs, 1), round(1000 * start_t, 1)
-            out["pitch_drop_st"] = round(12 * math.log2(fs / f0), 2)
-            if not reached:
-                notes.append("the pitch cannot be followed back to the onset: the start is %.0f ms in"
-                             % (1000 * c))
+                if reached:
+                    notes.append("the start pitch is the first pitch frame's, %.0f ms in: the zero crossings "
+                                 "before it do not follow one pitch" % (1000 * c))
+            if reached:
+                out["pitch_start_hz"], out["pitch_start_at_ms"] = round(fs, 1), round(1000 * start_t, 1)
+                out["pitch_drop_st"] = round(12 * math.log2(fs / f0), 2)
+            else:              # the chain broke on its way back: its last frame is no start
+                notes.append("the pitch cannot be followed back to the onset (the track starts %.0f ms in): "
+                             "no start pitch or drop" % (1000 * c))
             seq = early + dense
             near = [abs(12 * math.log2(f / f0)) <= SETTLE_ST for _, f in seq]
             for i, (c0, _) in enumerate(seq):
@@ -794,7 +801,8 @@ def profile(path: str | pathlib.Path, hit: int | None = None) -> dict:
                     it, or 15 dB in a body that is not mostly noise)
     pitch_start_hz  pitch at the onset, from zero crossings (or where pitch_start_at_ms
                     says: after a click, or at the first frame when the crossings
-                    do not follow one pitch)
+                    do not follow one pitch); None when the track cannot be followed
+                    back to the onset
     pitch_body_hz   pitch over body_window_ms (40-150 ms, shorter for a short hit)
     pitch_drop_st   start minus body, semitones
     pitch_settle_ms when the pitch comes within 0.5 st of the body pitch and stays 10 ms
