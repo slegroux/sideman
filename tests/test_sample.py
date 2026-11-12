@@ -727,3 +727,47 @@ def test_compare_half_the_decay_of_a_fast_hit_reads_only_decay(f0, tau):
     c = oneshot.compare(a, b)
     assert c["readings"] and all(r.startswith(("falls", "lasts")) for r in c["readings"]), c["readings"]
     assert c["diff"]["fall_20_ms"]["ratio"] == pytest.approx(0.5, abs=0.07)
+
+
+def test_compare_drops_read_at_different_times_are_compared_from_the_later():
+    # the same kick glide, one with a 3rd harmonic that keeps its zero crossings from
+    # reading a pitch: its start is the first frame's (20 ms), the other's the onset's.
+    # From 20 ms on both glides are the same, so there is no drop reading
+    a = oneshot.profile_array(hit(kick_glide, 0.12, partials={1: 1.0, 3: 1.5}), SR)
+    b = oneshot.profile_array(hit(kick_glide, 0.12), SR)
+    assert abs(a["pitch_start_at_ms"] - b["pitch_start_at_ms"]) > 2
+    c = oneshot.compare(a, b)
+    assert not [t for t in c["readings"] if "pitch" in t], c["readings"]
+    assert c["diff"]["pitch_drop_from_ms"] == pytest.approx(max(a["pitch_start_at_ms"], b["pitch_start_at_ms"]))
+    assert abs(c["diff"]["pitch_drop_st"]) < 1
+
+
+def test_compare_drop_not_comparable_says_so_only_when_it_matters():
+    base = {"pitched": True, "pitch_body_hz": 100.0, "pitch_track_hz": {}}
+    early = dict(base, pitch_start_hz=200.0, pitch_start_at_ms=0.0, pitch_drop_st=12.0)
+    late = dict(base, pitch_start_hz=110.0, pitch_start_at_ms=30.0, pitch_drop_st=1.65)
+    lines = oneshot.compare(early, late)["readings"]
+    assert lines == ["pitch drop not compared: the start is read at 0.0 ms on one side and 30 ms on the other"]
+    small = dict(early, pitch_start_hz=105.0, pitch_drop_st=0.84)
+    still = dict(late, pitch_start_hz=104.0, pitch_drop_st=0.68)
+    assert oneshot.compare(small, still)["readings"] == []
+
+
+def test_compare_octave_or_twelfth_flip_is_one_line():
+    def tone(partials):
+        return oneshot.profile_array(hit(100, 0.2, partials=partials), SR)
+    # 100 Hz 10.5 dB under 200 Hz reads 200 Hz (a lone peak at 1/2, LONE_DB down);
+    # 9.6 dB under reads 100 Hz: the same partials, read an octave apart
+    c = oneshot.compare(tone({1: 0.30, 2: 1.0}), tone({1: 0.33, 2: 1.0}))
+    assert len(c["readings"]) == 1 and c["readings"][0].startswith("pitch read an octave above the reference")
+    c = oneshot.compare(tone({1: 0.08, 3: 1.0, 6: 0.3}), tone({1: 0.5, 3: 1.0, 6: 0.3}))
+    assert c["readings"][0].startswith("pitch read a twelfth above the reference")
+    assert not [t for t in c["readings"][1:] if "harmonic" in t or "drop" in t], c["readings"]
+
+
+def test_compare_times_longer_and_shorter_weigh_the_same():
+    def fall(ms):
+        return {"pitched": False, "fall_20_ms": ms}
+    for ms, read in ((116.0, True), (86.0, True), (115.0, False), (87.0, False)):
+        # |ln(ratio)| against ln(1.15): 1.16 and 0.86 are past it, 1.15 and 0.87 are not
+        assert bool(oneshot.compare(fall(ms), fall(100.0))["readings"]) is read, ms

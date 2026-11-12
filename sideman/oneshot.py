@@ -122,6 +122,7 @@ HARM_CLEAR_DB = PROMINENT_DB  # ...and stand clear of its own spectral floor lik
 NOISE_FLOOR_DB = -25.0   # a pure decaying tone reads -26 to -42 from window leakage
 CLICK_FLOOR_DB = -40.0
 BAND_FLOOR_DB = -30.0    # a band this far under the hit's total on both sides is not read
+START_GAP_MS = 2.0       # starts read further apart than this are compared from the later one
 FAST_SETTLE_MS = 5.0     # a pitch drop over in less than this is a click, not a glide
 BAND_NAMES = {"sub": "sub (20-60 Hz)", "bass": "bass (60-250 Hz)", "low_mid": "low mids (250-500 Hz)",
               "mid": "mids (500 Hz-2 kHz)", "high_mid": "high mids (2-6 kHz)", "high": "highs (6-20 kHz)"}
@@ -846,6 +847,46 @@ def _ordinal(k: int) -> str:
     return {2: "2nd", 3: "3rd"}.get(k, "%dth" % k)
 
 
+def _pitch_at(p: dict, ms: float) -> float | None:
+    """A profile's pitch at `ms`, from its start and track points (log-linear
+    between the two around it), or None when no reading brackets that time."""
+    pts = {}
+    if p.get("pitch_start_hz") and p.get("pitch_start_at_ms") is not None:
+        pts[float(p["pitch_start_at_ms"])] = p["pitch_start_hz"]
+    for k, v in (p.get("pitch_track_hz") or {}).items():
+        if v:
+            pts.setdefault(float(k), v)
+    t = sorted(pts)
+    below, above = [x for x in t if x <= ms], [x for x in t if x >= ms]
+    if not below or not above:
+        return None
+    t0, t1 = below[-1], above[0]
+    if t1 == t0:
+        return pts[t0]
+    return 2 ** np.interp(ms, [t0, t1], [math.log2(pts[t0]), math.log2(pts[t1])])
+
+
+def _flip(a: dict, b: dict) -> str | None:
+    """A line when the two body pitches sit 2x or 3x apart and the higher one
+    lists the lower pitch among its partials: the same tone read on two
+    different partials, not a pitch difference."""
+    fa, fb = a.get("pitch_body_hz"), b.get("pitch_body_hz")
+    if not (fa and fb):
+        return None
+    hi, lo, hi_f, lo_f = (a, b, fa, fb) if fa > fb else (b, a, fb, fa)
+    for k, interval in ((2, "an octave"), (3, "a twelfth")):
+        if abs(12 * math.log2(hi_f / lo_f) - 12 * math.log2(k)) <= PITCH_ST:
+            low = [q for q in hi.get("partials") or [] if abs(q["hz"] - lo_f) <= HARM_TOL * lo_f]
+            if low:
+                side = "this side" if hi is a else "the reference"
+                return ("pitch read %s %s the reference (%s Hz, reference %s Hz) on the same partials: %s "
+                        "takes its %s Hz partial as the fundamental and its %s Hz one, %.0f dB down, as a "
+                        "rumble; harmonic and drop readings are left out"
+                        % (interval, "above" if hi is a else "below", _num(fa), _num(fb), side,
+                           _num(hi_f), _num(low[0]["hz"]), -low[0]["db"]))
+    return None
+
+
 def compare(a: dict, b: dict) -> dict:
     """How profile `a` (the candidate, e.g. a synth take) differs from profile
     `b` (the reference). `diff` holds a - b for every measure both sides have:
@@ -868,16 +909,44 @@ def compare(a: dict, b: dict) -> dict:
     for key, name in (("pitch_body_hz", "pitch_body_st"), ("pitch_start_hz", "pitch_start_st")):
         va, vb = a.get(key), b.get(key)
         diff[name] = round(12 * math.log2(va / vb), 2) if va and vb else None
+    def sub(key, nd):
+        va, vb = a.get(key), b.get(key)
+        return (round(va - vb, nd) if va is not None and vb is not None else None), va, vb
+
+    flip = _flip(a, b)
+    if flip:
+        add(1e6, flip)
     d = diff["pitch_body_st"]
-    if d is not None and abs(d) > PITCH_ST:
+    if d is not None and abs(d) > PITCH_ST and not flip:
         add(abs(d) / PITCH_ST, "body pitch %.1f st %s the reference (%s Hz, reference %s Hz)"
             % (abs(d), "above" if d > 0 else "below", _num(a["pitch_body_hz"]), _num(b["pitch_body_hz"])))
-    va, vb = a.get("pitch_drop_st"), b.get("pitch_drop_st")
-    diff["pitch_drop_st"] = round(va - vb, 2) if va is not None and vb is not None else None
-    d = diff["pitch_drop_st"]
-    if d is not None and abs(d) > DROP_ST:
-        add(abs(d) / DROP_ST, "pitch %s, reference %s" % (_drop(a), _drop(b)))
-    drop_read = d is not None and abs(d) > DROP_ST
+    d, va, vb = sub("pitch_drop_st", 2)
+    ta, tb = a.get("pitch_start_at_ms"), b.get("pitch_start_at_ms")
+    drop_read = False
+    if d is not None and ta is not None and tb is not None and abs(ta - tb) > START_GAP_MS:
+        # the starts were read at different times: a drop from 0 ms and one from 20 ms
+        # are not the same measure, so both are taken from the later time
+        late = max(ta, tb)
+        pa, pb = _pitch_at(a, late), _pitch_at(b, late)
+        diff["pitch_drop_from_ms"] = late
+        if pa and pb:
+            da, db_ = 12 * math.log2(pa / a["pitch_body_hz"]), 12 * math.log2(pb / b["pitch_body_hz"])
+            d = diff["pitch_drop_st"] = round(da - db_, 2)
+            if abs(d) > DROP_ST and not flip:
+                drop_read = True
+                add(abs(d) / DROP_ST, "pitch %s %.1f st from %s ms on, reference %.1f st (the starts are read "
+                    "at %s and %s ms)" % ("drops" if da > -0.05 else "rises", abs(da), _num(late),
+                                          db_, _num(ta), _num(tb)))
+        else:
+            diff["pitch_drop_st"] = None
+            if max(abs(va), abs(vb)) > DROP_ST and not flip:
+                add(1.0, "pitch drop not compared: the start is read at %s ms on one side and %s ms on "
+                    "the other" % (_num(ta), _num(tb)))
+    else:
+        diff["pitch_drop_st"] = d
+        if d is not None and abs(d) > DROP_ST and not flip:
+            drop_read = True
+            add(abs(d) / DROP_ST, "pitch %s, reference %s" % (_drop(a), _drop(b)))
 
     for key, text in TIMES:
         va, vb = a.get(key), b.get(key)
@@ -888,11 +957,13 @@ def compare(a: dict, b: dict) -> dict:
         diff[key] = {"ms": round(d, 1), "ratio": None if ratio is None else round(ratio, 3)}
         if key == "pitch_settle_ms" and drop_read:
             continue                # the pitch-drop line already gives both times
-        if abs(d) > TIME_FLOOR_MS and (ratio is None or abs(ratio - 1) > TIME_RATIO):
+        # read on |ln ratio|, so 15 % longer and 15 % shorter (ratio 1/1.15) weigh the same
+        far = None if not ratio else abs(math.log(ratio)) / math.log(1 + TIME_RATIO)
+        if abs(d) > TIME_FLOOR_MS and (far is None or far > 1):
             line = text % (_num(va), _num(vb))
             if ratio is not None:
                 line += " (%d %% %s)" % (round(abs(ratio - 1) * 100), "longer" if d > 0 else "shorter")
-            add(abs(ratio - 1) / TIME_RATIO if ratio is not None else abs(d) / TIME_FLOOR_MS, line)
+            add(far if far is not None else abs(d) / TIME_FLOOR_MS, line)
 
     ha, hb = a.get("harmonics_db"), b.get("harmonics_db")
     diff["harmonics_db"] = None
@@ -906,7 +977,7 @@ def compare(a: dict, b: dict) -> dict:
             va, vb = _key(ha, k), _key(hb, k)
             diff["harmonics_db"][k] = None if va is None or vb is None else round(va - vb, 1)
             d = diff["harmonics_db"][k]
-            if d is not None and abs(d) > LEVEL_DB and (heard(a, ha, k) or heard(b, hb, k)):
+            if d is not None and abs(d) > LEVEL_DB and (heard(a, ha, k) or heard(b, hb, k)) and not flip:
                 add(abs(d) / LEVEL_DB, "%s harmonic %.1f dB %s (%s dB, reference %s dB)"
                     % (_ordinal(k), abs(d), "high" if d > 0 else "low", _num(va), _num(vb)))
 
@@ -920,14 +991,12 @@ def compare(a: dict, b: dict) -> dict:
             if word and d is not None and abs(d) > step and max(va, vb) > floor:
                 add(abs(d) / step, "%s %.1f dB %s than the reference in the %s (%s dB of the total, reference %s dB)"
                     % (word, abs(d), "more" if d > 0 else "less", part, _num(va), _num(vb)))
-    va, vb = a.get("click_db"), b.get("click_db")
-    diff["click_db"] = round(va - vb, 1) if va is not None and vb is not None else None
-    d = diff["click_db"]
+    d, va, vb = sub("click_db", 1)
+    diff["click_db"] = d
     if d is not None and abs(d) > CLICK_STEP_DB and max(va, vb) > CLICK_FLOOR_DB:
         add(abs(d) / CLICK_STEP_DB, "click %.1f dB %s than the reference" % (abs(d), "stronger" if d > 0 else "weaker"))
-    va, vb = a.get("width"), b.get("width")
-    diff["width"] = round(va - vb, 3) if va is not None and vb is not None else None
-    d = diff["width"]
+    d, va, vb = sub("width", 3)
+    diff["width"] = d
     if d is not None and abs(d) > WIDTH_STEP:
         add(abs(d) / WIDTH_STEP, "width %.2f, reference %.2f (%s)" % (va, vb, "wider" if d > 0 else "narrower"))
     ba, bb = a.get("bands_db"), b.get("bands_db")
@@ -942,6 +1011,5 @@ def compare(a: dict, b: dict) -> dict:
             if abs(d) > LEVEL_DB and max(ba[k], bb[k]) > BAND_FLOOR_DB:
                 add(abs(d) / LEVEL_DB, "%s %.1f dB %s against the other bands"
                     % (BAND_NAMES.get(k, k), abs(d), "high" if d > 0 else "low"))
-    va, vb = a.get("peak_db"), b.get("peak_db")
-    diff["peak_db"] = round(va - vb, 2) if va is not None and vb is not None else None
+    diff["peak_db"] = sub("peak_db", 2)[0]
     return {"a": a, "b": b, "diff": diff, "readings": [t for _, t in sorted(found, key=lambda f: -f[0])]}
