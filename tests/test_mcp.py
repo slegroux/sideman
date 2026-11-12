@@ -121,7 +121,7 @@ def test_every_tool_maps_to_the_right_op():
 
 # Tools that run in the server process and send no op of their own (the
 # listening tools read audio files; a clip path costs one `get`).
-LOCAL_TOOLS = {"audio_analyze", "audio_compare", "mix_report", "sample_analyze"}
+LOCAL_TOOLS = {"audio_analyze", "audio_compare", "mix_report", "sample_analyze", "sample_compare"}
 
 
 def test_tool_count_matches_registry():
@@ -345,13 +345,14 @@ def test_errors_reach_the_client():
 
 def test_listen_tools_without_the_extra_give_the_install_hint():
     import sideman
-    for mod, tool in (("listen", S.audio_analyze), ("oneshot", S.sample_analyze)):
+    for mod, tool, args in (("listen", S.audio_analyze, 1), ("oneshot", S.sample_analyze, 1),
+                            ("oneshot", S.sample_compare, 2)):
         name = "sideman." + mod
         saved = sys.modules.get(name, "absent")
         attr = sideman.__dict__.pop(mod, None)  # `from sideman import x` checks this first
         sys.modules[name] = None                # makes the import raise ImportError
         try:
-            tool("/nonexistent.wav")
+            tool(*["/nonexistent.wav"] * args)
             check("%s without the extra raises" % tool.__name__, False, "no raise")
         except S.LiveError as e:
             check("%s: install hint names the extra" % tool.__name__,
