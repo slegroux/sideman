@@ -650,6 +650,8 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
         if dense:
             c, fs = dense[0]
             zc = _early_pitch(y, sr, fs, c) if reached else None
+            if zc is not None and not any(t < c for t, _ in zc[0]):
+                zc = None              # after a skipped click, nothing is left before the first frame
             if zc is not None:
                 early, since, skipped = zc
                 early = [(t, f) for t, f in early if t < c]

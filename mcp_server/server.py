@@ -753,8 +753,12 @@ def sample_compare(a: str, b: str, hit_a: int | None = None, hit_b: int | None =
     drop takes: "drops 17.0 st over 3.0 ms (a click)" is a stick transient,
     the same drop over 40 ms is a kick's glide. When either hit is unpitched
     (hats, shakers, claps) the six-band balance is read too, 3 dB against
-    the other bands. Level, leading silence and sample rate give no reading. Change the patch, record again, compare again until
-    `readings` is empty. Local only; needs the `listen` extra.
+    the other bands. Starts read at different times are compared from the
+    later one; two pitches an octave or a twelfth apart on the same partials
+    are one line. Level, leading silence and a 44.1/48/96 kHz rate give no
+    reading (at 22.05 kHz the highs are empty and read low). Change the patch,
+    record again, compare again until `readings` is empty. Local only; needs
+    the `listen` extra.
     """
     oneshot = _listen("oneshot")
     return json.dumps(oneshot.compare(_profile(a, hit_a), _profile(b, hit_b)), indent=2)

@@ -240,7 +240,7 @@ a synth is programmed in. They run on files, in the MCP server, and need the
 `listen` extra. What the numbers mean:
 
 - **Everything is relative to the hit itself.** Times run from the onset (the
-  first 1 ms within 40 dB of the peak) and levels are against the hit's own
+  first 1 ms within 40 dB of the loudest 1 ms) and levels are against the hit's own
   peak or total. Two files at different levels, with different silence before
   the hit, or at different sample rates, measure the same.
 - **Fall times start at the envelope peak**, not the onset: `attack_ms` is
@@ -265,7 +265,21 @@ a synth is programmed in. They run on files, in the MCP server, and need the
 
 `readings` in `sample_compare` holds one line per difference past its
 threshold, largest first. An empty list means the two hits match within the
-thresholds, not that they are identical.
+thresholds, not that they are identical. Two drops whose starts were read at
+different times are compared from the later one; two pitches an octave or a
+twelfth apart on the same partials are one line, not a pitch difference.
+
+**Limits** (known, not yet handled):
+
+- A file's own noise floor is not measured: a hit recorded quietly (say
+  −50 dBFS in 16 bits) can read a shorter `duration_ms` or more noise than
+  the same hit recorded hot.
+- A fundamental under about 36 Hz never gets harmonics: the 40–150 ms body
+  window holds fewer than four of its periods.
+- A ghost note under a hit's tail, and a roll faster than about 100 ms, are
+  measured as one hit with no note; their fall times run long.
+- At 22.05 kHz the bands above 11 kHz are empty, so a hat compared with a
+  44.1 kHz file reads "highs low".
 
 ## Racks and plug-ins
 

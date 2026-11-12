@@ -415,6 +415,7 @@ def test_hits_four_at_500ms_and_the_third_alone():
     assert r["pitch_body_hz"] == pytest.approx(100, rel=0.02)
     assert r["harmonics_db"][3] == pytest.approx(20 * math.log10(1 / 3), abs=1)
     assert r["harmonics_db"][5] == pytest.approx(20 * math.log10(1 / 5), abs=1)
+    assert r["harmonics_db"][2] < -40 and r["harmonics_db"][4] < -40
     assert oneshot.profile_array(take, SR)["hit"] == 0
 
 
@@ -548,12 +549,17 @@ def test_noise_tone_buried_in_noise_stays_pitched(snr):
     assert r["pitched"] is True and r["pitch_body_hz"] == pytest.approx(200, rel=0.01)
 
 
-@pytest.mark.parametrize("f0, tau", [(100, 0.012), (300, 0.003), (60, 0.040), (1000, 0.004), (1000, 0.002)])
-def test_harmonic_short_decay_shows_no_fake_harmonic_or_noise(f0, tau):
+@pytest.mark.parametrize("f0, tau, too_short", [(100, 0.012, True), (300, 0.003, True), (60, 0.040, False),
+                                                (1000, 0.004, False), (1000, 0.002, False)])
+def test_harmonic_short_decay_shows_no_fake_harmonic_or_noise(f0, tau, too_short):
     # a pure tone has no 2nd harmonic and no noise, however fast it decays: either the
-    # body is too short to say (None, with a note) or the reading says so
+    # body is too short to say (None, with a note) or the reading says so. The body runs
+    # to the -40 dB point, tau ln(100), and needs 4 periods: 100 Hz tau 12 ms holds
+    # (55.3 - 27.6) ms = 2.8 periods, 300 Hz tau 3 ms 2.1; 60 Hz tau 40 ms (40-150 ms)
+    # holds 6.6, 1 kHz tau 4 ms 9.2, tau 2 ms 4.6
     r = oneshot.profile_array(hit(f0, tau, seconds=0.3), SR)
     assert r["pitch_body_hz"] == pytest.approx(f0, rel=0.02)
+    assert (r["harmonics_db"] is None) is too_short
     if r["harmonics_db"] is None:
         assert r["noise_db"]["body"] is None
         assert any("under 4 periods" in n for n in r["notes"])
@@ -771,3 +777,22 @@ def test_compare_times_longer_and_shorter_weigh_the_same():
     for ms, read in ((116.0, True), (86.0, True), (115.0, False), (87.0, False)):
         # |ln(ratio)| against ln(1.15): 1.16 and 0.86 are past it, 1.15 and 0.87 are not
         assert bool(oneshot.compare(fall(ms), fall(100.0))["readings"]) is read, ms
+
+
+def fft_resample(x, sr0, sr1):
+    """Band-limited resampling by zero-padding or truncating the spectrum."""
+    n1 = int(round(len(x) * sr1 / sr0))
+    spec = np.fft.rfft(x, axis=0)
+    out = np.zeros((n1 // 2 + 1, x.shape[1]), complex)
+    k = min(len(out), len(spec))
+    out[:k] = spec[:k]
+    return np.fft.irfft(out, n1, axis=0) * n1 / len(x)
+
+
+@pytest.mark.parametrize("name", ["sweep", "kick", "tom with h2"])
+def test_compare_hit_resampled_from_48_to_44k_gives_no_reading(name):
+    x = {"sweep": hit(sweep, 0.1, partials=BASE), "kick": hit(kick_glide, 0.12),
+         "tom with h2": hit(150, 0.15, partials={1: 1.0, 2: 0.3})}[name]
+    a = oneshot.profile_array(x, SR)
+    b = oneshot.profile_array(fft_resample(x, 48000, 44100), 44100)
+    assert oneshot.compare(b, a)["readings"] == []
