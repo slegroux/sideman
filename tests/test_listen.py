@@ -1475,3 +1475,113 @@ def test_drum_layer_and_levels_are_the_same_for_identical_audio_read_at_any_offs
             for d in sec["drums"]["roles"]:
                 assert d["readings"] == [] and d["ours_at_ms"] is not None, (label, d)
                 assert not any("not at the same place" in n or "failed" in n for n in d["notes"]), (label, d["notes"])
+
+
+# ------------------------------------------------ round 4: hit_cut, the fallback, presence on the core of a window
+
+def glide_kick(times, total_s, amp=0.8, freq=55.0, tau=0.08, seconds=0.5, sr=SR):
+    """Kicks that glide 24 st down to `freq` (time constant 20 ms) and decay with `tau`, `seconds` long, starting at
+    each of `times`."""
+    t = np.arange(int(seconds * sr)) / sr
+    h = np.sin(2 * np.pi * np.cumsum(freq * 2 ** (2.0 * np.exp(-t / 0.02))) / sr) * np.exp(-t / tau)
+    x = np.zeros(int(total_s * sr))
+    for s in times:
+        s0 = int(round(s * sr))
+        x[s0:s0 + len(h)] += amp * h[:len(x) - s0]
+    return x
+
+
+@pytest.mark.parametrize("delta", [0.0005, 0.0015, -0.0035])
+def test_drum_layer_identical_kick_with_an_early_soft_hit_read_half_a_ms_off_gives_no_readings(tmp_path, delta):
+    """140 BPM gliding 55 Hz kick on every beat, plus one soft hit (-8 dB) 232 ms before the section line; the same
+    audio on both sides. Read a few ms off, our slice splits that soft hit's tail differently, so the first pass places
+    the line's hit at a different onset than the reference's (8.4 against 7.2 ms early): readings from the hits as the
+    first pass cut them would differ. Both hits measured from cuts of their own, the tail's level read over 20 ms (not
+    one 1 ms frame of a 55 Hz tail, which is loud or quiet with its phase), must read the same."""
+    beat = 60.0 / 140.0
+    total = 0.6 + 16 * beat + 1.5
+    k = glide_kick([0.6 + b * beat for b in range(16)], total) + glide_kick([0.6 + 4 * beat - 0.232], total, amp=0.32)
+    d = {}
+    for side in ("ref", "ours"):
+        f = tmp_path / side
+        f.mkdir()
+        d[side] = {"kick": write(f, "kick.wav", stereo(k)), "mix": write(f, "mix.wav", stereo(k))}
+    secs = [{"name": "K", "start_bar": 1, "bars": 2}]
+    prof = listen.reference_profile(d["ref"]["mix"], {"kick": d["ref"]["kick"]}, 140.0, 0.6, secs)
+    m = {"tempo": 140.0, "offset_s": 0.6 + delta, "sections": secs,
+         "sources": {"master": d["ours"]["mix"], "kick": d["ours"]["kick"]}}
+    kick = listen.mix_report(m, reference=prof, out_dir=tmp_path / "out")["sections"][0]["drums"]["roles"][0]
+    assert kick["readings"] == [] and kick["ours_hit"] is not None and kick["notes"] == [], kick
+
+
+def one_role_report(tmp_path, role, ref_x, our_x, total_s=None):
+    """The drum layer's entry for `role` alone, 120 BPM, one 4-bar section from 0.5 s, read at the same offset."""
+    d = {}
+    for side, x in (("ref", ref_x), ("ours", our_x)):
+        f = tmp_path / side
+        f.mkdir()
+        d[side] = {role: write(f, role + ".wav", stereo(x)), "mix": write(f, "mix.wav", stereo(x))}
+    secs = [{"name": "K", "start_bar": 0, "bars": 4}]
+    prof = listen.reference_profile(d["ref"]["mix"], {role: d["ref"][role]}, 120.0, 0.5, secs)
+    m = {"tempo": 120.0, "offset_s": 0.5, "sections": secs, "sources": {"master": d["ours"]["mix"], role: d["ours"][role]}}
+    return listen.mix_report(m, reference=prof, out_dir=tmp_path / "out")["sections"][0]["drums"]["roles"][0]
+
+
+def long_toms(times, total_s, freq=100.0, tau=0.4):
+    """Toms 1.2 s long (they end 26 dB down), so each one's tail is still sounding at the next hit 1 s later."""
+    t = np.arange(int(1.2 * SR)) / SR
+    h = 0.5 * np.sin(2 * np.pi * freq * t) * np.exp(-t / tau)
+    x = np.zeros(int(total_s * SR))
+    for s0 in (int(round(v * SR)) for v in times):
+        x[s0:s0 + len(h)] += h[:len(x) - s0]
+    return x
+
+
+@pytest.mark.parametrize("late", [0.050, 0.120])
+def test_drum_layer_toms_late_everywhere_are_not_at_the_same_place_and_read_nothing_else(tmp_path, late):
+    """The same toms (beats 1 and 3, each still sounding when the next starts) with ours 50 or 120 ms late everywhere.
+    The tail of the hit before sits at the reference's place on our side; it is not a hit. The layer must say the hits
+    are not at the same place, with ours where it really is, and read no timbre difference (there is none)."""
+    beats = [0.5 + b * 0.5 for b in range(16) if b % 4 in (0, 2)]
+    total = 0.5 + 8.0 + 2.0
+    toms = one_role_report(tmp_path, "toms", long_toms(beats, total), long_toms([b + late for b in beats], total))
+    assert any("not at the same place" in n for n in toms["notes"]), toms
+    assert not any("reference's place" in n for n in toms["notes"]), toms
+    assert abs(toms["ours_at_ms"] - toms["reference_at_ms"] - 1000 * late) <= 2, toms
+    assert toms["readings"] == [], toms
+
+
+def test_drum_layer_an_808_late_and_lower_is_not_at_the_same_place_and_reads_only_its_pitch(tmp_path):
+    """An 808 (55 Hz, gliding, tau 350 ms, 1.2 s long: each still sounding at the next hit 1 s later); ours is 3 st
+    lower and 70 ms late everywhere. Expected: the hits are not at the same place (ours 70 ms later), and the one timbre
+    reading is the body pitch, 3 st below; no attack, noise or click reading from a cut that starts in a tail."""
+    beats = [0.5 + b * 0.5 for b in range(16) if b % 4 in (0, 2)]
+    total = 0.5 + 8.0 + 2.0
+    ref = glide_kick(beats, total, tau=0.35, seconds=1.2)
+    ours = glide_kick([b + 0.070 for b in beats], total, tau=0.35, seconds=1.2, freq=55.0 * 2 ** (-3 / 12))
+    kick = one_role_report(tmp_path, "kick", ref, ours)
+    assert any("not at the same place" in n for n in kick["notes"]), kick
+    assert abs(kick["ours_at_ms"] - kick["reference_at_ms"] - 70.0) <= 2, kick
+    assert len(kick["readings"]) == 1 and kick["readings"][0].startswith("body pitch 3.0 st below"), kick
+
+
+@pytest.mark.parametrize("delta", [0.006, 0.010])
+def test_drum_layer_the_reference_hit_last_in_its_slice_is_compared_over_the_same_length(tmp_path, delta):
+    """One tom (100 Hz, tau 150 ms, 0.5 s long) on beat 4 of a one-bar section at 120 BPM, and an accent twice as
+    loud 2 ms after the reference's slice ends (a beat past the section). The tom is the last hit in the reference's
+    slice. The same audio read 6 or 10 ms late puts that accent's first ms inside our slice: our cut must stop where
+    the reference's does, or it holds the accent and reads an attack a second long."""
+    total = 5.0
+    x = 0.5 * hit_train(100, 0.15, [2.0], total) + 1.0 * hit_train(100, 0.15, [3.002], total)
+    d = {}
+    for side in ("ref", "ours"):
+        f = tmp_path / side
+        f.mkdir()
+        d[side] = {"toms": write(f, "toms.wav", stereo(x)), "mix": write(f, "mix.wav", stereo(x))}
+    secs = [{"name": "K", "start_bar": 0, "bars": 1}]
+    prof = listen.reference_profile(d["ref"]["mix"], {"toms": d["ref"]["toms"]}, 120.0, 0.5, secs)
+    m = {"tempo": 120.0, "offset_s": 0.5 + delta, "sections": secs,
+         "sources": {"master": d["ours"]["mix"], "toms": d["ours"]["toms"]}}
+    toms = listen.mix_report(m, reference=prof, out_dir=tmp_path / "out")["sections"][0]["drums"]["roles"][0]
+    assert toms["readings"] == [] and toms["ours_hit"] is not None and toms["notes"] == [], toms
+    assert abs(toms["reference_at_ms"] - 1500.0) <= 1 and abs(toms["ours_at_ms"] - (1500.0 - 1000 * delta)) <= 1, toms

@@ -1020,10 +1020,14 @@ def _drum_layer(prof: dict, psec: dict, fb: int, sec: dict, audio: dict, sr: int
     file); only hits whose onset lies inside the section are candidates, its window starting
     GRID_LEAD_S early like the elements layer's, so the tail of a hit from before the line is never
     one and a hit a few ms early belongs to its own section. The reference's hit is picked first; on
-    our side the hit within 30 ms of the same place in the section is taken when there is one,
-    otherwise our own typical hit, with a note that the readings then compare different hits. The two
-    hits are then measured again on cuts made from the hits themselves (oneshot.hit_cut: onset found
-    again, up to the next onset), so the slice a hit was picked in does not change its reading. The
+    our side the hit within 30 ms of the same place in the section is taken when there is one. When our
+    segmentation offers none there, the hit is looked for at that place anyway (oneshot.hit_cut) and taken
+    only if it rises out of what comes before it within 30 ms of the place, with a note; otherwise our
+    own typical hit, with a note that the hits are not at the same place and the readings compare
+    different hits. The two hits are then measured again on cuts made from the hits themselves
+    (oneshot.hit_cut: onset found again, the cut as long as the reference hit's room to its next onset,
+    or both cut to the shorter when the reference's hit is the last in its slice), so the slice a hit
+    was picked in does not change its reading; `ours_at_ms` and `reference_at_ms` are those onsets. The
     reference stems are read again from the profile's paths, only the span needed; a role whose
     stems changed or are missing since the profile is skipped. Any failure on one role is that
     role's note."""
@@ -1079,25 +1083,35 @@ def _drum_layer(prof: dict, psec: dict, fb: int, sec: dict, audio: dict, sr: int
                 # the reference slice does not move with the capture's offset, so its hit's length (to the next
                 # onset) is the one both cuts use: the same audio gives the same two cuts at any offset
                 length = ons[rp_["hit"] + 1] / 1000.0 - rp_["onset_ms"] / 1000.0 - 0.001 if rp_["hit"] + 1 < len(ons) else None
-                ref_cut = oneshot.hit_cut(ref_x, rrate, rp_["onset_ms"] / 1000.0, length)
+                ref_cut, ref_on = oneshot.hit_cut(ref_x, rrate, rp_["onset_ms"] / 1000.0, length)
+                if ref_on is not None:           # positions are reported where the cuts found the onsets
+                    pos = ref_on - ref_pre
                 same_place = "ours" in profs and abs(profs["ours"]["onset_ms"] / 1000.0 - near) <= oneshot.NEAR_S + 0.0005
                 our_cut, our_at = None, None
                 if same_place:
-                    our_cut, our_at = oneshot.hit_cut(our_x, sr, profs["ours"]["onset_ms"] / 1000.0, length), profs["ours"]["onset_ms"] / 1000.0
+                    our_cut, on = oneshot.hit_cut(our_x, sr, profs["ours"]["onset_ms"] / 1000.0, length)
+                    our_at = profs["ours"]["onset_ms"] / 1000.0 if on is None else on
                 else:
                     # our own segmentation did not offer a complete hit there (its thresholds follow the slice's
-                    # loudest hit, and a fast pattern splits differently): look for the hit at that place anyway
+                    # loudest hit, and a fast pattern splits differently): look for the hit at that place anyway,
+                    # and take it only if it rises out of what comes before it there, not 30 ms or more away
+                    cut, on = oneshot.hit_cut(our_x, sr, near, length)
                     win = our_x[max(0, int((near - oneshot.NEAR_S) * sr)):int((near + oneshot.NEAR_S) * sr + 1)]
-                    if len(win) and np.abs(win).max() >= np.abs(our_x).max() * 10 ** (-30 / 20):
-                        our_cut, our_at = oneshot.hit_cut(our_x, sr, near, length), near
+                    if (on is not None and abs(on - near) <= oneshot.NEAR_S and len(win)
+                            and np.abs(win).max() >= np.abs(our_x).max() * 10 ** (-30 / 20)):
+                        our_cut, our_at = cut, on
                         errs = [e for e in errs if not e.startswith("ours:")]
                         entry["notes"].append("ours: measured at the reference's place; our own segmentation did "
                                               "not offer a complete hit there")
                     elif "ours" in profs:
-                        our_cut, our_at = oneshot.hit_cut(our_x, sr, profs["ours"]["onset_ms"] / 1000.0, length), profs["ours"]["onset_ms"] / 1000.0
+                        our_cut, on = oneshot.hit_cut(our_x, sr, profs["ours"]["onset_ms"] / 1000.0, length)
+                        our_at = profs["ours"]["onset_ms"] / 1000.0 if on is None else on
                         entry["notes"].append("the hits are not at the same place: the reference's is %.0f ms into "
                                               "the section, ours %.0f ms; the readings compare different hits"
                                               % (pos * 1000, (our_at - our_pre) * 1000))
+                if our_cut is not None:          # a cut that reached the end of its slice: both as long as the shorter
+                    dur = min(len(ref_cut) / rrate, len(our_cut) / sr)
+                    ref_cut, our_cut = ref_cut[:int(round(dur * rrate))], our_cut[:int(round(dur * sr))]
                 entry["notes"] += errs
                 if our_cut is not None:
                     entry["readings"] = oneshot.compare(oneshot.profile_array(our_cut, sr, hit=0, single=True),

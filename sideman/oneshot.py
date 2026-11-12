@@ -475,19 +475,24 @@ def _dc(x: np.ndarray, sr: int) -> np.ndarray:
     return np.where(real, dc, 0.0)
 
 
-def _onset(x: np.ndarray, mag: np.ndarray, sr: int, after_hit: bool) -> int:
+def _onset(x: np.ndarray, mag: np.ndarray, sr: int, after_hit: bool, tail_s: float = 0.0) -> int:
     """Index of a hit's onset in x: the first 1 ms frame whose mean power is
     within ONSET_DB of the hit's loudest 1 ms, and in that frame the first
     sample at that level, so a lone click or dither spike does not count.
-    After an earlier hit, the level must also be twice its tail's."""
+    After an earlier hit, the level must also be twice its tail's, the tail
+    read from x's first 1 ms or, with `tail_s`, from its loudest 1 ms over the
+    first `tail_s` seconds (one 1 ms frame of a low tone's tail is loud or quiet
+    with the phase it falls on). 0 when nothing in x rises that far (or x
+    starts with the hit)."""
     frame = max(1, int(round(0.001 * sr)))
     c = np.concatenate([[0.0], np.cumsum((x ** 2).mean(axis=1))])
     fwd = (c[frame:] - c[:-frame]) / frame if len(x) > frame else c[-1:] / max(1, len(x))
     floor = fwd.max() * 10 ** (-ONSET_DB / 10)
     level = math.sqrt(floor)
     if after_hit:              # rise out of the tail: four times its power, twice its peak
-        floor = max(floor, 4.0 * float(fwd[0]))
-        level = max(level, 2.0 * float(mag[:frame].max()))
+        span = max(frame, int(round(tail_s * sr)))
+        floor = max(floor, 4.0 * float(fwd[:span - frame + 1].max()))
+        level = max(level, 2.0 * float(mag[:span].max()))
     first = int(np.argmax(fwd >= floor))
     inside = np.nonzero(mag[first:first + frame] >= level)[0]
     return first + (int(inside[0]) if len(inside) else 0)
@@ -512,6 +517,7 @@ ROOM_FRAC = 0.9          # "typical": room at least this share of the candidates
 TYPICAL_DB = 3.0         # ...and, preferably, a peak within this of their median peak
 NEAR_S = 0.030           # a hit asked for "near" a position is taken within this
 HIT_LEAD_S = 0.002       # hit_cut starts this long before the onset it finds
+HIT_TAIL_S = 0.020       # hit_cut reads the tail's level over this (a whole period down to 50 Hz)
 
 
 def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray,
@@ -576,19 +582,22 @@ def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray
     return c["k"], got, int(round(_ms(c["room"], sr))), why
 
 
-def hit_cut(x: np.ndarray, sr: int, at: float, length: float | None = None) -> np.ndarray:
-    """The cut of x [n, channels] that holds the hit near `at` (seconds): from HIT_LEAD_S before its
-    onset, found here from the audio alone (the rise out of the level just before `at` - 30 ms, within
-    100 ms after `at`), not from where an earlier slice began, to `length` seconds after that onset
-    (the end of x if None). Two cuts of the same audio with the same `length` are the same samples
-    whatever the offset they were read at. Profile one with profile_array(cut, hit=0): the hit is the
-    first one in it, even if a later hit cuts it off."""
+def hit_cut(x: np.ndarray, sr: int, at: float, length: float | None = None) -> tuple[np.ndarray, float | None]:
+    """(cut, onset s) for the hit near `at` (seconds) in x [n, channels]. The onset is found here from the
+    audio alone, not from where an earlier slice began: the first rise out of the tail within 100 ms after
+    `at`, the tail's level read as its loudest 1 ms over HIT_TAIL_S from `at` - 30 ms, so the onset is never
+    earlier than `at` - 10 ms. The cut runs from HIT_LEAD_S before the onset to `length` seconds after it (the
+    end of x if None). Two cuts of the same audio with the same `length` are the same samples whatever the
+    offset they were read at. When nothing rises there the onset is None and the cut starts HIT_LEAD_S before
+    `at`. Profile a cut with profile_array(cut, hit=0, single=True): the whole cut is the one hit."""
     x = np.asarray(x, dtype=np.float64)
     a, b = max(0, int((at - 0.030) * sr)), min(len(x), int((at + 0.100) * sr))
     win = x[a:b]
-    onset = a + _onset(win, np.abs(win).max(axis=1), sr, True)
-    end = len(x) if length is None else min(len(x), onset + int(length * sr))
-    return x[max(0, onset - int(HIT_LEAD_S * sr)):max(end, onset + 1)]
+    i = _onset(win, np.abs(win).max(axis=1), sr, True, HIT_TAIL_S) if len(win) else 0
+    onset = a + i if i > 0 else None           # with the tail read over 20 ms, a rise is never at the window's start
+    start = int(at * sr) if onset is None else onset
+    end = len(x) if length is None else min(len(x), start + int(length * sr))
+    return x[max(0, start - int(HIT_LEAD_S * sr)):max(end, start + 1)], None if onset is None else onset / sr
 
 
 def profile_array(x: np.ndarray, sr: int, hit: int | str | None = None, within: tuple | None = None,
