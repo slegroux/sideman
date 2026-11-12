@@ -300,9 +300,12 @@ layers:
   first; `width_gaps` (an element's width more than 0.1 apart) are listed
   apart from them.
 - **Drum sounds**: for the kick, `toms`, `snare`, `hh`, `clap` and `rim` when
-  both sides have them, the `sample_compare` readings between our clean hit and
-  the reference stem's over the same bars (`hit="clean"`: the complete hit with
-  the most room after it).
+  both sides have them and sound in the paired bars, the `sample_compare`
+  readings between a typical clean hit of ours and of the reference stem. A
+  clean hit is complete, within 6 dB of the loudest complete hit, starts from
+  quiet, and has room (to the next onset) close to the median; each side is
+  cut with a beat of pre-roll, only hits that start inside the section count,
+  and ours is the one at the same place as the reference's.
 
 **The reference profile** is built once with `reference_profile(mix, stems,
 tempo, t0, sections)`. `stems` maps a role to a file or a list of files that
@@ -322,16 +325,22 @@ stem exported 3 dB hot still reads right; it does not cancel bleed. "Bass
 −6 dB" means the bass is 6 dB under the kick in the same bars, ours and the
 reference's. Where the kick is out on either side (silent, or 30 dB under the
 loudest other element, as in a break) both sides use the loudest element
-present on both as the yardstick instead, and the section says which. With no
-shared element the table is left out with a note.
+present on both as the yardstick instead, and the section says which. A kick
+that is out on one side only is also listed as a difference ("kick in the
+reference only, out in ours: 41 dB under"). With no shared element the table
+is left out with a note.
 
 **Present, trace, absent.** An element is present in a section when at least a
-quarter of its bars (and one) are within 40 dB of the mix, a trace when a
-quarter are within 60 dB, otherwise absent. Absent is not reported as −120 dB.
-A trace is listed and never counted as a gap or as "in the reference only",
-because separation bleed lives there. The first and last 10 ms of each section
-and bar are left out of an element's level, so a note that starts just before
-the grid line does not read into the section before it.
+quarter of its bars (and one) are within 40 dB of the elements together, a
+trace when a quarter are within 60 dB, otherwise absent. "Together" is our
+element sources on one side and the profile's stems on the other, never the
+master capture: its make-up gain would move the line. Absent is not reported as
+−120 dB. A trace on both sides, or against an absent element, is listed and
+never counted as a gap or as "in the reference only", because separation bleed
+lives there; an element present on one side and a trace on the other is
+compared and can be a gap. The first and last 10 ms of a section (not its
+inner bar lines) are left out of an element's level, so a note that starts
+just before the grid line does not read into the section before it.
 
 **Pairing.** Sections pair by name: the manifest section "E05" with the
 profile's "E05". A manifest section may carry `"reference": {"section":

@@ -524,21 +524,28 @@ kick), roles in the reference only / in ours only, the ratio per 4 bars, and
 `gaps` (ratios more than 1 dB apart, largest first); each row also has the
 element's width on both sides (0 mono .. 1 all side; the reference's is the
 whole section's) and `width_gaps` lists those more than 0.1 apart, separate
-from the level gaps. A role only 40 to 60 dB under the mix on either side is a
-`trace`, listed apart and never a gap.
-Where the kick is out
-on either side (absent, or 30 dB under the loudest other role) the
-`yardstick` is the loudest role in both ("Elements against the bass (kick
-out)"); with none the table is left out. The `master` source is never
+from the level gaps. Presence is judged against our element sources together
+and the profile's stems together (never the master capture, which carries the
+master chain's gain): present when a quarter of the bars are within 40 dB of
+them, a `trace` when a quarter are within 60 dB. A trace on both sides, or a
+trace against an absent role, is listed apart and never a gap; a present role
+against a trace is compared and can be a gap (`trace_side` says which side).
+Where the kick is out on either side (absent, or 30 dB under the loudest other
+role) the `yardstick` is the loudest role in both ("Elements against the bass
+(kick out)"); with none the table is left out. A kick out on one side only is
+also listed in the one-side lists, with how far down it is. The `master` source is never
 ratioed against the elements, since it sits after the master chain. If the
 master capture is the reference mix (per-bar curve and bands within 0.3 dB
 after removing the level offset, width within 0.01), the section says
 "the capture is the reference: check solos". With no `kick` source the table
 is left out with a note and the mix layer still reports.
 `drums`: for each of kick, toms, snare, hh, clap, rim in both the manifest
-and the profile, sample_compare's readings between our clean hit and the
-reference stem's over the section (sample_analyze `hit="clean"`); no clean
-hit on a side gives a note and no readings. `reference_stale` names profile
+and the profile and present on both sides in the paired bars, sample_compare's
+readings between a typical clean hit of ours and of the reference stem over the
+section. Each side is cut with a beat of pre-roll and post-roll and only hits
+that start inside the section count; the reference's hit is picked first and
+ours is the one at the same place in the section (within 30 ms) when there is
+one. No clean hit on a side gives a note and no readings. `reference_stale` names profile
 inputs that changed since it was built (a drum role whose stem changed is
 skipped). The numbers are measurements, not moves: the ear decides which
 gaps matter.
@@ -568,9 +575,10 @@ Per section: the mix's level (mean power, dBFS), integrated LUFS, six
 bands, width and per-bar levels; for each role its level, `vs_kick_db`,
 per-bar levels, bands and width. A role is present in a section when at least
 a quarter of its bars (and one) are within 40 dB of the mix, a trace when a
-quarter are within 60 dB (listed, never a gap in mix_report), else absent
-there (not -120 dB).
-A section's and a bar's first and last 10 ms are left out of a role's level.
+quarter are within 60 dB (listed, not a gap in mix_report), else absent
+there (not -120 dB), judged against the stems' power sum rather than the
+mix. A section's first and last 10 ms (not inner bar lines) are left out of
+a role's level; every role keeps its per-bar levels, absent ones too.
 
 Writes <mix name>.profile.json next to the mix (`out`: a .json path or a
 folder), which holds everything above plus each input's path, mtime and

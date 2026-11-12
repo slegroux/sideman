@@ -505,11 +505,11 @@ def change_rate(x: np.ndarray, sr: int, bar_s: float, offset_s: float, first_bar
 # a gain the stems and the mix share.
 
 PROFILE_KIND = "reference_profile"
-PROFILE_VERSION = 3        # 3: edge guard, quarter-of-the-bars presence, `trace` on a role's entry
+PROFILE_VERSION = 4        # 4: `stems_sum` per section, per-bar levels for absent roles, section-end guard only
 ABSENT_DB = 60.0           # a role with under a quarter of its bars within this of the mix is absent, not -120 dB
 TRACE_DB = 40.0            # ...and between this and ABSENT_DB under the mix it is a trace: listed, never a gap
-EDGE_GUARD_S = 0.010       # a section's, and a bar's, first and last 10 ms are left out of a role's level:
-                           # a note starting just before the grid line must not read into the section before
+EDGE_GUARD_S = 0.010       # a section's first and last 10 ms are left out of a role's level (never an inner bar
+                           # line): a note starting just before the grid line must not read into the section before
 ELEMENT_GAP_DB = 1.0       # an element's ratio to the kick differing by more than this is a gap
 WIDTH_GAP = 0.1            # an element's width (0 mono .. 1 all side) differing by more than this is a width gap
 CAPTURE_IS_REF_DB = 0.3    # a master capture is the reference when, with the level offset removed,
@@ -524,17 +524,22 @@ def _level_db(x: np.ndarray) -> float:
     return _db_amp(_peak_rms(x)[1])
 
 
-def _guard(t0: float, t1: float) -> tuple[float, float]:
-    """(t0, t1) without EDGE_GUARD_S at each end (unless that would leave almost nothing)."""
-    return (t0 + EDGE_GUARD_S, t1 - EDGE_GUARD_S) if t1 - t0 > 4 * EDGE_GUARD_S else (t0, t1)
+def _guard(t0: float, t1: float, start: bool = True, end: bool = True) -> tuple[float, float]:
+    """(t0, t1) without EDGE_GUARD_S at the ends asked for (unless that would leave almost nothing)."""
+    if t1 - t0 <= 4 * EDGE_GUARD_S:
+        return t0, t1
+    return (t0 + EDGE_GUARD_S if start else t0), (t1 - EDGE_GUARD_S if end else t1)
 
 
-def _bar_levels(x: np.ndarray, sr: int, t0: float, bar_s: float, first_bar: int, n: int) -> list:
-    """Level in dBFS of each of `n` bars from `first_bar` (bar 0 at t0 s), edges guarded;
-    None for a silent bar."""
+def _bar_levels(x: np.ndarray, sr: int, t0: float, bar_s: float, first_bar: int, n: int,
+                start: bool = True, end: bool = True) -> list:
+    """Level in dBFS of each of `n` bars from `first_bar` (bar 0 at t0 s); None for a silent bar.
+    Only the first bar's start and the last bar's end are guarded (and only when `start` / `end`),
+    never an inner bar line, so the mean power of the bars is the level of the span."""
     out = []
     for i in range(n):
-        lv = _level_db(_slice(x, sr, *_guard(t0 + (first_bar + i) * bar_s, t0 + (first_bar + i + 1) * bar_s)))
+        a = t0 + (first_bar + i) * bar_s
+        lv = _level_db(_slice(x, sr, *_guard(a, a + bar_s, start and i == 0, end and i == n - 1)))
         out.append(None if lv <= FLOOR_DB else round(lv, 2))
     return out
 
@@ -595,11 +600,13 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
 
     Per section: the mix's level (mean power, dBFS), integrated LUFS, six bands,
     width and per-bar levels; and for each role its level, its level against the
-    kick (`vs_kick_db`), per-bar levels, six bands and width. A role that is
-    silent, or with under a quarter of its bars (and one) within ABSENT_DB of the mix, in
-    a section is {"absent": true} there with no numbers; with a quarter within ABSENT_DB
-    but not within TRACE_DB of it the entry carries "trace": true. A section's and a bar's first and last
-    EDGE_GUARD_S are left out of a role's level. Files must share one sample rate
+    kick (`vs_kick_db`), per-bar levels, six bands and width. Presence is judged against
+    the stems together (`stems_sum`: their power sum, per section and per bar), not the
+    mix, so a master's make-up gain does not change it. A role with under a quarter of its
+    bars (and one) within ABSENT_DB of the stems' sum is {"absent": true, "per_bar_db": [...]}
+    there, with no other numbers; with a quarter within ABSENT_DB but not within TRACE_DB the
+    entry carries "trace": true. A section's first and last EDGE_GUARD_S are left out of a
+    role's level, never an inner bar line. Files must share one sample rate
     (refused otherwise); of different lengths they are trimmed to the shortest
     and `notes` says so.
 
@@ -665,36 +672,50 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
 
     x, _ = load(mixp)
     x = x[:n]
-    mix_rows, mix_levels = [], []
+    mix_rows = []
     for sec in sections:
         a = analyze_array(_slice(x, sr, *span(sec)), sr)
-        mix_levels.append(a["rms_db"])
         mix_rows.append({"level_db": a["rms_db"], "integrated_lufs": a["integrated_lufs"],
                          "width": a["width"], "bands_db": a["bands_db"],
                          "per_bar_db": _bar_levels(_stereo(x), sr, t0, bar_s, sec["start_bar"], sec["bars"])})
-    role_rows: dict[str, list] = {}
-    raw: dict[str, list] = {}
+    nsec = len(sections)
+    measured: dict[str, list] = {}
     for role, paths in files.items():
         y = None
         for p in paths:
             z = _stereo(load(p)[0])[:n]
             y = z.copy() if y is None else y + z
-        role_rows[role], raw[role] = [], []
-        for sec, mlv in zip(sections, mix_levels):
+        measured[role] = []
+        for sec in sections:
             seg = _slice(y, sr, *_guard(*span(sec)))
-            per_bar = _bar_levels(y, sr, t0, bar_s, sec["start_bar"], sec["bars"])
-            kind = _presence(per_bar, mlv)
-            if kind == "absent":
-                role_rows[role].append({"absent": True})
-                raw[role].append(None)
-                continue
             lv = _level_db(seg)
             bands, width = _bands_width(seg, sr)
-            role_rows[role].append({"absent": False, "trace": kind == "trace", "level_db": round(lv, 2),
-                                    "vs_kick_db": None, "per_bar_db": per_bar, "bands_db": bands, "width": width})
-            raw[role].append(lv)
+            measured[role].append({"level": lv, "bands": bands, "width": width,
+                                   "bars": _bar_levels(y, sr, t0, bar_s, sec["start_bar"], sec["bars"])})
+    # presence is judged against the stems together, not the mix: the mix can carry a master's make-up gain
+    sums = []
+    for i, sec in enumerate(sections):
+        power = [sum(0.0 if m[i]["bars"][j] is None else 10 ** (m[i]["bars"][j] / 10) for m in measured.values())
+                 for j in range(sec["bars"])]
+        total = sum(10 ** (m[i]["level"] / 10) for m in measured.values() if m[i]["level"] > FLOOR_DB)
+        sums.append({"level_db": round(_db(total), 2), "per_bar_db": [round(_db(v), 2) if v > 0 else None for v in power]})
+    role_rows: dict[str, list] = {}
+    raw: dict[str, list] = {}
+    for role, rows in measured.items():
+        role_rows[role], raw[role] = [], []
+        for i in range(nsec):
+            m, per_bar = rows[i], rows[i]["bars"]
+            kind = _presence(per_bar, sums[i]["level_db"])
+            if kind == "absent":
+                role_rows[role].append({"absent": True, "per_bar_db": per_bar})
+                raw[role].append(None)
+                continue
+            role_rows[role].append({"absent": False, "trace": kind == "trace", "level_db": round(m["level"], 2),
+                                    "vs_kick_db": None, "per_bar_db": per_bar, "bands_db": m["bands"],
+                                    "width": m["width"]})
+            raw[role].append(m["level"])
     if "kick" in files:
-        for i in range(len(sections)):
+        for i in range(nsec):
             for role in files:
                 if raw[role][i] is not None and raw["kick"][i] is not None:
                     role_rows[role][i]["vs_kick_db"] = round(raw[role][i] - raw["kick"][i], 2)
@@ -703,7 +724,7 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
         "beats_per_bar": beats_per_bar, "t0": t0, "sample_rate": sr, "notes": notes,
         "inputs": {"mix": [_input(mixp)], "stems": {r: [_input(p) for p in ps] for r, ps in files.items()}},
         "sections": [{"name": nm, "start_bar": sec["start_bar"], "bars": sec["bars"], "mix": mix_rows[i],
-                      "roles": {role: role_rows[role][i] for role in files}}
+                      "stems_sum": sums[i], "roles": {role: role_rows[role][i] for role in files}}
                      for i, (nm, sec) in enumerate(zip(names, sections))]}
     dest = pathlib.Path(out).expanduser() if out else mixp.parent
     if dest.is_dir() or not str(dest).lower().endswith(".json"):
@@ -762,11 +783,12 @@ def _check_profile(prof: dict) -> None:
             m = sec["mix"]
             need(num(m["level_db"]) and len(m["per_bar_db"]) == n and "width" in m and "integrated_lufs" in m)
             need(all(num(m["bands_db"][name]) for name, _, _ in BANDS))
+            need(num(sec["stems_sum"]["level_db"]) and len(sec["stems_sum"]["per_bar_db"]) == n)
             need(isinstance(sec["roles"], dict))
             for e in sec["roles"].values():
-                need(isinstance(e["absent"], bool))
+                need(isinstance(e["absent"], bool) and len(e["per_bar_db"]) == n)
                 if not e["absent"]:
-                    need(isinstance(e["trace"], bool) and num(e["level_db"]) and len(e["per_bar_db"]) == n)
+                    need(isinstance(e["trace"], bool) and num(e["level_db"]) and "width" in e)
                     need(all(name in e["bands_db"] for name, _, _ in BANDS))
     except (KeyError, TypeError, AttributeError, IndexError):
         raise ValueError("the reference profile is incomplete or malformed: rebuild it with reference_profile")
@@ -847,11 +869,14 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
     """(vs_reference, elements) for one manifest section paired with `psec` of the profile
     (starting `fb` bars in). Levels are ratios to the kick, or, where the kick is out on either
     side (absent, or KICK_OUT_DB under the loudest other role), to the loudest role present on
-    both sides, the same one for both: `yardstick` says which. A role that is only a trace
-    (TRACE_DB to ABSENT_DB under the mix) on either side is listed in `traces`, never in `gaps`
-    or the one-side lists."""
+    both sides, the same one for both: `yardstick` says which. Presence is judged against our
+    element sources together and the profile's stems together, never the master capture. A role
+    present on one side and a trace on the other is compared (`trace_side` says which); a role that
+    is a trace or absent on both sides is listed in `traces`. A kick out on one side only is
+    listed in the one-side lists as well."""
     n = sec["bars"]
     partial = bool(fb) or n != psec["bars"]
+    g_start, g_end = fb == 0, fb + n == psec["bars"]      # guard our ends only where the profile's section ends
     pm = psec["mix"]
     c = compare(a, {"bands_db": pm["bands_db"], "side_minus_mid_db": {},
                     "integrated_lufs": pm["integrated_lufs"], "width": pm["width"]})
@@ -863,36 +888,48 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
     if is_ref:
         notes.append("the capture is the reference: check solos")
     rng = slice(fb, fb + n)
-    mix_lv = _mean_db(pm["per_bar_db"][rng]) if partial else pm["level_db"]
 
-    ref_lv, ref_kind = {}, {}
+    # the reference side: presence from the paired bars against the stems' sum
+    sum_lv = psec["stems_sum"]["level_db"] if not partial else _mean_db(psec["stems_sum"]["per_bar_db"][rng])
+    ref_lv, ref_kind, ref_width = {}, {}, {}
     for role, e in psec["roles"].items():
         if role == "master":
             continue
-        if e["absent"]:
-            ref_kind[role], ref_lv[role] = "absent", None
-        elif not partial:
-            ref_kind[role], ref_lv[role] = "trace" if e["trace"] else "present", e["level_db"]
-        else:
-            ref_kind[role] = _presence(e["per_bar_db"][rng], mix_lv)
-            ref_lv[role] = None if ref_kind[role] == "absent" else _mean_db(e["per_bar_db"][rng])
-    ours, ours_lv, ours_kind, ours_width = {}, {}, {}, {}
+        bars = e["per_bar_db"][rng]
+        ref_kind[role] = _presence(bars, sum_lv)
+        ref_lv[role] = None if ref_kind[role] == "absent" else (_mean_db(bars) if partial else e["level_db"])
+        ref_width[role] = e.get("width")
+    # our side: the same, against our element sources together
+    ours, raw_lv, ours_kind = {}, {}, {}
     for role in audio:
         if role == "master":                     # sits after the master chain: never ratioed against elements
             continue
         seg = _stereo(_slice(audio[role][0], sr, t0, t0 + n * bar_s))
-        ours[role] = _bar_levels(seg, sr, 0.0, bar_s, 0, n)
-        ours_kind[role] = _presence(ours[role], a["rms_db"])
-        gseg = _slice(seg, sr, *_guard(0.0, n * bar_s))
-        ours_lv[role] = None if ours_kind[role] == "absent" else _level_db(gseg)
-        ours_width[role] = None if ours_kind[role] == "absent" else _bands_width(gseg, sr)[1]
+        ours[role] = _bar_levels(seg, sr, 0.0, bar_s, 0, n, g_start, g_end)
+        raw_lv[role] = seg
+    ours_power = [sum(0.0 if v[j] is None else 10 ** (v[j] / 10) for v in ours.values()) for j in range(n)]
+    ours_sum = _mean_db([round(_db(p), 2) if p > 0 else None for p in ours_power])
+    ours_lv, ours_width = {}, {}
+    for role, seg in raw_lv.items():
+        ours_kind[role] = _presence(ours[role], ours_sum)
+        if ours_kind[role] == "absent":
+            ours_lv[role], ours_width[role] = None, None
+        else:
+            gseg = _slice(seg, sr, *_guard(0.0, n * bar_s, g_start, g_end))
+            ours_lv[role], ours_width[role] = _level_db(gseg), _bands_width(gseg, sr)[1]
+
+    def kick_under(lv):
+        """dB the kick sits under the loudest other role in `lv`; None when it is silent, -inf when alone."""
+        if lv["kick"] is None:
+            return None
+        others = [v for r, v in lv.items() if r != "kick" and v is not None]
+        return max(others) - lv["kick"] if others else -math.inf
 
     def kick_out(lv):
-        """Whether the kick is absent or far under the loudest other role in `lv`."""
-        others = [v for r, v in lv.items() if r != "kick" and v is not None]
-        return lv["kick"] is None or bool(others and lv["kick"] < max(others) - KICK_OUT_DB)
+        under = kick_under(lv)
+        return under is None or under > KICK_OUT_DB
 
-    yard, kick_is_out = None, False
+    yard, kick_is_out, kick_notes = None, False, []
     if "kick" not in ours_lv:
         notes.append("no kick source in the manifest: elements against the kick left out")
     elif "kick" not in ref_lv:
@@ -901,13 +938,23 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
         yard = "kick"
     else:
         kick_is_out = True                        # decided for both sides together: one yardstick for both
-        where = " and ".join(w for w, lv in (("the reference", ref_lv), ("ours", ours_lv)) if kick_out(lv))
+        r_out, o_out = kick_out(ref_lv), kick_out(ours_lv)
+        where = " and ".join(w for w, o in (("the reference", r_out), ("ours", o_out)) if o)
         both = sorted(r for r in ref_lv if r != "kick" and ref_kind[r] == "present" and ours_kind.get(r) == "present")
         if both:
             yard = max(both, key=lambda r: ref_lv[r])
             notes.append("the kick is out in %s (absent, or more than %g dB under the loudest other role): "
-                         "elements against the %s, the loudest role in both; the kick itself is not compared"
+                         "elements against the %s, the loudest role in both"
                          % (where, KICK_OUT_DB, yard))
+            if r_out != o_out:                    # out on one side only: that is the biggest difference there is
+                out_lv, in_lv = (ref_lv, ours_lv) if r_out else (ours_lv, ref_lv)
+                under = kick_under(out_lv)
+                kick_notes.append({
+                    "side": "ours" if r_out else "reference",
+                    "vs_yardstick_db": None if in_lv.get("kick") is None else round(in_lv["kick"] - in_lv[yard], 2),
+                    "reason": ("kick out in %s: silent" % ("the reference" if r_out else "ours")) if under is None else
+                              "kick out in %s: %.0f dB under the loudest other role" % (
+                                  "the reference" if r_out else "ours", under)})
         else:
             notes.append("the kick is out in %s and no other element sounds in both: elements left out" % where)
     table, ref_only, ours_only, traces, arc, silent_both = [], [], [], [], {}, []
@@ -917,14 +964,12 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
         r_ratio = round(r_lv - ref_lv[yard], 2) if yard and r_lv is not None else None
         o_ratio = round(o_lv - ours_lv[yard], 2) if yard and o_lv is not None else None
         rk, ok = ref_kind.get(role), ours_kind.get(role)
-        if "trace" in (rk, ok):
-            traces.append({"role": role, "reference": rk or "not in the profile", "ours": ok or "not in the manifest",
-                           "reference_db": r_ratio, "ours_db": o_ratio})
-        elif rk == "present" and ok == "present":
+        if "present" in (rk, ok) and rk in ("present", "trace") and ok in ("present", "trace"):
             if yard:
                 table.append({"role": role, "reference_db": r_ratio, "ours_db": o_ratio,
                               "difference_db": round(o_ratio - r_ratio, 2),
-                              "reference_width": psec["roles"][role]["width"], "ours_width": ours_width[role]})
+                              "reference_width": ref_width.get(role), "ours_width": ours_width.get(role),
+                              "trace_side": None if rk == ok else ("reference" if rk == "trace" else "ours")})
                 if n > CHANGE_BLOCK_BARS:
                     arc[role] = {"reference": _arc(psec["roles"][role]["per_bar_db"][rng],
                                                    psec["roles"][yard]["per_bar_db"][rng]),
@@ -935,8 +980,14 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
         elif ok == "present":
             ours_only.append({"role": role, "vs_yardstick_db": o_ratio,
                               "reason": "not in the profile" if rk is None else "silent in the reference"})
+        elif "trace" in (rk, ok):
+            traces.append({"role": role, "reference": rk or "not in the profile", "ours": ok or "not in the manifest",
+                           "reference_db": r_ratio, "ours_db": o_ratio})
         else:
             silent_both.append(role)
+    for k in kick_notes:
+        (ours_only if k["side"] == "ours" else ref_only).append(
+            {"role": "kick", "vs_yardstick_db": k["vs_yardstick_db"], "reason": k["reason"]})
     gaps = sorted(({"role": t["role"], "difference_db": t["difference_db"]} for t in table
                    if abs(t["difference_db"]) > ELEMENT_GAP_DB), key=lambda g: -abs(g["difference_db"]))
     width_gaps = sorted(({"role": t["role"], "reference": t["reference_width"], "ours": t["ours_width"],
@@ -949,44 +1000,93 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
           "kick_out": kick_is_out,
           "table": table if yard else None, "gaps": gaps if yard else [], "width_gaps": width_gaps if yard else [],
           "reference_only": ref_only, "ours_only": ours_only, "traces": traces, "silent_in_both": silent_both,
-          "arc": arc if yard else {}}
+          "arc": arc if yard else {},
+          "presence": {r: {"reference": ref_kind.get(r), "ours": ours_kind.get(r)} for r in set(ref_kind) | set(ours_kind)}}
     return vs, el
 
 
+def _read_span(items: list, rate: int, start_s: float, end_s: float) -> tuple[np.ndarray, float] | None:
+    """(samples [n, 2], start in seconds) of the files `items` (profile inputs), summed, between
+    start_s and end_s, read from disk without loading the rest; None when the span is outside them."""
+    a, b = max(0, int(round(start_s * rate))), int(round(end_s * rate))
+    ys = []
+    for it in items:
+        total = sf.info(it["path"]).frames
+        if min(b, total) <= a:
+            return None
+        y, _ = sf.read(it["path"], start=a, frames=min(b, total) - a, dtype="float32", always_2d=True)
+        ys.append(_stereo(y))
+    m = min(len(y) for y in ys)
+    return sum(y[:m] for y in ys), a / rate
+
+
 def _drum_layer(prof: dict, psec: dict, fb: int, sec: dict, audio: dict, sr: int, t0: float,
-                bar_s: float, stale: set, cache: dict) -> dict:
-    """For each drum role in both the manifest's sources and the profile's stems: the readings
-    of oneshot.compare(ours, reference) on the clean hit of each side over the section's bars.
-    The profile stores paths only, so the reference stems are read again (summed per role, kept
-    in `cache`); a role whose stems changed or are missing since the profile is skipped, with a note."""
+                bar_s: float, beats: float, stale: set, presence: dict) -> dict:
+    """For each drum role in both the manifest's sources and the profile's stems, and present on
+    both sides in the paired bars: the readings of oneshot.compare(ours, reference) on a typical
+    clean hit of each side. Each side is cut with one beat of pre-roll and post-roll (clamped to the
+    file), and only hits whose onset lies inside the section are candidates, so the tail of a hit
+    from before the section line is never one. The reference's hit is picked first; on our side the
+    hit at the same position in the section (within 30 ms) is taken when there is one, otherwise our
+    own typical hit, with a note. The reference stems are read again from the profile's paths,
+    only the span needed; a role whose stems changed or are missing since the profile is skipped.
+    Any failure on one role is that role's note."""
     from . import oneshot
     n = sec["bars"]
     pbar = float(prof["beats_per_bar"]) * 60.0 / float(prof["tempo"])
     r0 = prof["t0"] + (psec["start_bar"] + fb) * pbar
+    rrate = prof["sample_rate"]
     out = []
     for role in DRUM_ROLES:
         if role not in audio or role not in prof["inputs"]["stems"]:
             continue
         entry = {"role": role, "ours_hit": None, "reference_hit": None, "readings": [], "notes": []}
         out.append(entry)
-        if role in stale:
-            entry["notes"].append("a stem of this role changed or is missing since the profile was built: skipped")
-            continue
-        if role not in cache:
-            ys = [_stereo(load(it["path"])[0]) for it in prof["inputs"]["stems"][role]]
-            m = min(len(y) for y in ys)
-            cache[role] = sum(y[:m] for y in ys)
-        profs = {}
-        for side, x, rate, start in (("ours", audio[role][0], sr, t0), ("the reference", cache[role],
-                                                                      prof["sample_rate"], r0)):
+        try:
+            if role in stale:
+                entry["notes"].append("a stem of this role changed or is missing since the profile was built: skipped")
+                continue
+            pr = presence.get(role, {})
+            if pr.get("reference") != "present" or pr.get("ours") != "present":
+                entry["notes"].append("not present on both sides in these bars (reference %s, ours %s): skipped"
+                                      % (pr.get("reference") or "-", pr.get("ours") or "-"))
+                continue
+            got = _read_span(prof["inputs"]["stems"][role], rrate, r0 - pbar / prof["beats_per_bar"],
+                             r0 + n * pbar + pbar / prof["beats_per_bar"])
+            if got is None:
+                entry["notes"].append("the reference stem does not reach these bars")
+                continue
+            ref_x, ref_start = got
+            ref_pre = r0 - ref_start
+            profs, errs = {}, []
             try:
-                profs[side] = oneshot.profile_array(_slice(x, rate, start, start + n * (bar_s if side == "ours" else pbar)),
-                                                    rate, hit="clean")
+                profs["reference"] = oneshot.profile_array(ref_x, rrate, hit="clean", within=(ref_pre, ref_pre + n * pbar))
             except ValueError as e:
-                entry["notes"].append("%s: %s" % (side, e))
-        if len(profs) == 2:
-            entry["readings"] = oneshot.compare(profs["ours"], profs["the reference"])["readings"]
-            entry["ours_hit"], entry["reference_hit"] = profs["ours"]["hit"], profs["the reference"]["hit"]
+                errs.append("the reference: %s" % e)
+            a0 = max(0, int(round((t0 - bar_s / beats) * sr)))
+            a1 = min(len(audio[role][0]), int(round((t0 + n * bar_s + bar_s / beats) * sr)))
+            our_x, our_pre = _stereo(audio[role][0][a0:a1]), t0 - a0 / sr
+            near = None
+            if "reference" in profs:
+                pos = profs["reference"]["onset_ms"] / 1000.0 - ref_pre          # s into the section, reference time
+                near = our_pre + pos * bar_s / pbar
+            try:
+                profs["ours"] = oneshot.profile_array(our_x, sr, hit="clean", within=(our_pre, our_pre + n * bar_s),
+                                                      near=near)
+            except ValueError as e:
+                errs.append("ours: %s" % e)
+            entry["notes"] += errs
+            if len(profs) == 2:
+                at_ours = profs["ours"]["onset_ms"] / 1000.0 - our_pre
+                if abs(profs["ours"]["onset_ms"] / 1000.0 - near) > oneshot.NEAR_S:
+                    entry["notes"].append("the hits are not at the same place: the reference's is %.0f ms into the "
+                                          "section, ours %.0f ms" % (pos * 1000, at_ours * 1000))
+                entry["readings"] = oneshot.compare(profs["ours"], profs["reference"])["readings"]
+                entry["ours_hit"], entry["reference_hit"] = profs["ours"]["hit"], profs["reference"]["hit"]
+                entry["ours_at_ms"], entry["reference_at_ms"] = round(at_ours * 1000, 1), round(pos * 1000, 1)
+        except Exception as e:                    # one role failing must not take the report down
+            entry["readings"] = []
+            entry["notes"].append("failed: %s: %s" % (type(e).__name__, e))
     return {"roles": out}
 
 
@@ -1025,10 +1125,14 @@ def mix_report(manifest: dict | str | pathlib.Path,
     width within 0.01), is flagged ("the capture is the reference: check solos"). Without a `kick` source (or kick stem) the table is left
     out with a note; the mix layer still reports.
     `drums`: for each of DRUM_ROLES in both the manifest's sources and the profile's
-    stems, the `oneshot.compare` readings between the clean hit of our audio and of the
-    reference stem over the section (the stems are read again from the profile's paths;
-    a role whose stem changed since the profile is skipped, with a note); a side with
-    no clean hit gives a note and no readings. `reference_stale` lists profile inputs
+    stems and present on both sides in the paired bars, the `oneshot.compare` readings
+    between a typical clean hit of ours and of the reference stem. Each side is cut
+    with a beat of pre-roll and post-roll; only hits that start inside the section
+    count; the reference's hit is picked first and ours is the one at the same place
+    (within 30 ms) when there is one. The reference stems are read again from the
+    profile's paths, only the span needed; a role whose stem changed since the profile
+    is skipped, with a note; a side with no clean hit gives a note and no readings.
+    `reference_stale` lists profile inputs
     that changed since it was built."""
     import json
     m, mpath = _load_manifest(manifest)
@@ -1052,7 +1156,7 @@ def mix_report(manifest: dict | str | pathlib.Path,
                              % (role, have, last, end_s))
     prof = _load_profile(reference)
     stale = profile_stale(prof) if prof is not None else []
-    stale_roles, ref_cache = {x["role"] for x in stale}, {}
+    stale_roles = {x["role"] for x in stale}
     ref = analyze(reference) if reference and prof is None else None
     kick_role = "kick" if "kick" in audio else ("drums" if "drums" in audio else None)
     rows = []
@@ -1080,7 +1184,8 @@ def mix_report(manifest: dict | str | pathlib.Path,
             else:
                 row["vs_reference"], row["elements"] = _element_layer(prof, psec, fb, pnotes, sec, a, audio,
                                                                       sr, t0, bar_s)
-                row["drums"] = _drum_layer(prof, psec, fb, sec, audio, sr, t0, bar_s, stale_roles, ref_cache)
+                row["drums"] = _drum_layer(prof, psec, fb, sec, audio, sr, t0, bar_s,
+                                           float(m.get("beats_per_bar", 4)), stale_roles, row["elements"]["presence"])
         if kick_role and "bass" in audio:
             mk = masking(_slice(audio[kick_role][0], sr, t0, t1), _slice(audio["bass"][0], sr, t0, t1), sr)
             row["kick_bass_overlap"] = mk and mk["overlap"]
@@ -1136,7 +1241,8 @@ def _elements_markdown(r: dict) -> list:
         if e["table"] is not None:
             lines += ["| Element | Reference | Ours | Diff | Width (ref / ours) |", "|---|---|---|---|---|"]
             lines += ["| %s | %s | %s | %s | %s / %s |" % (
-                t["role"], _fmt(t["reference_db"]), _fmt(t["ours_db"]), "%+.1f" % t["difference_db"],
+                t["role"] + ("" if not t["trace_side"] else " (trace in %s)" % t["trace_side"]),
+                _fmt(t["reference_db"]), _fmt(t["ours_db"]), "%+.1f" % t["difference_db"],
                 _fmt(t["reference_width"], 2), _fmt(t["ours_width"], 2)) for t in e["table"]]
             lines.append("")
             lines.append("Gaps, largest first: " + ("; ".join("%s %+.1f dB" % (g["role"], g["difference_db"])
@@ -1145,8 +1251,11 @@ def _elements_markdown(r: dict) -> list:
                 "%s %s -> %s" % (g["role"], _fmt(g["reference"], 2), _fmt(g["ours"], 2)) for g in e["width_gaps"])
                 or "none") + ".")
         if e["traces"]:
-            lines.append("Traces (%g to %g dB under the mix, never a gap): " % (TRACE_DB, ABSENT_DB) + "; ".join(
-                "%s (reference %s, ours %s)" % (t["role"], t["reference"], t["ours"]) for t in e["traces"]) + ".")
+            lines.append("Traces (%g to %g dB under the elements, and not present on the other side: never a gap): "
+                         % (TRACE_DB, ABSENT_DB) + "; ".join(
+                "%s (reference %s%s, ours %s%s)" % (
+                    t["role"], t["reference"], "" if t["reference_db"] is None else " %.1f dB" % t["reference_db"],
+                    t["ours"], "" if t["ours_db"] is None else " %.1f dB" % t["ours_db"]) for t in e["traces"]) + ".")
         for key, label in (("reference_only", "In the reference only"), ("ours_only", "In ours only")):
             if e[key]:
                 lines.append("%s: " % label + "; ".join(
