@@ -505,8 +505,8 @@ def change_rate(x: np.ndarray, sr: int, bar_s: float, offset_s: float, first_bar
 # a gain the stems and the mix share.
 
 PROFILE_KIND = "reference_profile"
-PROFILE_VERSION = 2        # 2: edge guard, median presence, `trace` on a role's entry
-ABSENT_DB = 60.0           # a role whose median bar is this far under the mix (or silent) is absent, not -120 dB
+PROFILE_VERSION = 3        # 3: edge guard, quarter-of-the-bars presence, `trace` on a role's entry
+ABSENT_DB = 60.0           # a role with under a quarter of its bars within this of the mix is absent, not -120 dB
 TRACE_DB = 40.0            # ...and between this and ABSENT_DB under the mix it is a trace: listed, never a gap
 EDGE_GUARD_S = 0.010       # a section's, and a bar's, first and last 10 ms are left out of a role's level:
                            # a note starting just before the grid line must not read into the section before
@@ -539,13 +539,17 @@ def _bar_levels(x: np.ndarray, sr: int, t0: float, bar_s: float, first_bar: int,
 
 
 def _presence(per_bar: list, mix_level: float | None) -> str:
-    """"present", "trace" or "absent" from the median per-bar level against the mix's level:
-    absent when silent or ABSENT_DB under it, a trace when TRACE_DB under it. The median, not the
-    whole-section level, so a part sounding in a few bars' worth of leakage does not read as there."""
-    med = float(np.median([FLOOR_DB if v is None else v for v in per_bar])) if per_bar else FLOOR_DB
-    if mix_level is None or med <= FLOOR_DB or med < mix_level - ABSENT_DB:
+    """"present", "trace" or "absent" from the per-bar levels against the mix's level. Present
+    when at least a quarter of the bars (and one) are within TRACE_DB of the mix; otherwise a trace
+    when at least a quarter are within ABSENT_DB of it; otherwise absent. A phrase in a few bars
+    counts, a stray few milliseconds at the section's edge (the guard leaves them out) does not."""
+    if mix_level is None or not per_bar:
         return "absent"
-    return "trace" if med < mix_level - TRACE_DB else "present"
+    need = max(1.0, len(per_bar) / 4.0)
+    within = lambda db: sum(v is not None and v >= mix_level - db for v in per_bar)   # noqa: E731
+    if within(TRACE_DB) >= need:
+        return "present"
+    return "trace" if within(ABSENT_DB) >= need else "absent"
 
 
 def _bands_width(x: np.ndarray, sr: int) -> tuple[dict, float | None]:
@@ -591,9 +595,9 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
     Per section: the mix's level (mean power, dBFS), integrated LUFS, six bands,
     width and per-bar levels; and for each role its level, its level against the
     kick (`vs_kick_db`), per-bar levels, six bands and width. A role that is
-    silent, or whose median bar is more than ABSENT_DB under the mix, in a section
-    is {"absent": true} there with no numbers; between TRACE_DB and ABSENT_DB under
-    it the entry carries "trace": true. A section's and a bar's first and last
+    silent, or with under a quarter of its bars (and one) within ABSENT_DB of the mix, in
+    a section is {"absent": true} there with no numbers; with a quarter within ABSENT_DB
+    but not within TRACE_DB of it the entry carries "trace": true. A section's and a bar's first and last
     EDGE_GUARD_S are left out of a role's level. Files must share one sample rate
     (refused otherwise); of different lengths they are trimmed to the shortest
     and `notes` says so.

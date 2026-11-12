@@ -855,13 +855,13 @@ def test_elements_kick_out_is_decided_for_both_sides_together(tmp_path):
 
 
 def edge_leak_files(tmp_path):
-    """kick all through; a bass that starts 2 ms before the line between bar 8 and bar 9 (A | B) and
-    plays on at -6 dB against the kick, so section A holds only its first 2 ms."""
+    """kick all through; a bass that starts 5 ms before the line between bar 8 and bar 9 (A | B) and
+    plays on at -6 dB against the kick, so section A holds only the last 5 ms of it."""
     d = tmp_path / "leak"
     d.mkdir()
     kick = level_sine(ROLE_HZ["kick"], [0.0] * 24)
     t = np.arange(len(kick)) / SR
-    start = int((T0 + 16.0 - 0.002) * SR)
+    start = int((T0 + 16.0 - 0.005) * SR)
     bass = np.where(np.arange(len(kick)) >= start, KICK_AMP * gain(-6.0) * np.sin(2 * np.pi * 110 * t), 0.0)
     return {"kick": write(d, "kick.wav", stereo(kick)), "bass": write(d, "bass.wav", stereo(bass)),
             "mix": write(d, "mix.wav", stereo(kick + bass))}
@@ -874,8 +874,6 @@ def test_profile_a_note_starting_just_before_the_section_edge_is_not_in_the_sect
     assert p["sections"][0]["roles"]["bass"] == {"absent": True}, p["sections"][0]["roles"]["bass"]
     b = p["sections"][1]["roles"]["bass"]
     assert not b["absent"] and not b["trace"] and abs(b["vs_kick_db"] - (-6.0)) <= 0.1
-    # in A the 2 ms would be 10*log10(0.002 / 16) = 39 dB under the bass's own level: without the guard
-    # the bass would sit at about -56 dBFS, 40 dB under the mix, and not read as absent from the level alone
 
 
 def test_profile_presence_has_three_levels_and_the_60_db_branch(tmp_path):
@@ -1088,3 +1086,20 @@ def test_mix_report_output_is_unchanged_without_a_profile(tmp_path, name, with_r
     _close(json.loads(pathlib.Path(r["json_path"]).read_text()), want)
     assert _numbers_masked(pathlib.Path(r["md_path"]).read_text()) == _numbers_masked((GOLDEN / (name + ".md")).read_text())
     assert "elements" not in json.dumps(want) and "reference_kind" not in want
+
+
+def test_profile_a_phrase_in_four_of_eight_bars_is_present_and_one_bar_in_eight_is_not_enough(tmp_path):
+    d = tmp_path / "ph"
+    d.mkdir()
+    sig = {"kick": level_sine(50, [0.0] * 8),
+           "phrase": level_sine(1500, [-6.0 if i in (0, 1, 5, 6) else None for i in range(8)]),     # 4 of 8 bars
+           "pair": level_sine(3000, [-6.0 if i in (2, 5) else None for i in range(8)]),             # 2 of 8: a quarter
+           "stray": level_sine(110, [-6.0 if i == 3 else None for i in range(8)]),                  # 1 of 8
+           "quiet_phrase": level_sine(200, [-50.0 if i < 4 else None for i in range(8)])}           # 4 bars, trace zone
+    paths = {k: write(d, k + ".wav", stereo(v)) for k, v in sig.items()}
+    mix = write(d, "mix.wav", stereo(sum(sig.values())))
+    r = listen.reference_profile(mix, paths, TEMPO, T0, SECTIONS[:1])["sections"][0]["roles"]
+    assert not r["phrase"]["absent"] and not r["phrase"]["trace"]
+    assert not r["pair"]["absent"] and not r["pair"]["trace"]                 # exactly a quarter of the bars
+    assert r["stray"] == {"absent": True}                                     # one bar in eight is under a quarter
+    assert not r["quiet_phrase"]["absent"] and r["quiet_phrase"]["trace"]      # -50 dB: a quarter within 60, none within 40

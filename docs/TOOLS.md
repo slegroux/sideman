@@ -563,9 +563,10 @@ of different lengths they are trimmed to the shortest, and `notes` says so.
 
 Per section: the mix's level (mean power, dBFS), integrated LUFS, six
 bands, width and per-bar levels; for each role its level, `vs_kick_db`,
-per-bar levels, bands and width. A role silent in a section, or whose median
-bar is more than 60 dB under the mix, is absent there (not -120 dB); between
-40 and 60 dB under the mix it is a trace (listed, never a gap in mix_report).
+per-bar levels, bands and width. A role is present in a section when at least
+a quarter of its bars (and one) are within 40 dB of the mix, a trace when a
+quarter are within 60 dB (listed, never a gap in mix_report), else absent
+there (not -120 dB).
 A section's and a bar's first and last 10 ms are left out of a role's level.
 
 Writes <mix name>.profile.json next to the mix (`out`: a .json path or a
