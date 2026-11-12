@@ -1,0 +1,128 @@
+{
+  "manifest": null,
+  "reference": "/var/folders/b5/v9y3kpzs29g41d99xvrdp3yr0000gn/T/tmpws0_n2ux/ref.wav",
+  "tempo": 120.0,
+  "sections": [
+    {
+      "name": "A",
+      "start_bar": 0,
+      "bars": 4,
+      "integrated_lufs": -12.19,
+      "short_term_max_lufs": -12.2,
+      "true_peak_dbtp": -1.0,
+      "crest_db": 11.02,
+      "width": 0.127,
+      "low_end_correlation": 1.0,
+      "centroid_hz": 554.7,
+      "bands_db": {
+        "sub": -14.33,
+        "bass": -16.82,
+        "low_mid": -45.45,
+        "mid": -38.05,
+        "high_mid": -33.84,
+        "high": -28.37
+      },
+      "side_minus_mid_db": {
+        "sub": -42.19,
+        "bass": -33.31,
+        "low_mid": -0.82,
+        "mid": -0.05,
+        "high_mid": 0.04,
+        "high": -0.0
+      },
+      "vs_reference": {
+        "band_balance_db": {
+          "sub": 0.03,
+          "bass": 0.01,
+          "low_mid": 0.02,
+          "mid": -0.02,
+          "high_mid": -0.03,
+          "high": -0.01
+        },
+        "flagged_bands": [],
+        "lufs_diff": 3.11
+      },
+      "kick_bass_overlap": 0.011,
+      "kick_bass_quieter_db": -2.2,
+      "masking_flag": false
+    },
+    {
+      "name": "B",
+      "start_bar": 4,
+      "bars": 8,
+      "integrated_lufs": -12.19,
+      "short_term_max_lufs": -12.19,
+      "true_peak_dbtp": -0.94,
+      "crest_db": 11.28,
+      "width": 0.127,
+      "low_end_correlation": 1.0,
+      "centroid_hz": 559.3,
+      "bands_db": {
+        "sub": -14.38,
+        "bass": -16.83,
+        "low_mid": -45.47,
+        "mid": -38.02,
+        "high_mid": -33.81,
+        "high": -28.38
+      },
+      "side_minus_mid_db": {
+        "sub": -42.29,
+        "bass": -33.29,
+        "low_mid": -0.75,
+        "mid": -0.02,
+        "high_mid": 0.01,
+        "high": 0.0
+      },
+      "vs_reference": {
+        "band_balance_db": {
+          "sub": -0.03,
+          "bass": -0.0,
+          "low_mid": 0.0,
+          "mid": 0.0,
+          "high_mid": 0.0,
+          "high": -0.02
+        },
+        "flagged_bands": [],
+        "lufs_diff": 3.11
+      },
+      "kick_bass_overlap": 0.011,
+      "kick_bass_quieter_db": -2.2,
+      "masking_flag": false
+    }
+  ],
+  "change_rate": {
+    "block_bars": 4,
+    "steps": [
+      {
+        "at_bar": 4,
+        "change_db": 0.06,
+        "silent": false
+      },
+      {
+        "at_bar": 8,
+        "change_db": 0.06,
+        "silent": false
+      }
+    ],
+    "static_runs": [
+      {
+        "start_bar": 0,
+        "end_bar": 12,
+        "bars": 12,
+        "sections": [
+          "A",
+          "B"
+        ]
+      }
+    ]
+  },
+  "whole": {
+    "true_peak_dbtp": -0.94,
+    "crest_db": 11.28,
+    "width": 0.127,
+    "integrated_lufs": -12.2,
+    "short_term_max_lufs": -12.19
+  },
+  "json_path": "/var/folders/b5/v9y3kpzs29g41d99xvrdp3yr0000gn/T/tmpws0_n2ux/audio_reference/mix_report.json",
+  "md_path": "/var/folders/b5/v9y3kpzs29g41d99xvrdp3yr0000gn/T/tmpws0_n2ux/audio_reference/mix_report.md"
+}

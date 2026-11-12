@@ -345,7 +345,8 @@ def _check_sections(sections: list) -> None:
 def _load_manifest(manifest: dict | str | pathlib.Path) -> tuple[dict, pathlib.Path | None]:
     """The manifest as a dict, with every source resolved to an existing
     absolute path (relative paths are taken from the manifest's folder) and
-    tempo, sections and bar numbers checked. Raises ValueError saying what is wrong."""
+    tempo, sections and bar numbers checked. A source may be a list of files, summed into
+    one role. Raises ValueError saying what is wrong."""
     import json
     mpath = None
     if isinstance(manifest, dict):
@@ -370,8 +371,7 @@ def _load_manifest(manifest: dict | str | pathlib.Path) -> tuple[dict, pathlib.P
         raise ValueError("manifest has no sections")
     _check_sections(m["sections"])
     base = mpath.parent if mpath else None
-    srcs = {}
-    for role, path in m["sources"].items():
+    def resolve(role: str, path) -> str:
         p = pathlib.Path(path).expanduser()
         if not p.is_absolute() and mpath is None:
             raise ValueError("source %r: %s is relative; a manifest given inline needs absolute paths"
@@ -379,9 +379,33 @@ def _load_manifest(manifest: dict | str | pathlib.Path) -> tuple[dict, pathlib.P
         p = (p if p.is_absolute() else base / p).resolve()
         if not p.is_file():
             raise ValueError("source %r: no such audio file: %s" % (role, p))
-        srcs[role] = str(p)
+        return str(p)
+
+    srcs = {}
+    for role, path in m["sources"].items():
+        if isinstance(path, (list, tuple)):         # several files summed into one role (a rig's two bass taps)
+            if not path:
+                raise ValueError("source %r has no files" % role)
+            srcs[role] = [resolve(role, q) for q in path]
+        else:
+            srcs[role] = resolve(role, path)
     m["sources"] = srcs
     return m, mpath
+
+
+def _load_source(path: str | list) -> tuple[np.ndarray, int]:
+    """(samples, rate) of a manifest source: one file, or several summed (same rate, cut to the
+    shortest)."""
+    if isinstance(path, str):
+        return load(path)
+    loaded = [load(p) for p in path]
+    rates = {r for _, r in loaded}
+    if len(rates) > 1:
+        raise ValueError("files of one source differ in sample rate: %s" % ", ".join(
+            "%s %d Hz" % (pathlib.Path(p).name, r) for p, (_, r) in zip(path, loaded)))
+    n = min(len(x) for x, _ in loaded)
+    mono = all(x.shape[1] == 1 for x, _ in loaded)
+    return sum((x if mono else _stereo(x))[:n] for x, _ in loaded), rates.pop()
 
 
 def _bar_seconds(m: dict) -> float:
@@ -481,10 +505,15 @@ def change_rate(x: np.ndarray, sr: int, bar_s: float, offset_s: float, first_bar
 # a gain the stems and the mix share.
 
 PROFILE_KIND = "reference_profile"
-ABSENT_DB = 60.0           # a role this far under the mix (or exactly silent) is absent, not -120 dB
+PROFILE_VERSION = 2        # 2: edge guard, median presence, `trace` on a role's entry
+ABSENT_DB = 60.0           # a role whose median bar is this far under the mix (or silent) is absent, not -120 dB
+TRACE_DB = 40.0            # ...and between this and ABSENT_DB under the mix it is a trace: listed, never a gap
+EDGE_GUARD_S = 0.010       # a section's, and a bar's, first and last 10 ms are left out of a role's level:
+                           # a note starting just before the grid line must not read into the section before
 ELEMENT_GAP_DB = 1.0       # an element's ratio to the kick differing by more than this is a gap
-CAPTURE_IS_REF_DB = 0.05   # a master capture within this level...
-CAPTURE_IS_REF_WIDTH = 1e-3  # ...and this width of the reference mix is the reference itself
+CAPTURE_IS_REF_DB = 0.3    # a master capture is the reference when, with the level offset removed,
+CAPTURE_IS_REF_WIDTH = 0.01  # its per-bar curve and bands agree within this and its width within this
+STALE_MTIME_S = 2.0        # an input whose mtime moved by less than this (a cloud re-sync) is not changed
 KICK_OUT_DB = 30.0         # the kick is out where it sits this far under the loudest other role
 DRUM_ROLES = ("kick", "toms", "snare", "hh", "clap", "rim")   # roles the drum layer reads
 
@@ -494,13 +523,29 @@ def _level_db(x: np.ndarray) -> float:
     return _db_amp(_peak_rms(x)[1])
 
 
+def _guard(t0: float, t1: float) -> tuple[float, float]:
+    """(t0, t1) without EDGE_GUARD_S at each end (unless that would leave almost nothing)."""
+    return (t0 + EDGE_GUARD_S, t1 - EDGE_GUARD_S) if t1 - t0 > 4 * EDGE_GUARD_S else (t0, t1)
+
+
 def _bar_levels(x: np.ndarray, sr: int, t0: float, bar_s: float, first_bar: int, n: int) -> list:
-    """Level in dBFS of each of `n` bars from `first_bar` (bar 0 at t0 s); None for a silent bar."""
+    """Level in dBFS of each of `n` bars from `first_bar` (bar 0 at t0 s), edges guarded;
+    None for a silent bar."""
     out = []
     for i in range(n):
-        lv = _level_db(_slice(x, sr, t0 + (first_bar + i) * bar_s, t0 + (first_bar + i + 1) * bar_s))
+        lv = _level_db(_slice(x, sr, *_guard(t0 + (first_bar + i) * bar_s, t0 + (first_bar + i + 1) * bar_s)))
         out.append(None if lv <= FLOOR_DB else round(lv, 2))
     return out
+
+
+def _presence(per_bar: list, mix_level: float | None) -> str:
+    """"present", "trace" or "absent" from the median per-bar level against the mix's level:
+    absent when silent or ABSENT_DB under it, a trace when TRACE_DB under it. The median, not the
+    whole-section level, so a part sounding in a few bars' worth of leakage does not read as there."""
+    med = float(np.median([FLOOR_DB if v is None else v for v in per_bar])) if per_bar else FLOOR_DB
+    if mix_level is None or med <= FLOOR_DB or med < mix_level - ABSENT_DB:
+        return "absent"
+    return "trace" if med < mix_level - TRACE_DB else "present"
 
 
 def _bands_width(x: np.ndarray, sr: int) -> tuple[dict, float | None]:
@@ -546,8 +591,10 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
     Per section: the mix's level (mean power, dBFS), integrated LUFS, six bands,
     width and per-bar levels; and for each role its level, its level against the
     kick (`vs_kick_db`), per-bar levels, six bands and width. A role that is
-    silent, or more than ABSENT_DB under the mix, in a section is
-    {"absent": true} there with no numbers. Files must share one sample rate
+    silent, or whose median bar is more than ABSENT_DB under the mix, in a section
+    is {"absent": true} there with no numbers; between TRACE_DB and ABSENT_DB under
+    it the entry carries "trace": true. A section's and a bar's first and last
+    EDGE_GUARD_S are left out of a role's level. Files must share one sample rate
     (refused otherwise); of different lengths they are trimmed to the shortest
     and `notes` says so.
 
@@ -560,8 +607,8 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
         raise ValueError("tempo must be a number above 0, got %r" % (tempo,))
     if not isinstance(t0, (int, float)) or not math.isfinite(t0) or t0 < 0:
         raise ValueError("t0 must be a number of seconds >= 0, got %r" % (t0,))
-    if not isinstance(beats_per_bar, (int, float)) or beats_per_bar <= 0:
-        raise ValueError("beats_per_bar must be above 0")
+    if not isinstance(beats_per_bar, (int, float)) or not math.isfinite(beats_per_bar) or beats_per_bar <= 0:
+        raise ValueError("beats_per_bar must be a number above 0")
     if not sections:
         raise ValueError("no sections")
     _check_sections(sections)
@@ -629,16 +676,17 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
             y = z.copy() if y is None else y + z
         role_rows[role], raw[role] = [], []
         for sec, mlv in zip(sections, mix_levels):
-            seg = _slice(y, sr, *span(sec))
-            lv = _level_db(seg)
-            if lv <= FLOOR_DB or lv < mlv - ABSENT_DB:
+            seg = _slice(y, sr, *_guard(*span(sec)))
+            per_bar = _bar_levels(y, sr, t0, bar_s, sec["start_bar"], sec["bars"])
+            kind = _presence(per_bar, mlv)
+            if kind == "absent":
                 role_rows[role].append({"absent": True})
                 raw[role].append(None)
                 continue
+            lv = _level_db(seg)
             bands, width = _bands_width(seg, sr)
-            role_rows[role].append({"absent": False, "level_db": round(lv, 2), "vs_kick_db": None,
-                                    "per_bar_db": _bar_levels(y, sr, t0, bar_s, sec["start_bar"], sec["bars"]),
-                                    "bands_db": bands, "width": width})
+            role_rows[role].append({"absent": False, "trace": kind == "trace", "level_db": round(lv, 2),
+                                    "vs_kick_db": None, "per_bar_db": per_bar, "bands_db": bands, "width": width})
             raw[role].append(lv)
     if "kick" in files:
         for i in range(len(sections)):
@@ -646,14 +694,14 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
                 if raw[role][i] is not None and raw["kick"][i] is not None:
                     role_rows[role][i]["vs_kick_db"] = round(raw[role][i] - raw["kick"][i], 2)
     profile = {
-        "kind": PROFILE_KIND, "version": 1, "mix": str(mixp), "tempo": tempo,
+        "kind": PROFILE_KIND, "version": PROFILE_VERSION, "mix": str(mixp), "tempo": tempo,
         "beats_per_bar": beats_per_bar, "t0": t0, "sample_rate": sr, "notes": notes,
         "inputs": {"mix": [_input(mixp)], "stems": {r: [_input(p) for p in ps] for r, ps in files.items()}},
         "sections": [{"name": nm, "start_bar": sec["start_bar"], "bars": sec["bars"], "mix": mix_rows[i],
                       "roles": {role: role_rows[role][i] for role in files}}
                      for i, (nm, sec) in enumerate(zip(names, sections))]}
     dest = pathlib.Path(out).expanduser() if out else mixp.parent
-    if dest.is_dir() or not str(dest).endswith(".json"):
+    if dest.is_dir() or not str(dest).lower().endswith(".json"):
         dest = dest / (mixp.stem + ".profile.json")
     dest.parent.mkdir(parents=True, exist_ok=True)
     profile["json_path"] = str(dest.resolve())
@@ -663,8 +711,9 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
 
 def profile_stale(profile: dict) -> list:
     """The inputs of a reference profile that have changed since it was built, as
-    {"role", "path", "reason"} ("changed": mtime or size differs; "missing"). Empty when
-    the profile still matches its files."""
+    {"role", "path", "reason"} ("changed": size differs or mtime moved by more than
+    STALE_MTIME_S, so a cloud re-sync that touches mtimes is not a change; "missing").
+    Empty when the profile still matches its files."""
     out = []
     groups = [("mix", profile["inputs"]["mix"])] + list(profile["inputs"]["stems"].items())
     for role, items in groups:
@@ -674,27 +723,69 @@ def profile_stale(profile: dict) -> list:
                 out.append({"role": role, "path": it["path"], "reason": "missing"})
                 continue
             st = p.stat()
-            if st.st_mtime != it["mtime"] or st.st_size != it["size"]:
+            if st.st_size != it["size"] or abs(st.st_mtime - it["mtime"]) > STALE_MTIME_S:
                 out.append({"role": role, "path": it["path"], "reason": "changed"})
     return out
 
 
+def _check_profile(prof: dict) -> None:
+    """Raise ValueError (saying to rebuild) unless `prof` has the shape reference_profile writes."""
+    if not isinstance(prof, dict) or prof.get("kind") != PROFILE_KIND:
+        raise ValueError("not a reference profile (build one with reference_profile)")
+    if prof.get("version") != PROFILE_VERSION:
+        raise ValueError("reference profile version %r, this Sideman reads version %d: rebuild it with "
+                         "reference_profile" % (prof.get("version"), PROFILE_VERSION))
+
+    def need(ok: bool) -> None:
+        if not ok:
+            raise KeyError
+
+    def num(v) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    try:
+        for key in ("tempo", "beats_per_bar", "t0", "sample_rate"):
+            need(num(prof[key]))
+        for items in [prof["inputs"]["mix"], *prof["inputs"]["stems"].values()]:
+            need(isinstance(items, list))
+            for it in items:
+                need(isinstance(it["path"], str) and num(it["mtime"]) and num(it["size"]))
+        need(isinstance(prof["sections"], list) and len(prof["sections"]) > 0)
+        for sec in prof["sections"]:
+            n = sec["bars"]
+            need(isinstance(sec["name"], str) and isinstance(sec["start_bar"], int) and isinstance(n, int) and n >= 1)
+            m = sec["mix"]
+            need(num(m["level_db"]) and len(m["per_bar_db"]) == n and "width" in m and "integrated_lufs" in m)
+            need(all(num(m["bands_db"][name]) for name, _, _ in BANDS))
+            need(isinstance(sec["roles"], dict))
+            for e in sec["roles"].values():
+                need(isinstance(e["absent"], bool))
+                if not e["absent"]:
+                    need(isinstance(e["trace"], bool) and num(e["level_db"]) and len(e["per_bar_db"]) == n)
+                    need(all(name in e["bands_db"] for name, _, _ in BANDS))
+    except (KeyError, TypeError, AttributeError, IndexError):
+        raise ValueError("the reference profile is incomplete or malformed: rebuild it with reference_profile")
+
+
 def _load_profile(reference) -> dict | None:
-    """The reference as a profile dict when it is one (a dict, or a path to a .json file);
-    None for an audio file path or no reference."""
+    """The reference as a validated profile dict when it is one (a dict, JSON text, or the path of
+    a .json file); None for an audio file path or no reference. Raises ValueError for a profile
+    that is not the current shape."""
     import json
     if isinstance(reference, dict):
         prof = reference
+    elif isinstance(reference, str) and reference.lstrip().startswith("{"):
+        prof = json.loads(reference)
     elif isinstance(reference, (str, pathlib.Path)) and str(reference).lower().endswith(".json"):
         p = pathlib.Path(reference).expanduser()
         if not p.is_file():
             raise ValueError("no such profile: %s" % p)
         prof = json.loads(p.read_text())
-        prof.setdefault("json_path", str(p.resolve()))
+        if isinstance(prof, dict):
+            prof["json_path"] = str(p.resolve())            # where it was read, not where it was built
     else:
         return None
-    if prof.get("kind") != PROFILE_KIND or "sections" not in prof or "inputs" not in prof:
-        raise ValueError("not a reference profile (build one with reference_profile)")
+    _check_profile(prof)
     return prof
 
 
@@ -716,7 +807,8 @@ def _pair(prof: dict, sec: dict, name: str) -> tuple[dict | None, int, list]:
     pname, fb = ref.get("section", name), ref.get("from_bar", 0)
     psec = next((s for s in prof["sections"] if s["name"] == pname), None)
     if psec is None:
-        return None, 0, ["no section named %r in the profile: mix layer only" % pname]
+        return None, 0, ["no section named %r in the profile (it has: %s): mix layer only"
+                         % (pname, ", ".join(x["name"] for x in prof["sections"]))]
     if fb + sec["bars"] > psec["bars"]:
         return None, 0, ["section %r is %d bars here; from bar %d of the profile's %r (%d bars) only %d fit: "
                          "mix layer only" % (name, sec["bars"], fb + 1, pname, psec["bars"],
@@ -729,12 +821,30 @@ def _pair(prof: dict, sec: dict, name: str) -> tuple[dict | None, int, list]:
     return psec, fb, notes
 
 
+def _same_shape(a: dict, pm: dict, ours_bars: list, ref_bars: list) -> bool:
+    """Whether the capture's master is the reference mix, level aside: width within
+    CAPTURE_IS_REF_WIDTH, and after subtracting the median difference, the per-bar levels and the
+    bands (those within ABSENT_DB of the loudest band on both sides) within CAPTURE_IS_REF_DB. A fader a few tenths off
+    still matches; one element 15 dB louder moves its band and does not."""
+    if a["width"] is None or pm["width"] is None or abs(a["width"] - pm["width"]) > CAPTURE_IS_REF_WIDTH:
+        return False
+    bars = [o - r for o, r in zip(ours_bars, ref_bars) if o is not None and r is not None]
+    top = (max(a["bands_db"].values()) - ABSENT_DB, max(pm["bands_db"].values()) - ABSENT_DB)
+    bands = [a["bands_db"][n] - pm["bands_db"][n] for n, _, _ in BANDS      # bands 60 dB under the loudest are
+             if a["bands_db"][n] > top[0] and pm["bands_db"][n] > top[1]]  # window leakage, not material
+    if not bars or not bands or len(ours_bars) != len(ref_bars):
+        return False
+    return all(max(abs(np.array(d) - float(np.median(d)))) <= CAPTURE_IS_REF_DB for d in (bars, bands))
+
+
 def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: dict, audio: dict, sr: int,
                    t0: float, bar_s: float) -> tuple[dict, dict]:
     """(vs_reference, elements) for one manifest section paired with `psec` of the profile
     (starting `fb` bars in). Levels are ratios to the kick, or, where the kick is out on either
     side (absent, or KICK_OUT_DB under the loudest other role), to the loudest role present on
-    both sides: `yardstick` says which."""
+    both sides, the same one for both: `yardstick` says which. A role that is only a trace
+    (TRACE_DB to ABSENT_DB under the mix) on either side is listed in `traces`, never in `gaps`
+    or the one-side lists."""
     n = sec["bars"]
     partial = bool(fb) or n != psec["bars"]
     pm = psec["mix"]
@@ -743,32 +853,32 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
     vs = {"band_balance_db": c["band_balance_db"], "flagged_bands": [f["band"] for f in c["flagged_bands"]],
           "lufs_diff": c["diff"].get("integrated_lufs"), "width_diff": c["diff"].get("width")}
     notes = list(notes)
-    is_ref = (not partial and a["width"] is not None and pm["width"] is not None
-              and abs(a["rms_db"] - pm["level_db"]) <= CAPTURE_IS_REF_DB
-              and abs(a["width"] - pm["width"]) <= CAPTURE_IS_REF_WIDTH)
+    master_bars = _bar_levels(_stereo(_slice(audio["master"][0], sr, t0, t0 + n * bar_s)), sr, 0.0, bar_s, 0, n)
+    is_ref = not partial and _same_shape(a, pm, master_bars, pm["per_bar_db"])
     if is_ref:
         notes.append("the capture is the reference: check solos")
     rng = slice(fb, fb + n)
     mix_lv = _mean_db(pm["per_bar_db"][rng]) if partial else pm["level_db"]
 
-    def ref_level(role):
-        e = psec["roles"][role]
+    ref_lv, ref_kind = {}, {}
+    for role, e in psec["roles"].items():
+        if role == "master":
+            continue
         if e["absent"]:
-            return None
-        if not partial:
-            return e["level_db"]
-        lv = _mean_db(e["per_bar_db"][rng])
-        return None if lv is None or (mix_lv is not None and lv < mix_lv - ABSENT_DB) else lv
-
-    ref_lv = {r: ref_level(r) for r in psec["roles"] if r != "master"}
-    ours, ours_lv = {}, {}
+            ref_kind[role], ref_lv[role] = "absent", None
+        elif not partial:
+            ref_kind[role], ref_lv[role] = "trace" if e["trace"] else "present", e["level_db"]
+        else:
+            ref_kind[role] = _presence(e["per_bar_db"][rng], mix_lv)
+            ref_lv[role] = None if ref_kind[role] == "absent" else _mean_db(e["per_bar_db"][rng])
+    ours, ours_lv, ours_kind = {}, {}, {}
     for role in audio:
         if role == "master":                     # sits after the master chain: never ratioed against elements
             continue
         seg = _stereo(_slice(audio[role][0], sr, t0, t0 + n * bar_s))
-        lv = _level_db(seg)
-        ours_lv[role] = None if lv <= FLOOR_DB or lv < a["rms_db"] - ABSENT_DB else lv
         ours[role] = _bar_levels(seg, sr, 0.0, bar_s, 0, n)
+        ours_kind[role] = _presence(ours[role], a["rms_db"])
+        ours_lv[role] = None if ours_kind[role] == "absent" else _level_db(_slice(seg, sr, *_guard(0.0, n * bar_s)))
 
     def kick_out(lv):
         """Whether the kick is absent or far under the loudest other role in `lv`."""
@@ -783,21 +893,27 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
     elif not (kick_out(ref_lv) or kick_out(ours_lv)):
         yard = "kick"
     else:
-        kick_is_out = True
+        kick_is_out = True                        # decided for both sides together: one yardstick for both
         where = " and ".join(w for w, lv in (("the reference", ref_lv), ("ours", ours_lv)) if kick_out(lv))
-        both = sorted(r for r in ref_lv if r != "kick" and ref_lv[r] is not None and ours_lv.get(r) is not None)
+        both = sorted(r for r in ref_lv if r != "kick" and ref_kind[r] == "present" and ours_kind.get(r) == "present")
         if both:
             yard = max(both, key=lambda r: ref_lv[r])
             notes.append("the kick is out in %s (absent, or more than %g dB under the loudest other role): "
-                         "elements against the %s, the loudest role in both" % (where, KICK_OUT_DB, yard))
+                         "elements against the %s, the loudest role in both; the kick itself is not compared"
+                         % (where, KICK_OUT_DB, yard))
         else:
             notes.append("the kick is out in %s and no other element sounds in both: elements left out" % where)
-    table, ref_only, ours_only, arc, silent_both = [], [], [], {}, []
-    for role in sorted((set(ref_lv) | set(ours_lv)) - {yard}):
+    table, ref_only, ours_only, traces, arc, silent_both = [], [], [], [], {}, []
+    skip = {yard} | ({"kick"} if kick_is_out else set())
+    for role in sorted((set(ref_lv) | set(ours_lv)) - skip):
         r_lv, o_lv = ref_lv.get(role), ours_lv.get(role)
         r_ratio = round(r_lv - ref_lv[yard], 2) if yard and r_lv is not None else None
         o_ratio = round(o_lv - ours_lv[yard], 2) if yard and o_lv is not None else None
-        if r_lv is not None and o_lv is not None:
+        rk, ok = ref_kind.get(role), ours_kind.get(role)
+        if "trace" in (rk, ok):
+            traces.append({"role": role, "reference": rk or "not in the profile", "ours": ok or "not in the manifest",
+                           "reference_db": r_ratio, "ours_db": o_ratio})
+        elif rk == "present" and ok == "present":
             if yard:
                 table.append({"role": role, "reference_db": r_ratio, "ours_db": o_ratio,
                               "difference_db": round(o_ratio - r_ratio, 2)})
@@ -805,12 +921,12 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
                     arc[role] = {"reference": _arc(psec["roles"][role]["per_bar_db"][rng],
                                                    psec["roles"][yard]["per_bar_db"][rng]),
                                  "ours": _arc(ours[role], ours[yard])}
-        elif r_lv is not None:
+        elif rk == "present":
             ref_only.append({"role": role, "vs_yardstick_db": r_ratio,
-                             "reason": "not in the manifest" if role not in ours_lv else "silent in ours"})
-        elif o_lv is not None:
+                             "reason": "not in the manifest" if ok is None else "silent in ours"})
+        elif ok == "present":
             ours_only.append({"role": role, "vs_yardstick_db": o_ratio,
-                              "reason": "not in the profile" if role not in ref_lv else "silent in the reference"})
+                              "reason": "not in the profile" if rk is None else "silent in the reference"})
         else:
             silent_both.append(role)
     gaps = sorted(({"role": t["role"], "difference_db": t["difference_db"]} for t in table
@@ -819,7 +935,7 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
           "notes": notes, "capture_is_reference": bool(is_ref), "yardstick": yard,
           "kick_out": kick_is_out,
           "table": table if yard else None, "gaps": gaps if yard else [],
-          "reference_only": ref_only, "ours_only": ours_only, "silent_in_both": silent_both,
+          "reference_only": ref_only, "ours_only": ours_only, "traces": traces, "silent_in_both": silent_both,
           "arc": arc if yard else {}}
     return vs, el
 
@@ -902,7 +1018,7 @@ def mix_report(manifest: dict | str | pathlib.Path,
     m, mpath = _load_manifest(manifest)
     audio = {}
     for role, path in m["sources"].items():
-        audio[role] = load(path)
+        audio[role] = _load_source(path)
     sr = audio["master"][1]
     for role, (_, r) in audio.items():
         if r != sr:
@@ -940,6 +1056,9 @@ def mix_report(manifest: dict | str | pathlib.Path,
                                    "lufs_diff": c["diff"].get("integrated_lufs")}
         if prof is not None:
             psec, fb, pnotes = _pair(prof, sec, row["name"])
+            if abs(float(prof["tempo"]) - float(m["tempo"])) > 0.01:
+                pnotes = pnotes + ["tempo differs: the manifest says %g BPM, the profile %g: bars are compared "
+                                   "bar for bar, not second for second" % (m["tempo"], prof["tempo"])]
             if psec is None:
                 row["elements"] = {"paired": False, "notes": pnotes}
             else:
@@ -967,7 +1086,9 @@ def mix_report(manifest: dict | str | pathlib.Path,
     if prof is not None:
         report["reference_kind"] = "profile"
         report["reference_stale"] = stale
-    out = pathlib.Path(out_dir) if out_dir else pathlib.Path(m["sources"]["master"]).parent
+    master_src = m["sources"]["master"]
+    out = pathlib.Path(out_dir) if out_dir else pathlib.Path(
+        master_src if isinstance(master_src, str) else master_src[0]).parent
     out.mkdir(parents=True, exist_ok=True)
     jp, mdp = out / "mix_report.json", out / "mix_report.md"
     report["json_path"], report["md_path"] = str(jp), str(mdp)
@@ -1003,6 +1124,9 @@ def _elements_markdown(r: dict) -> list:
             lines.append("")
             lines.append("Gaps, largest first: " + ("; ".join("%s %+.1f dB" % (g["role"], g["difference_db"])
                                                              for g in e["gaps"]) or "none") + ".")
+        if e["traces"]:
+            lines.append("Traces (%g to %g dB under the mix, never a gap): " % (TRACE_DB, ABSENT_DB) + "; ".join(
+                "%s (reference %s, ours %s)" % (t["role"], t["reference"], t["ours"]) for t in e["traces"]) + ".")
         for key, label in (("reference_only", "In the reference only"), ("ours_only", "In ours only")):
             if e[key]:
                 lines.append("%s: " % label + "; ".join(
@@ -1044,11 +1168,13 @@ def _markdown(r: dict) -> str:
                                          _fmt(w["crest_db"]), _fmt(w["width"], 2)),
              ""]
     if r.get("reference_kind") == "profile":
-        lines += ["Reference profile: `%s`. Sections are paired with the profile's by name." % r["reference"], ""]
+        lines += ["Reference profile: `%s`. Sections are paired with the profile's by name; band balance "
+                  "is relative to the matching section after removing the overall level offset, and bands "
+                  "more than 3 dB away are listed." % r["reference"], ""]
         lines += ["- ⚠ %s `%s` %s since the profile was built" % (s["role"], s["path"], s["reason"])
                   for s in r["reference_stale"]]
         lines += [""] if r["reference_stale"] else []
-    if r["reference"]:
+    elif r["reference"]:
         lines += ["Reference: `%s`. Band balance is relative to it after removing the overall level "
                   "offset; bands more than 3 dB away are listed." % r["reference"], ""]
     head = ["Section", "Bars", "LUFS", "ST max", "TP", "Crest", "Width", "Low corr"]

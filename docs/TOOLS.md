@@ -507,8 +507,10 @@ audio file path the bands more than 3 dB off its balance; with kick and bass, th
 above 0.5 unless the quieter part is more than 20 dB down). Over the whole capture, the spectral change between 4-bar
 blocks, flagging runs of more than 8 bars where nothing changes.
 
-`reference` may instead be a reference profile (from reference_profile:
-the path of its .profile.json, or the profile itself). Sections then pair
+A source may be a list of files, summed into one role (a bass recorded on two
+tracks). `reference` may instead be a reference profile (from reference_profile:
+the path of its .profile.json, JSON text, or the profile itself; one made by
+another version is refused with "rebuild it with reference_profile"). Sections then pair
 BY NAME with the profile's; a manifest section may carry
 "reference": {"section": <profile section name>, "from_bar": N} (both
 optional) to pair with another section or start N bars into it. A shorter
@@ -519,12 +521,15 @@ the mix compared with the reference's section (bands, width, loudness) and:
 `elements`: every source in both the manifest and the profile as a ratio to
 the kick in dB (reference, ours, difference; negative = quieter than the
 kick), roles in the reference only / in ours only, the ratio per 4 bars, and
-`gaps` (ratios more than 1 dB apart, largest first). Where the kick is out
+`gaps` (ratios more than 1 dB apart, largest first); a role only 40 to 60 dB
+under the mix on either side is a `trace`, listed apart and never a gap.
+Where the kick is out
 on either side (absent, or 30 dB under the loudest other role) the
 `yardstick` is the loudest role in both ("Elements against the bass (kick
 out)"); with none the table is left out. The `master` source is never
 ratioed against the elements, since it sits after the master chain. If the
-master capture's level and width equal the reference mix's, the section says
+master capture is the reference mix (per-bar curve and bands within 0.3 dB
+after removing the level offset, width within 0.01), the section says
 "the capture is the reference: check solos". With no `kick` source the table
 is left out with a note and the mix layer still reports.
 `drums`: for each of kick, toms, snare, hh, clap, rim in both the manifest
@@ -558,13 +563,17 @@ of different lengths they are trimmed to the shortest, and `notes` says so.
 
 Per section: the mix's level (mean power, dBFS), integrated LUFS, six
 bands, width and per-bar levels; for each role its level, `vs_kick_db`,
-per-bar levels, bands and width. A role silent in a section (or more than
-60 dB under the mix) is {"absent": true} there, not -120 dB.
+per-bar levels, bands and width. A role silent in a section, or whose median
+bar is more than 60 dB under the mix, is absent there (not -120 dB); between
+40 and 60 dB under the mix it is a trace (listed, never a gap in mix_report).
+A section's and a bar's first and last 10 ms are left out of a role's level.
 
 Writes <mix name>.profile.json next to the mix (`out`: a .json path or a
-folder) and returns the profile, with each input's path, mtime and size
-under `inputs` (mix_report reports in `reference_stale` any that changed
-since). Local only; needs the `listen` extra.
+folder), which holds everything above plus each input's path, mtime and
+size (mix_report reports in `reference_stale` any that changed since). This
+tool returns a summary: `json_path` (pass it to mix_report as `reference`),
+tempo, t0, `notes`, and per section the roles present, trace and absent.
+Local only; needs the `listen` extra.
 
 ### `sample_analyze`
 

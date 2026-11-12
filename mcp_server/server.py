@@ -796,8 +796,10 @@ def mix_report(manifest: dict[str, Any] | str, reference: dict[str, Any] | str |
     above 0.5 unless the quieter part is more than 20 dB down). Over the whole capture, the spectral change between 4-bar
     blocks, flagging runs of more than 8 bars where nothing changes.
 
-    `reference` may instead be a reference profile (from reference_profile:
-    the path of its .profile.json, or the profile itself). Sections then pair
+    A source may be a list of files, summed into one role (a bass recorded on two
+    tracks). `reference` may instead be a reference profile (from reference_profile:
+    the path of its .profile.json, JSON text, or the profile itself; one made by
+    another version is refused with "rebuild it with reference_profile"). Sections then pair
     BY NAME with the profile's; a manifest section may carry
     "reference": {"section": <profile section name>, "from_bar": N} (both
     optional) to pair with another section or start N bars into it. A shorter
@@ -808,12 +810,15 @@ def mix_report(manifest: dict[str, Any] | str, reference: dict[str, Any] | str |
     `elements`: every source in both the manifest and the profile as a ratio to
     the kick in dB (reference, ours, difference; negative = quieter than the
     kick), roles in the reference only / in ours only, the ratio per 4 bars, and
-    `gaps` (ratios more than 1 dB apart, largest first). Where the kick is out
+    `gaps` (ratios more than 1 dB apart, largest first); a role only 40 to 60 dB
+    under the mix on either side is a `trace`, listed apart and never a gap.
+    Where the kick is out
     on either side (absent, or 30 dB under the loudest other role) the
     `yardstick` is the loudest role in both ("Elements against the bass (kick
     out)"); with none the table is left out. The `master` source is never
     ratioed against the elements, since it sits after the master chain. If the
-    master capture's level and width equal the reference mix's, the section says
+    master capture is the reference mix (per-bar curve and bands within 0.3 dB
+    after removing the level offset, width within 0.01), the section says
     "the capture is the reference: check solos". With no `kick` source the table
     is left out with a note and the mix layer still reports.
     `drums`: for each of kick, toms, snare, hh, clap, rim in both the manifest
@@ -828,7 +833,9 @@ def mix_report(manifest: dict[str, Any] | str, reference: dict[str, Any] | str |
     file) and returns the report. Local only; needs the `listen` extra.
     """
     listen = _listen()
-    if isinstance(reference, str) and reference.strip().lower().endswith(".json"):
+    if isinstance(reference, str) and reference.lstrip().startswith("{"):
+        ref = reference                                   # a profile as JSON text
+    elif isinstance(reference, str) and reference.strip().lower().endswith(".json"):
         ref = _file(reference, "profile")
     else:
         ref = reference if isinstance(reference, dict) else (_audio_file(reference) if reference else None)
@@ -836,7 +843,8 @@ def mix_report(manifest: dict[str, Any] | str, reference: dict[str, Any] | str |
         return json.dumps(listen.mix_report(manifest, ref, out_dir), indent=2)
     except MemoryError:
         raise LiveError("not enough memory for this capture; report fewer sections at a time")
-    except (OSError, RuntimeError, ValueError, KeyError, TypeError, ArithmeticError) as e:
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, AttributeError, IndexError,
+            ArithmeticError) as e:
         raise LiveError("cannot build the mix report: %s: %s" % (type(e).__name__, e))
 
 
@@ -858,24 +866,41 @@ def reference_profile(mix: str, stems: dict[str, str | list[str]], tempo: float,
 
     Per section: the mix's level (mean power, dBFS), integrated LUFS, six
     bands, width and per-bar levels; for each role its level, `vs_kick_db`,
-    per-bar levels, bands and width. A role silent in a section (or more than
-    60 dB under the mix) is {"absent": true} there, not -120 dB.
+    per-bar levels, bands and width. A role silent in a section, or whose median
+    bar is more than 60 dB under the mix, is absent there (not -120 dB); between
+    40 and 60 dB under the mix it is a trace (listed, never a gap in mix_report).
+    A section's and a bar's first and last 10 ms are left out of a role's level.
 
     Writes <mix name>.profile.json next to the mix (`out`: a .json path or a
-    folder) and returns the profile, with each input's path, mtime and size
-    under `inputs` (mix_report reports in `reference_stale` any that changed
-    since). Local only; needs the `listen` extra."""
+    folder), which holds everything above plus each input's path, mtime and
+    size (mix_report reports in `reference_stale` any that changed since). This
+    tool returns a summary: `json_path` (pass it to mix_report as `reference`),
+    tempo, t0, `notes`, and per section the roles present, trace and absent.
+    Local only; needs the `listen` extra."""
     listen = _listen()
-    files = {role: ([_audio_file(p) for p in v] if isinstance(v, list) else _audio_file(v))
-             for role, v in stems.items()}
     try:
-        return json.dumps(listen.reference_profile(
+        files = {role: ([_audio_file(p) for p in v] if isinstance(v, list) else _audio_file(v))
+                 for role, v in stems.items()}
+        prof = listen.reference_profile(
             _audio_file(mix), files, tempo, t0, sections, beats_per_bar,
-            os.path.abspath(os.path.expanduser(out)) if out else None), indent=2)
+            os.path.abspath(os.path.expanduser(out)) if out else None)
     except MemoryError:
         raise LiveError("not enough memory for these files; profile fewer stems at a time")
-    except (OSError, RuntimeError, ValueError, KeyError, TypeError, ArithmeticError) as e:
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, AttributeError, IndexError,
+            ArithmeticError) as e:
         raise LiveError("cannot build the reference profile: %s: %s" % (type(e).__name__, e))
+    rows = []
+    for sec in prof["sections"]:
+        roles = sec["roles"]
+        rows.append({"name": sec["name"], "start_bar": sec["start_bar"], "bars": sec["bars"],
+                     "mix_level_db": sec["mix"]["level_db"],
+                     "present": [r for r, e in roles.items() if not e["absent"] and not e["trace"]],
+                     "trace": [r for r, e in roles.items() if not e["absent"] and e["trace"]],
+                     "absent": [r for r, e in roles.items() if e["absent"]]})
+    return json.dumps({"json_path": prof["json_path"], "tempo": prof["tempo"], "t0": prof["t0"],
+                       "beats_per_bar": prof["beats_per_bar"], "sample_rate": prof["sample_rate"],
+                       "roles": list(prof["inputs"]["stems"]), "notes": prof["notes"], "sections": rows},
+                      indent=2)
 
 
 def main() -> None:
