@@ -891,3 +891,55 @@ def test_compare_settle_time_alone_is_not_a_reading():
     c = dict(base, pitch_drop_st=3.0, pitch_settle_ms=30.0)
     d = dict(base, pitch_drop_st=3.0, pitch_settle_ms=7.5)
     assert [r.split()[1] for r in oneshot.compare(c, d)["readings"]] == ["settles"]
+
+
+# ---------------------------------------------------------------- clean hit
+
+def take(onsets_s, total_s, freq=100, tau=0.03):
+    """Decaying 100 Hz hits starting at `onsets_s`, in a file `total_s` long."""
+    x = np.zeros((int(total_s * SR), 1))
+    for t in onsets_s:
+        h = hit(freq, tau, seconds=total_s - t)
+        x[int(t * SR):int(t * SR) + len(h)] += h
+    return x
+
+
+# With tau = 30 ms a hit is 40 dB down after 30 * ln(100) = 138 ms, so a hit with
+# less than that before the next onset (or the end) is cut off.
+def test_clean_hit_is_the_third_when_the_gaps_are_120_120_and_500_ms():
+    r = oneshot.profile_array(take([0, 0.12, 0.24], 0.74), SR, hit="clean")
+    assert r["hits"] == 3 and r["hit"] == 2 and not r["truncated"]
+    assert any("clean hit" in n and "500 ms" in n for n in r["notes"]), r["notes"]
+
+
+def test_clean_hit_takes_the_longest_gap_and_the_earliest_on_a_tie():
+    longest = oneshot.profile_array(take([0, 0.3, 0.9], 1.2), SR, hit="clean")      # gaps 300, 600, 300 ms, all complete
+    assert longest["hits"] == 3 and longest["hit"] == 1
+    tie = oneshot.profile_array(take([0, 0.4], 0.8), SR, hit="clean")               # 400 and 400 ms
+    assert tie["hits"] == 2 and tie["hit"] == 0
+
+
+def test_clean_hit_when_only_the_last_is_complete():
+    r = oneshot.profile_array(take([0, 0.15, 0.30], 0.6, tau=0.05), SR, hit="clean")   # 40 dB down after 230 ms
+    assert r["hits"] == 3 and r["hit"] == 2
+
+
+def test_clean_hit_none_complete_is_refused_with_no_clean_hit():
+    with pytest.raises(ValueError, match="no clean hit"):
+        oneshot.profile_array(take([0, 0.06, 0.12], 0.2, tau=0.1), SR, hit="clean")
+    with pytest.raises(ValueError, match="hit must be"):
+        oneshot.profile_array(take([0], 0.5), SR, hit="best")
+    # the default and a number are unchanged by "clean" existing
+    assert oneshot.profile_array(take([0, 0.3], 0.9), SR)["hit"] == 0
+
+
+def test_clean_hit_through_the_tools(tmp_path):
+    import mcp_server.server as S
+    p = tmp_path / "take.wav"
+    sf.write(str(p), take([0, 0.12, 0.24], 0.74), SR, subtype="FLOAT")
+    assert json.loads(S.sample_analyze(str(p), hit="clean"))["hit"] == 2
+    assert json.loads(S.sample_compare(str(p), str(p), hit_a="clean", hit_b="clean"))["readings"] == []
+    with pytest.raises(S.LiveError, match="no clean hit"):
+        q = tmp_path / "roll.wav"
+        sf.write(str(q), take([0, 0.06, 0.12], 0.2, tau=0.1), SR, subtype="FLOAT")
+        S.sample_analyze(str(q), hit="clean")

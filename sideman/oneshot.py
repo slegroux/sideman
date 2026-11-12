@@ -505,9 +505,37 @@ def _starts_inside(x: np.ndarray, mag: np.ndarray, sr: int, segs: list) -> bool:
     return fwd[0] >= fwd.max() * 10 ** (-FAST_DB / 10) and later > float(mag[s:e].max()) * 10 ** (3 / 20)
 
 
-def profile_array(x: np.ndarray, sr: int, hit: int | None = None) -> dict:
+def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list) -> tuple[int, dict, int]:
+    """(index, measured profile, ms of room) of the complete hit with the longest
+    stretch from its onset to the next onset (or the end of the file); ties go to the
+    earliest. A hit cut off before it falls 40 dB, or too short to measure, is not
+    complete. Raises ValueError("no clean hit ...") when there is none."""
+    best = None
+    for k, (_, end) in enumerate(segs):
+        cut = "the file ends" if k == len(segs) - 1 else "the next hit starts"
+        try:
+            got = _measure(x[onsets[k]:end], sr, cut)
+        except ValueError:
+            continue
+        if got["truncated"]:
+            continue
+        room = (onsets[k + 1] if k + 1 < len(segs) else x.shape[0]) - onsets[k]
+        if best is None or room > best[0]:
+            best = (room, k, got)
+    if best is None:
+        raise ValueError("no clean hit: all %d hit%s %s cut off before falling 40 dB by the next hit or the "
+                         "end of the file (or too short to measure)"
+                         % (len(segs), "" if len(segs) == 1 else "s", "is" if len(segs) == 1 else "are"))
+    return best[1], best[2], int(round(_ms(best[0], sr)))
+
+
+def profile_array(x: np.ndarray, sr: int, hit: int | str | None = None) -> dict:
     """The one-shot profile of one signal [n, channels]: of hit `hit` (from 0)
-    when it holds several, by default the first that is not cut off. See profile()."""
+    when it holds several, by default the first that is not cut off; "clean"
+    picks the complete hit with the most room after its onset (see profile()).
+    Raises ValueError("no clean hit ...") when every hit is cut off."""
+    if isinstance(hit, str) and hit != "clean":
+        raise ValueError("hit must be a whole number, \"clean\" or None, got %r" % hit)
     _check_channels(x)
     x = np.asarray(x, dtype=np.float64)
     if not np.isfinite(x).all():
@@ -521,19 +549,24 @@ def profile_array(x: np.ndarray, sr: int, hit: int | None = None) -> dict:
     if not len(mag) or mag.max() <= 0:
         raise ValueError("the file is silent")
     segs = _segments(x, sr)
-    if hit is not None and not 0 <= hit < len(segs):
+    if isinstance(hit, int) and not 0 <= hit < len(segs):
         raise ValueError("hit %r is out of range: the take has %d hit%s (0-%d)"
                          % (hit, len(segs), "" if len(segs) == 1 else "s", len(segs) - 1))
     onsets = [_onset(x[s:e], mag[s:e], sr, s > 0) + s for s, e in segs]
     order, extra, tail = list(range(len(segs))), [], False
-    if hit is not None:
+    picked = None
+    if hit == "clean":
+        picked, order = _clean_hit(x, sr, segs, onsets), []
+        extra.append("hit %d is the clean hit: complete, with %d ms from its onset to the next onset "
+                     "or the end of the file" % (picked[0], picked[2]))
+        picked = picked[:2]
+    elif hit is not None:
         order = [hit]
     elif len(segs) > 1 and _starts_inside(x, mag, sr, segs):
         # hit 0 looks like the tail of a hit that began before the file: try the
         # others first. A take trimmed at the onset of a fast hit looks the same,
         # so hit 0 stays the fallback when no later hit is complete.
         order, tail = order[1:] + [0], True
-    picked = None
     for k in order:
         cut = "the file ends" if k == len(segs) - 1 else "the next hit starts"
         try:
@@ -792,12 +825,14 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
     return out
 
 
-def profile(path: str | pathlib.Path, hit: int | None = None) -> dict:
+def profile(path: str | pathlib.Path, hit: int | str | None = None) -> dict:
     """Envelope, pitch and tone of a one-shot file, relative to the hit itself.
 
     hits, onsets_ms the hits found in the file and where each starts
     hit             which one this profile is (from 0): `hit`, by default the first
-                    that is not cut off
+                    that is not cut off; hit="clean" asks for the complete hit with the
+                    longest stretch to the next onset (or the end of the file), the
+                    earliest on a tie, and raises "no clean hit" when every hit is cut off
     onset_ms        where the hit starts in the file (first 1 ms within 40 dB of its loudest)
     truncated       the next hit or the end of the file cuts it before it falls 40 dB
     peak_db         sample peak, dBFS (the only absolute level here)
