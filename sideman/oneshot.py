@@ -79,6 +79,9 @@ PROMINENT_DB = 15.0      # a peak must stand this far above its local floor to b
 HARM_TOL = 0.03          # a partial within 3 % of k * f0 is harmonic k
 SETTLE_ST = 0.5
 SETTLE_HOLD_S = 0.010    # settled = within SETTLE_ST and still there 10 ms later
+EARLY_SPAN_S = 0.030     # zero crossings are read up to the first frame's centre + this
+EARLY_RATIO = 1.8        # one half-period may differ from the last by this factor (a fast kick: 1.5)
+EARLY_ST = 1.5           # and they must meet the first frame within this
 STEP_ST = 2.0            # a track frame may move this far from the one 1 ms before it
 PITCHED_DB = 25.0        # a fundamental this far above the noise around it is pitched...
 NOISY_DB = -3.0          # ...and so is a less prominent one in a body that is not mostly noise
@@ -233,6 +236,70 @@ def _track(z: np.ndarray, sr: int, f0: float, mid: float, end: int) -> tuple[lis
         fwd.append((c, f))
         guess = f
     return back[::-1] + fwd, reached
+
+
+def _crossings(v: np.ndarray, sr: int, period: float, from_zero: bool) -> np.ndarray:
+    """Zero-crossing times (s, interpolated) of v, counted with a hysteresis of
+    a tenth of the local amplitude (the max over one period either side), so
+    noise riding on a slow crossing does not add crossings. The onset counts
+    as one when `from_zero` (the hit starts near zero)."""
+    w = max(1, int(period * sr))
+    a = np.abs(v)
+    loc = sliding_window_view(np.pad(a, (w, w)), 2 * w + 1).max(axis=1)[:len(v)]
+    out, state, last = [], 0, None
+    if from_zero:
+        out.append(0.0)
+    for i in range(1, len(v)):
+        if (v[i - 1] <= 0 < v[i]) or (v[i - 1] >= 0 > v[i]):
+            last = i - 1 + v[i - 1] / (v[i - 1] - v[i])
+        side = 1 if v[i] > 0.1 * loc[i] else (-1 if v[i] < -0.1 * loc[i] else 0)
+        if side and side != state:
+            if state and last is not None:
+                out.append(last / sr)
+            state = side
+    return np.array(out)
+
+
+def _early_pitch(y: np.ndarray, sr: int, f1: float, t1: float) -> tuple | None:
+    """The pitch before the first pitch frame's centre t1, from half-periods
+    between zero crossings (a frame needs about three periods; a half-period
+    needs half of one). ([(midpoint s, Hz)], the time they cover from (0
+    when the onset is a crossing or they are extended to it), a click skipped) or None when the crossings do not follow one pitch: each
+    half-period within EARLY_RATIO of the last, reaching t1 within EARLY_ST
+    of the frame there. Leading crossings out of step (a click) are skipped;
+    otherwise the first two half-periods are extended linearly to the onset
+    when that step stands out of the crossings' jitter."""
+    m = y.mean(axis=1)[:int((t1 + EARLY_SPAN_S) * sr)]
+    from_zero = abs(m[0]) < 0.1 * np.abs(m[:max(1, int(sr / f1))]).max()
+    smooth = max(1, int(round(sr / (8 * f1))))       # a centred boxcar: zero phase, takes a click off
+    m = np.convolve(m, np.ones(smooth) / smooth, mode="same")
+    tz = _crossings(m, sr, 1.0 / f1, from_zero)
+    if len(tz) < 4:
+        return None
+    mid, f = (tz[1:] + tz[:-1]) / 2, 0.5 / np.diff(tz)
+    ok = np.r_[(f[1:] / f[:-1] > 1 / EARLY_RATIO) & (f[1:] / f[:-1] < EARLY_RATIO), True]
+    first = 0
+    while first < len(ok) - 2 and not ok[first]:
+        first += 1
+    run = first
+    while run < len(ok) and ok[run]:
+        run += 1
+    mid, f = mid[first:run + 1], f[first:run + 1]
+    if len(f) < 3 or mid[-1] < t1 or abs(12 * math.log2(np.interp(t1, mid, f) / f1)) > EARLY_ST:
+        return None
+    points = [(float(t), float(v)) for t, v in zip(mid, f)]
+    since = float(tz[first])               # the first half-period starts here
+    if first:
+        return points, since, True
+    # extend the first two half-periods to the onset, but only when the step is
+    # larger than twice what jitter alone could make of it (noise on the
+    # crossings, from the scatter of the second differences)
+    f0 = f[0] - (f[1] - f[0]) / (mid[1] - mid[0]) * mid[0]
+    jitter = np.std(np.diff(f[:8], 2)) / math.sqrt(6) if len(f) >= 4 else 0.0
+    spread = jitter * math.sqrt(1 + 2 * (mid[0] / (mid[1] - mid[0])) ** 2)
+    if abs(f0 - f[0]) <= 2 * spread:
+        return points, since, False
+    return [(0.0, float(f0))] + points, 0.0, False
 
 
 def _last_above(env: np.ndarray, start: int, level: float) -> float | None:
@@ -498,18 +565,42 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
     if pitched:
         out["pitch_body_hz"] = round(f0, 2)
         dense, reached = _track(z, sr, f0, round((b0 + b1) / 2 / sr, 3), gate)
+        early, onset_known = [], False
         if dense:
             c, fs = dense[0]
-            out["pitch_start_hz"], out["pitch_start_at_ms"] = round(fs, 1), round(1000 * c, 1)
+            zc = _early_pitch(y, sr, fs, c) if reached else None
+            if zc is not None:
+                early, since, skipped = zc
+                early = [(t, f) for t, f in early if t < c]
+                onset_known = since == 0.0      # the crossings cover the hit from its onset
+                start_t, fs = early[0]
+                if skipped:
+                    notes.append("the first %.1f ms do not read as a pitch (a click or transient): the start "
+                                 "is read after them" % (1000 * start_t))
+            else:
+                start_t = c
+                notes.append("the start pitch is the first pitch frame's, %.0f ms in: the zero crossings "
+                             "before it do not follow one pitch" % (1000 * c))
+            out["pitch_start_hz"], out["pitch_start_at_ms"] = round(fs, 1), round(1000 * start_t, 1)
             out["pitch_drop_st"] = round(12 * math.log2(fs / f0), 2)
             if not reached:
                 notes.append("the pitch cannot be followed back to the onset: the start is %.0f ms in"
                              % (1000 * c))
-            near = [abs(12 * math.log2(f / f0)) <= SETTLE_ST for _, f in dense]
-            for i, (c, _) in enumerate(dense):
-                hold = [ok for (cc, _), ok in zip(dense[i:], near[i:]) if cc - c <= SETTLE_HOLD_S]
-                if all(hold):
-                    out["pitch_settle_ms"] = 0.0 if i == 0 and reached else round(1000 * c, 1)
+            seq = early + dense
+            near = [abs(12 * math.log2(f / f0)) <= SETTLE_ST for _, f in seq]
+            for i, (c0, _) in enumerate(seq):
+                if seq[-1][0] - c0 < SETTLE_HOLD_S:
+                    notes.append("the pitch is not followed for %.0f ms after it comes within %.1f st of the "
+                                 "body pitch" % (1000 * SETTLE_HOLD_S, SETTLE_ST))
+                    break
+                if all(ok for (cc, _), ok in zip(seq[i:], near[i:]) if cc - c0 <= SETTLE_HOLD_S):
+                    if i > 0:
+                        out["pitch_settle_ms"] = round(1000 * c0, 1)
+                    elif onset_known:
+                        out["pitch_settle_ms"] = 0.0
+                    else:
+                        notes.append("the pitch is already within %.1f st of the body pitch where it is "
+                                     "first read, %.0f ms in" % (SETTLE_ST, 1000 * c0))
                     break
             else:
                 notes.append("the pitch never settles within %.1f st of the body pitch" % SETTLE_ST)
@@ -518,11 +609,17 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
         track = {}
         for ms in TRACK_MS:
             t = ms / 1000.0
-            if dense and t <= dense[0][0]:
-                track[ms] = round(dense[0][1], 1) if reached else None
+            if dense and t < dense[0][0] - 0.0006:     # before the first frame: zero crossings or nothing
+                if early and t >= since:     # read over the half-period that holds t
+                    track[ms] = round(float(np.interp(t, [e[0] for e in early], [e[1] for e in early])), 1)
+                else:
+                    track[ms] = None
             else:
                 got = [f for c, f in dense if abs(c - t) < 0.0006]   # frames sit on whole ms
                 track[ms] = round(got[0], 1) if got else None
+        if dense and any(track[ms] is None for ms in TRACK_MS if ms / 1000.0 < dense[0][0] - 0.0006):
+            notes.append("pitch_track_hz has no value before %.0f ms, the first pitch frame's centre"
+                         % (1000 * dense[0][0]))
         out["pitch_track_hz"] = track
     else:
         notes.append("unpitched: no pitch track and no harmonics")

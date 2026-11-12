@@ -36,10 +36,17 @@ def st(a, b):
     return 12 * math.log2(a / b)
 
 
-# 200 Hz for its first 10 ms, then a raised-cosine glide down to 100 Hz by 40 ms
+# 200 Hz held for its first 10 ms, then a raised-cosine glide down to 100 Hz by
+# 40 ms: the shared test hit for the invariance and compare tests. The plan's own
+# sweep case (no hold) is test_pitch_sweep_from_200_to_100_hz.
 def sweep(t):
     return np.where(t < 0.010, 200.0,
                     np.where(t < 0.040, 150.0 + 50.0 * np.cos(np.pi * (t - 0.010) / 0.030), 100.0))
+
+
+def glide(t):
+    """200 Hz falling linearly to 100 Hz over the first 30 ms, from the onset on."""
+    return np.where(t < 0.030, 200.0 - 100.0 * t / 0.030, 100.0)
 
 
 # ---------------------------------------------------------------- envelope
@@ -113,28 +120,65 @@ def test_envelope_silent_or_too_short_is_refused():
 # ---------------------------------------------------------------- pitch
 
 def test_pitch_sweep_from_200_to_100_hz():
-    r = oneshot.profile_array(hit(sweep, 0.15), SR)
+    r = oneshot.profile_array(hit(glide, 0.15), SR)
     assert r["pitched"] is True
     assert r["pitch_start_hz"] == pytest.approx(200, abs=6)
     assert r["pitch_body_hz"] == pytest.approx(100, abs=2)
     assert r["pitch_drop_st"] == pytest.approx(12, abs=0.5)
-    # the glide is within 0.5 st of 100 Hz once 150 + 50 cos(pi (t - 10 ms) / 30 ms)
-    # <= 100 * 2^(0.5/12); a 3-period (30 ms) frame centred on t sees up to 15 ms later
-    settle = 10 + 30 * math.acos((100 * 2 ** (0.5 / 12) - 150) / 50) / math.pi    # 36.7 ms
+    # within 0.5 st of 100 Hz once 200 - 100 t / 30 ms <= 100 * 2^(0.5/12); a 3-period
+    # (30 ms) frame centred on t sees up to 15 ms later
+    settle = 30 * (2 - 2 ** (0.5 / 12))                                    # 29.1 ms
     assert settle <= r["pitch_settle_ms"] <= settle + 15
     track = r["pitch_track_hz"]
-    assert track[0] == pytest.approx(200, abs=6)
-    assert track[20] == pytest.approx(150 + 50 * math.cos(math.pi / 3), abs=6)     # 175 Hz at 20 ms
+    for ms in (0, 5, 10, 20):                                               # 200, 183.3, 166.7, 133.3 Hz
+        assert track[ms] == pytest.approx(200 - 100 * ms / 30, abs=6), ms
     assert track[80] == pytest.approx(100, abs=1) and track[150] == pytest.approx(100, abs=1)
 
 
+def test_pitch_kick_glide_from_160_to_45_hz():
+    # 45 + 115 e^(-t / 12 ms): 160 Hz at the onset, 120.8 at 5 ms, 95.0 at 10 ms,
+    # a drop of 12 log2(160 / 45) = 21.96 st to its 45 Hz body
+    def f(t):
+        return 45 + 115 * np.exp(-np.asarray(t) / 0.012)
+    r = oneshot.profile_array(hit(f, 0.12), SR)
+    assert r["pitch_start_hz"] == pytest.approx(160, rel=0.10)
+    assert r["pitch_drop_st"] == pytest.approx(12 * math.log2(160 / 45), abs=2)
+    assert r["pitch_track_hz"][5] == pytest.approx(float(f(0.005)), rel=0.05)
+    assert r["pitch_track_hz"][10] == pytest.approx(float(f(0.010)), rel=0.05)
+
+
+def test_pitch_start_of_a_steady_sawtooth():
+    # harmonics at 1/k: zero crossings still come twice a period, and none of them
+    # read anything but 80 Hz
+    r = oneshot.profile_array(hit(80, 0.2, partials={k: 1.0 / k for k in range(1, 60)}), SR)
+    assert r["pitch_start_hz"] == pytest.approx(80, rel=0.02)
+    assert all(v == pytest.approx(80, rel=0.02) for v in r["pitch_track_hz"].values() if v is not None)
+
+
+def test_pitch_track_before_the_first_frame_is_none_not_a_copy():
+    # sin + 2 sin(3x) crosses zero six times a period, so the crossings give no pitch:
+    # the points before the first frame (15 ms) are None with a note, not its value
+    r = oneshot.profile_array(hit(100, 0.2, partials={1: 1.0, 3: 2.0}), SR)
+    assert r["pitch_start_at_ms"] == pytest.approx(15, abs=1)
+    assert [r["pitch_track_hz"][ms] for ms in (0, 5, 10)] == [None, None, None]
+    assert any("no value before 15 ms" in n for n in r["notes"])
+
+
+def test_pitch_that_never_holds_still_has_no_settle_time():
+    # 300 e^(-t / 100 ms) falls 0.5 st in 2.9 ms: it never stays within 0.5 st of its
+    # body pitch for 10 ms
+    r = oneshot.profile_array(hit(lambda t: 300 * np.exp(-t / 0.1), 0.15), SR)
+    assert r["pitch_settle_ms"] is None
+    assert any("never settles" in n or "not followed" in n for n in r["notes"])
+
+
 def test_pitch_fast_glide_reads_the_pitch_where_it_was_measured():
-    # 100 + 100 e^(-t / 15 ms): its first cycle is shorter than any pitch frame, so the
-    # start is the pitch at pitch_start_at_ms, about 1.5 periods in
+    # 100 + 100 e^(-t / 15 ms): its first cycle is shorter than any pitch frame; the
+    # zero crossings read it, and the start is the pitch at pitch_start_at_ms
     def f(t):
         return 100 + 100 * np.exp(-np.asarray(t) / 0.015)
     r = oneshot.profile_array(hit(f, 0.15), SR)
-    assert r["pitch_start_at_ms"] <= 1.6 * 1000 / r["pitch_start_hz"]
+    assert r["pitch_start_at_ms"] <= 0.5 * 1000 / r["pitch_start_hz"]      # within the first half-period
     assert r["pitch_start_hz"] == pytest.approx(float(f(r["pitch_start_at_ms"] / 1000)), rel=0.03)
     assert r["pitch_body_hz"] == pytest.approx(100, abs=2)
     # within 0.5 st of 100 Hz once 100 e^(-t/15) <= 100 (2^(0.5/12) - 1)
