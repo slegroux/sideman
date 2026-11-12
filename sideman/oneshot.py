@@ -316,7 +316,7 @@ def _early_pitch(y: np.ndarray, sr: int, f1: float, t1: float) -> tuple | None:
     mid, f = mid[first:run + 1], f[first:run + 1]
     if len(f) < 3 or mid[-1] < t1 or abs(12 * math.log2(np.interp(t1, mid, f) / f1)) > EARLY_ST:
         return None
-    before = f[mid < t1]                # the points that will be used: long and short half-periods
+    before = f[mid < t1 + 0.5 / f1]     # the points used, and one more: long and short half-periods
     step = np.diff(before) / before[:-1]  # in turn mean a strong overtone adds crossings, so they
     turns = np.sign(step[np.abs(step) > EARLY_ZIGZAG])        # are not the half-periods of one
     if np.any(turns[1:] != turns[:-1]):                       # pitch
