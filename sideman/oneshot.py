@@ -596,7 +596,8 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
             for i, (c0, _) in enumerate(seq):
                 if seq[-1][0] - c0 < SETTLE_HOLD_S:
                     notes.append("the pitch is not followed for %.0f ms after it comes within %.1f st of the "
-                                 "body pitch" % (1000 * SETTLE_HOLD_S, SETTLE_ST))
+                                 "body pitch" % (1000 * SETTLE_HOLD_S, SETTLE_ST) if any(near[i:]) else
+                                 "the pitch never settles within %.1f st of the body pitch" % SETTLE_ST)
                     break
                 if all(ok for (cc, _), ok in zip(seq[i:], near[i:]) if cc - c0 <= SETTLE_HOLD_S):
                     if i > 0:

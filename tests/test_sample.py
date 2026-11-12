@@ -472,11 +472,12 @@ def test_hits_out_of_range_is_refused(tmp_path):
 
 def test_envelope_dc_offset_does_not_change_the_falls():
     # a DC offset is no part of the decay: + 0.05 (-26 dB) must read as the plain hit
+    plain = oneshot.profile_array(hit(100, 0.050), SR)
     for dc in (0.05, -0.2, 0.005):
         r = oneshot.profile_array(hit(100, 0.050) + dc, SR)
         assert r["fall_20_ms"] == pytest.approx(50 * math.log(10), abs=6), dc
         assert r["fall_40_ms"] == pytest.approx(50 * math.log(100), abs=6), dc
-        assert r["bands_db"]["sub"] < -10, dc
+        assert r["bands_db"] == pytest.approx(plain["bands_db"], abs=0.2), dc     # DC adds no sub
 
 
 def test_envelope_onset_ignores_a_lone_spike_before_the_hit():
