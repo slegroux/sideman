@@ -749,8 +749,11 @@ def sample_compare(a: str, b: str, hit_a: int | None = None, hit_b: int | None =
     and noise share 3 dB, click 6 dB, width 0.1; one side pitched and the
     other not is a reading of its own. Levels at the method's floor on both
     sides are not read (harmonics under -50 dB or near the noise, noise share
-    under -25 dB, click under -40 dB). Level, leading silence and sample rate
-    give no reading. Change the patch, record again, compare again until
+    under -25 dB, click under -40 dB). A pitch-drop line gives the time each
+    drop takes: "drops 17.0 st over 3.0 ms (a click)" is a stick transient,
+    the same drop over 40 ms is a kick's glide. When either hit is unpitched
+    (hats, shakers, claps) the six-band balance is read too, 3 dB against
+    the other bands. Level, leading silence and sample rate give no reading. Change the patch, record again, compare again until
     `readings` is empty. Local only; needs the `listen` extra.
     """
     oneshot = _listen("oneshot")
