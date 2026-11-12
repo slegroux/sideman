@@ -686,7 +686,7 @@ def audio_compare(a: str, b: str) -> str:
     return json.dumps(listen.compare(_analyze(a), _analyze(b)), indent=2)
 
 
-def _profile(source: str, hit: int | None) -> dict:
+def _profile(source: str, hit: int | str | None) -> dict:
     oneshot = _listen("oneshot")
     path = _audio_file(source)
     try:
@@ -698,7 +698,7 @@ def _profile(source: str, hit: int | None) -> dict:
 
 
 @mcp.tool()
-def sample_analyze(source: str, hit: int | None = None) -> str:
+def sample_analyze(source: str, hit: int | str | None = None) -> str:
     """Profile a drum one-shot, locally, in the terms a synth is programmed in.
 
     `source` is a mono or stereo file path or an audio clip's LOM path (the
@@ -713,6 +713,10 @@ def sample_analyze(source: str, hit: int | None = None) -> str:
     40 dB; its falls past that point are null). A hit is split off only
     when it rises 15 dB within 10 ms over a tail that has fallen that far,
     so a tremolo or a tom's beating stays one hit, and so does a fast roll.
+    `hit="clean"` picks the complete hit with the longest stretch from its
+    onset to the next onset (or the end of the file), the earliest on a tie;
+    the profile's `hit` and a note say which, and a take with no complete hit
+    is refused with "no clean hit".
 
     Envelope: peak_db (dBFS), attack_ms (onset to the first moment within
     1 dB of the envelope peak, over whole periods), fall_10_ms / fall_20_ms / fall_40_ms (from the
@@ -742,11 +746,11 @@ def sample_analyze(source: str, hit: int | None = None) -> str:
 
 
 @mcp.tool()
-def sample_compare(a: str, b: str, hit_a: int | None = None, hit_b: int | None = None) -> str:
+def sample_compare(a: str, b: str, hit_a: int | str | None = None, hit_b: int | str | None = None) -> str:
     """Compare two drum hits in synth terms: `a` the candidate (usually a synth
     take), `b` the reference sample. Each is a file path or an audio clip's
     LOM path; hit_a / hit_b pick a hit from a take holding several (see
-    sample_analyze; by default the first that is not cut off).
+    sample_analyze, also for "clean"; by default the first that is not cut off).
 
     Returns both sample_analyze profiles, `diff` (a - b: pitch in semitones,
     times as {"ms", "ratio" a/b}, levels in dB, width) and `readings`: one
@@ -794,20 +798,31 @@ def mix_report(manifest: dict[str, Any] | str, reference: dict[str, Any] | str |
 
     `reference` may instead be a reference profile (from reference_profile:
     the path of its .profile.json, or the profile itself). Sections then pair
-    BY NAME with the profile's (same number of bars; one with no match, or of
-    another length, gets the mix layer only, with a note) and each gets the
-    mix compared with the reference's section (bands, width, loudness) and an
-    `elements` layer: every source in both the manifest and the profile as a
-    ratio to the kick in dB (reference, ours, difference; negative = quieter
-    than the kick), roles in the reference only / in ours only, the ratio
-    per 4 bars, and `gaps` (ratios more than 1 dB apart, largest first). The
-    `master` source is never ratioed against the elements, since it sits after
-    the master chain. If the master capture's level and width equal the
-    reference mix's, the section says "the capture is the reference: check
-    solos". With no `kick` source the table is left out with a note and the
-    mix layer still reports. `reference_stale` names profile inputs that
-    changed since it was built. The numbers are measurements, not moves: the
-    ear decides which gaps matter.
+    BY NAME with the profile's; a manifest section may carry
+    "reference": {"section": <profile section name>, "from_bar": N} (both
+    optional) to pair with another section or start N bars into it. A shorter
+    section pairs with the first bars (noted: the reference's bands, width and
+    loudness are for the whole section); one with no match, or longer than the
+    profile's, gets the mix layer only, with a note. Each paired section gets
+    the mix compared with the reference's section (bands, width, loudness) and:
+    `elements`: every source in both the manifest and the profile as a ratio to
+    the kick in dB (reference, ours, difference; negative = quieter than the
+    kick), roles in the reference only / in ours only, the ratio per 4 bars, and
+    `gaps` (ratios more than 1 dB apart, largest first). Where the kick is out
+    on either side (absent, or 30 dB under the loudest other role) the
+    `yardstick` is the loudest role in both ("Elements against the bass (kick
+    out)"); with none the table is left out. The `master` source is never
+    ratioed against the elements, since it sits after the master chain. If the
+    master capture's level and width equal the reference mix's, the section says
+    "the capture is the reference: check solos". With no `kick` source the table
+    is left out with a note and the mix layer still reports.
+    `drums`: for each of kick, toms, snare, hh, clap, rim in both the manifest
+    and the profile, sample_compare's readings between our clean hit and the
+    reference stem's over the section (sample_analyze `hit="clean"`); no clean
+    hit on a side gives a note and no readings. `reference_stale` names profile
+    inputs that changed since it was built (a drum role whose stem changed is
+    skipped). The numbers are measurements, not moves: the ear decides which
+    gaps matter.
 
     Writes mix_report.json and mix_report.md (default: next to the master
     file) and returns the report. Local only; needs the `listen` extra.
