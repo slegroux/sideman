@@ -306,7 +306,9 @@ layers:
   loudest such hit, starts from quiet if any does (20 ms before it 20 dB down),
   has room to the next onset of at least 90 % of the median, and, if any does,
   a peak within 3 dB of the median; the earliest of those. Each side is cut with
-  a beat of pre-roll and post-roll, only hits that start inside the section (its
+  a beat of pre-roll and post-roll (ending 50 ms short of the beat line, where
+  early hits start; ours 30 ms longer, so the same audio read a little early
+  still has its room to fall), only hits that start inside the section (its
   window starting 20 ms early, as below) count, the reference's is picked first,
   and ours is the one within 30 ms of the same place when there is one. When our
   own hit-finding offers none there, a hit that rises out of what comes before

@@ -1051,7 +1051,8 @@ def _drum_layer(prof: dict, psec: dict, fb: int, sec: dict, audio: dict, sr: int
     """For each drum role in both the manifest's sources and the profile's stems, and present on
     both sides in the paired bars: the readings of oneshot.compare(ours, reference) on a typical
     clean hit of each side. Each side is cut with one beat of pre-roll and post-roll (clamped to the
-    file); only hits whose onset lies inside the section are candidates, its window starting
+    file), each ending GRID_LEAD_S + NEAR_S short of its beat line, our post-roll NEAR_S longer than the
+    reference's (a hit of the same audio read up to NEAR_S apart never has less room on our side); only hits whose onset lies inside the section are candidates, its window starting
     GRID_LEAD_S early like the elements layer's, so the tail of a hit from before the line is never
     one and a hit a few ms early belongs to its own section. The reference's hit is picked first; on
     our side the hit within 30 ms of the same place in the section is taken when there is one. When our
@@ -1085,8 +1086,12 @@ def _drum_layer(prof: dict, psec: dict, fb: int, sec: dict, audio: dict, sr: int
                 entry["notes"].append("not present on both sides in these bars (reference %s, ours %s): skipped"
                                       % (pr.get("reference") or "-", pr.get("ours") or "-"))
                 continue
-            got = _read_span(prof["inputs"]["stems"][role], rrate, r0 - pbar / prof["beats_per_bar"],
-                             r0 + n * pbar + pbar / prof["beats_per_bar"])
+            # a beat of pre-roll and post-roll, each ending EDGE_S short of the beat line, where hits that start a
+            # few ms early sit; ours runs NEAR_S longer than the reference's, so a hit of the same audio read up to
+            # NEAR_S apart never has less room to fall on our side than on the reference's
+            edge = GRID_LEAD_S + oneshot.NEAR_S
+            pbeat = pbar / prof["beats_per_bar"]
+            got = _read_span(prof["inputs"]["stems"][role], rrate, r0 - pbeat - edge, r0 + n * pbar + pbeat - edge)
             if got is None:
                 entry["notes"].append("the reference stem does not reach these bars")
                 continue
@@ -1098,8 +1103,8 @@ def _drum_layer(prof: dict, psec: dict, fb: int, sec: dict, audio: dict, sr: int
                     ref_x, rrate, hit="clean", within=(ref_pre - GRID_LEAD_S, ref_pre + n * pbar - GRID_LEAD_S))
             except ValueError as e:
                 errs.append("the reference: %s" % e)
-            a0 = max(0, int(round((t0 - bar_s / beats) * sr)))
-            a1 = min(len(audio[role][0]), int(round((t0 + n * bar_s + bar_s / beats) * sr)))
+            a0 = max(0, int(round((t0 - bar_s / beats - edge) * sr)))
+            a1 = min(len(audio[role][0]), int(round((t0 + n * bar_s + bar_s / beats - GRID_LEAD_S) * sr)))
             our_x, our_pre = _stereo(audio[role][0][a0:a1]), t0 - a0 / sr
             near = None
             if "reference" in profs:

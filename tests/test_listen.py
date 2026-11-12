@@ -1659,3 +1659,47 @@ def test_elements_a_tom_just_before_the_line_into_the_section_with_toms_is_not_i
         for e in (a, b, c):
             assert e["ours_only"] == [] and e["reference_only"] == [] and e["gaps"] == [], (delta, e)
         assert b["presence"]["toms"] == c["presence"]["toms"] == {"reference": "present", "ours": "present"}, delta
+
+
+@pytest.mark.parametrize("delta", [0.0047, 0.007, 0.013])
+def test_drum_layer_identical_flams_where_the_post_roll_ends_give_our_own_hit_and_no_note(tmp_path, delta):
+    """House snare flams (a hit at half level 12 ms before each full one) on beats 2 and 4 of every bar at 124 BPM, the
+    same audio on both sides. The beat after the section holds a flam, 12 ms before its line: a post-roll that ended on
+    that line cut the reference 12 ms into it and ours (read 4.7 to 13 ms late) further in, so the two takes split it
+    differently and our own segmentation offered no complete hit. Read up to 13 ms late, ours is its own hit at the
+    reference's place, with no note and no reading."""
+    beat = 60.0 / 124.0
+    total = 0.6 + 24 * beat + 1.5
+    full = [0.6 + b * beat for b in range(24) if b % 4 in (1, 3)]
+    x = 0.5 * hit_train(190, 0.08, full, total) + 0.25 * hit_train(190, 0.08, [t - 0.012 for t in full], total)
+    d = {}
+    for side in ("ref", "ours"):
+        f = tmp_path / side
+        f.mkdir()
+        d[side] = {"snare": write(f, "snare.wav", stereo(x)), "mix": write(f, "mix.wav", stereo(x))}
+    secs = [{"name": "A", "start_bar": 0, "bars": 4}]
+    prof = listen.reference_profile(d["ref"]["mix"], {"snare": d["ref"]["snare"]}, 124.0, 0.6, secs)
+    m = {"tempo": 124.0, "offset_s": 0.6 + delta, "sections": secs,
+         "sources": {"master": d["ours"]["mix"], "snare": d["ours"]["snare"]}}
+    sn = listen.mix_report(m, reference=prof, out_dir=tmp_path / "out")["sections"][0]["drums"]["roles"][0]
+    assert sn["readings"] == [] and sn["ours_hit"] is not None and sn["notes"] == [], sn
+
+
+def test_drum_layer_our_post_roll_is_longer_so_identical_audio_read_early_keeps_its_complete_hit(tmp_path):
+    """One tom 1.2 s long (it falls to nothing where it ends) 1.242 s into a one-bar section at 120 BPM; it ends 8 ms
+    before the reference's post-roll does (a beat after the section, 50 ms short of the beat line), just enough for it
+    to read as falling 40 dB there. The same audio read 10 ms early: were our post-roll as long as the reference's, our
+    take would end 2 ms before the tom does, cut off, and our own segmentation would offer no complete hit. Ours runs
+    30 ms longer: our own hit, no note, no reading."""
+    x = long_toms([0.5 + 1.242], 5.0)
+    d = {}
+    for side in ("ref", "ours"):
+        f = tmp_path / side
+        f.mkdir()
+        d[side] = {"toms": write(f, "toms.wav", stereo(x)), "mix": write(f, "mix.wav", stereo(x))}
+    secs = [{"name": "A", "start_bar": 0, "bars": 1}]
+    prof = listen.reference_profile(d["ref"]["mix"], {"toms": d["ref"]["toms"]}, 120.0, 0.5, secs)
+    m = {"tempo": 120.0, "offset_s": 0.5 - 0.010, "sections": secs,
+         "sources": {"master": d["ours"]["mix"], "toms": d["ours"]["toms"]}}
+    toms = listen.mix_report(m, reference=prof, out_dir=tmp_path / "out")["sections"][0]["drums"]["roles"][0]
+    assert toms["readings"] == [] and toms["ours_hit"] is not None and toms["notes"] == [], toms
