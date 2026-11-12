@@ -1236,8 +1236,8 @@ def test_drum_layer_identical_audio_shifted_5_ms_gives_no_readings(tmp_path, shi
     roles = drum_report(tmp_path, ref, ours, 0.5 + shift)
     assert [d["role"] for d in roles] == ["kick", "snare", "hh"]
     for d in roles:
-        assert d["readings"] == [] and d["ours_at_ms"] is not None and d["reference_hit"] is not None, d
-        assert not any("not at the same place" in n for n in d["notes"]), d["notes"]
+        assert d["readings"] == [] and d["ours_hit"] is not None and d["reference_hit"] is not None, d
+        assert d["notes"] == [], d["notes"]
         assert abs(d["ours_at_ms"] - d["reference_at_ms"] - 1000 * shift * -1) <= 12, d    # the same hit, 5 ms apart
 
 
@@ -1270,7 +1270,8 @@ def test_drum_layer_runs_only_for_roles_present_on_both_sides_and_one_failure_is
     ours2 = dict(ours, kick=quiet)
     roles = {d["role"]: d for d in drum_report(tmp_path, ref, ours2, 0.5)}
     assert roles["kick"]["readings"] == [] and "not present on both sides" in roles["kick"]["notes"][0]
-    assert roles["snare"]["readings"] == [] and roles["snare"]["ours_at_ms"] is not None       # the others still run
+    assert roles["snare"]["readings"] == [] and roles["snare"]["ours_hit"] is not None       # the others still run
+    assert roles["snare"]["notes"] == [], roles["snare"]
     from sideman import oneshot
 
     def boom(*a, **k):
@@ -1451,14 +1452,15 @@ def lead_pattern(tmp_path, folder, bars_n=4):
 
 @pytest.mark.parametrize("lines_moved", [0.0, -0.020])
 def test_drum_layer_and_levels_are_the_same_for_identical_audio_read_at_any_offset(tmp_path, lines_moved):
-    """The same audio on both sides, read -20 .. +20 ms apart, with every section line also moved 20 ms against the
-    pattern: no gaps, no width gaps, no one-side roles, no drum readings."""
+    """The same audio on both sides, read -20 .. +20 ms apart (odd offsets among them, off the 1 ms grid), with every
+    section line also moved 20 ms against the pattern: no gaps, no width gaps, no one-side roles, no drum readings,
+    and our hit is the one our own segmentation offers at the reference's place (no note at all)."""
     ref = lead_pattern(tmp_path, "ref")
     ours = lead_pattern(tmp_path, "ours")
     secs = [{"name": "K", "start_bar": 0, "bars": 2}, {"name": "L", "start_bar": 2, "bars": 2}]
     t0 = 0.5 + lines_moved
     prof = listen.reference_profile(ref["mix"], {r: ref[r] for r in ("kick", "toms", "hh")}, 120.0, t0, secs)
-    for delta in (-0.020, -0.015, -0.010, -0.005, 0.005, 0.010, 0.015, 0.020):
+    for delta in (-0.020, -0.013, -0.007, 0.0047, 0.013, 0.020):
         m = {"tempo": 120.0, "offset_s": t0 + delta, "sections": secs,
              "sources": {"master": ours["mix"], **{r: ours[r] for r in ("kick", "toms", "hh")}}}
         for sec in listen.mix_report(m, reference=prof)["sections"]:
@@ -1467,8 +1469,7 @@ def test_drum_layer_and_levels_are_the_same_for_identical_audio_read_at_any_offs
             assert e["gaps"] == [] and e["width_gaps"] == [] and e["reference_only"] == [] and e["ours_only"] == [], (label, e)
             assert {t["role"] for t in e["table"]} == {"toms", "hh"}, label
             for d in sec["drums"]["roles"]:
-                assert d["readings"] == [] and d["ours_at_ms"] is not None, (label, d)
-                assert not any("not at the same place" in n or "failed" in n for n in d["notes"]), (label, d["notes"])
+                assert d["readings"] == [] and d["ours_hit"] is not None and d["notes"] == [], (label, d)
 
 
 # ------------------------------------------------ round 4: hit_cut, the fallback, presence on the core of a window
