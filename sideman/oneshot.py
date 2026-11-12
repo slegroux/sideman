@@ -506,24 +506,28 @@ def _starts_inside(x: np.ndarray, mag: np.ndarray, sr: int, segs: list) -> bool:
 
 
 CLEAN_BAND_DB = 6.0      # a clean candidate is within this of the loudest complete hit (a ghost note is not one)
-LEAD_S = 0.020           # ...and the 20 ms before its onset...
+LEAD_S = 0.020           # preferred: the 20 ms before its onset...
 LEAD_DB = 20.0           # ...are at least this far under its peak (not the tail of an earlier hit)
 ROOM_FRAC = 0.9          # "typical": room at least this share of the candidates' median...
-TYPICAL_DB = 3.0         # ...and a peak within this of their median peak
+TYPICAL_DB = 3.0         # ...and, preferably, a peak within this of their median peak
 NEAR_S = 0.030           # a hit asked for "near" a position is taken within this
+HIT_LEAD_S = 0.002       # hit_cut starts this long before the onset it finds
 
 
 def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray,
                within: tuple | None = None, near: float | None = None) -> tuple[int, dict, int, str]:
     """(index, measured profile, ms of room, note) of the clean hit.
 
-    A candidate is complete (not cut off before it falls 40 dB, long enough to measure), within
-    CLEAN_BAND_DB of the loudest complete hit, and has a quiet lead-in; a take that begins inside
-    a hit does not offer that hit. With `within` = (start s, end s) only hits whose onset lies
-    inside count, so the tail of a hit from before the section is never one. Of the candidates
-    the pick is the earliest typical one: room (onset to the next onset, or the end of the file)
-    at least ROOM_FRAC of their median and peak within TYPICAL_DB of their median. With `near`
-    (seconds) the candidate whose onset is within NEAR_S of it wins instead, when there is one.
+    The candidates are the complete hits (not cut off before they fall 40 dB, long enough to
+    measure), except that a take whose first hit begins at full level while a later one is more
+    than 3 dB louder is read as starting inside a hit, and that first hit is not offered. With
+    `within` = (start s, end s) only hits whose onset lies inside count, so the tail of a hit from
+    before the span is never one. The pick: the candidates within CLEAN_BAND_DB of the loudest
+    (a ghost note is not clean); of those the ones with a quiet lead-in (the 20 ms before the onset
+    LEAD_DB under the peak), if any; of those the ones whose room (onset to the next onset, or the
+    end of the take) is at least ROOM_FRAC of the median; of those the ones whose peak is within
+    TYPICAL_DB of the median peak, if any; the earliest. With `near` (seconds), the complete hit
+    whose onset is within NEAR_S of it wins instead, when there is one, whatever its level.
     Raises ValueError("no clean hit ...") when there is no candidate."""
     skip0 = len(segs) > 1 and _starts_inside(x, mag, sr, segs)
     complete = []
@@ -538,10 +542,9 @@ def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray
         if got["truncated"]:
             continue
         lead = mag[max(0, onsets[k] - int(LEAD_S * sr)):onsets[k]]
-        if len(lead) and 20 * math.log10(max(float(lead.max()), 1e-12)) > got["peak_db"] - LEAD_DB:
-            continue
+        quiet = not len(lead) or 20 * math.log10(max(float(lead.max()), 1e-12)) <= got["peak_db"] - LEAD_DB
         room = (onsets[k + 1] if k + 1 < len(segs) else x.shape[0]) - onsets[k]
-        complete.append({"k": k, "got": got, "room": room, "at": onsets[k] / sr})
+        complete.append({"k": k, "got": got, "room": room, "at": onsets[k] / sr, "quiet": quiet})
     inside = complete
     if within is not None:
         inside = [c for c in complete if within[0] <= c["at"] < within[1]]
@@ -550,26 +553,37 @@ def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray
     if not inside and near is not None:
         inside = complete                      # nothing inside the span, but a hit at the edge may be the one asked for
     if not inside:
-        raise ValueError("no clean hit: none of the %d hit%s is complete (not cut off before falling 40 dB), "
-                         "starts from quiet, and lies inside the span asked for"
-                         % (len(segs), "" if len(segs) == 1 else "s"))
-    loud = max(c["got"]["peak_db"] for c in inside)       # the span's own loudest hit sets the band, not a hit at its edge
-    keep = lambda c: c["got"]["peak_db"] >= loud - CLEAN_BAND_DB       # noqa: E731
-    cands = [c for c in inside if keep(c)]
-    if near is not None:
-        close = [c for c in complete if keep(c) and abs(c["at"] - near) <= NEAR_S]
+        raise ValueError("no clean hit: none of the %d hit%s is complete (not cut off before falling 40 dB) "
+                         "and inside the span asked for" % (len(segs), "" if len(segs) == 1 else "s"))
+    if near is not None:                       # like with like: the hit at that place, whatever the span's own band
+        close = [c for c in complete if abs(c["at"] - near) <= NEAR_S]
         if close:
             c = min(close, key=lambda c: abs(c["at"] - near))
             return c["k"], c["got"], int(round(_ms(c["room"], sr))), "the hit at the requested position"
+    loud = max(c["got"]["peak_db"] for c in inside)
+    cands = [c for c in inside if c["got"]["peak_db"] >= loud - CLEAN_BAND_DB]
+    cands = [c for c in cands if c["quiet"]] or cands
     med_room = float(np.median([c["room"] for c in cands]))
-    med_peak = float(np.median([c["got"]["peak_db"] for c in cands]))
-    typical = [c for c in cands if c["room"] >= ROOM_FRAC * med_room
-               and abs(c["got"]["peak_db"] - med_peak) <= TYPICAL_DB]
-    why = "typical of %d candidate%s" % (len(cands), "" if len(cands) == 1 else "s")
-    if not typical:
-        typical, why = [max(cands, key=lambda c: c["room"])], "the one with the most room (none is typical)"
-    c = min(typical, key=lambda c: c["k"])
+    roomy = [c for c in cands if c["room"] >= ROOM_FRAC * med_room]
+    med_peak = float(np.median([c["got"]["peak_db"] for c in roomy]))
+    typical = [c for c in roomy if abs(c["got"]["peak_db"] - med_peak) <= TYPICAL_DB]
+    c = min(typical or roomy, key=lambda c: c["k"])
+    why = "typical of %d candidate%s" % (len(roomy), "" if len(roomy) == 1 else "s")
     return c["k"], c["got"], int(round(_ms(c["room"], sr))), why
+
+
+def hit_cut(x: np.ndarray, sr: int, at: float, until: float | None = None) -> np.ndarray:
+    """The cut of x [n, channels] that holds the hit near `at` (seconds) and nothing before it:
+    from HIT_LEAD_S before its onset, found again here (the rise out of the level just before
+    `at` - 30 ms, within 100 ms after `at`) so it does not depend on where an earlier slice began,
+    to `until` (seconds, e.g. the next onset) or the end of x. Profile it with profile_array(cut):
+    the same audio gives the same cut whatever the offset it was read at."""
+    x = np.asarray(x, dtype=np.float64)
+    a, b = max(0, int((at - 0.030) * sr)), min(len(x), int((at + 0.100) * sr))
+    win = x[a:b]
+    onset = a + _onset(win, np.abs(win).max(axis=1), sr, True)
+    end = len(x) if until is None else min(len(x), int(until * sr))
+    return x[max(0, onset - int(HIT_LEAD_S * sr)):max(end, onset + 1)]
 
 
 def profile_array(x: np.ndarray, sr: int, hit: int | str | None = None, within: tuple | None = None,
@@ -876,12 +890,15 @@ def profile(path: str | pathlib.Path, hit: int | str | None = None) -> dict:
 
     hits, onsets_ms the hits found in the file and where each starts
     hit             which one this profile is (from 0): `hit`, by default the first
-                    that is not cut off; hit="clean" asks for a typical complete hit: not
-                    cut off, within 6 dB of the loudest such hit, starting from quiet (the
-                    20 ms before its onset 20 dB under its peak), with room (onset to the next
-                    onset or the end of the file) at least 90 % of the median and a peak
-                    within 3 dB of the median; the earliest of those. A take that begins
-                    inside a hit does not offer that hit. Raises "no clean hit" when none
+                    that is not cut off; hit="clean" asks for a typical complete hit. Of the
+                    hits that are not cut off, those within 6 dB of the loudest; of those the
+                    ones that start from quiet (the 20 ms before the onset 20 dB under the
+                    peak), if any; of those the ones with room (onset to the next onset or the
+                    end of the file) at least 90 % of the median; of those the ones with a
+                    peak within 3 dB of the median peak, if any; the earliest. A take whose
+                    first hit begins at full level while a later one is more than 3 dB louder
+                    is read as starting inside a hit, and that first hit is not offered.
+                    Raises "no clean hit" when no hit is complete
     onset_ms        where the hit starts in the file (first 1 ms within 40 dB of its loudest)
     truncated       the next hit or the end of the file cuts it before it falls 40 dB
     peak_db         sample peak, dBFS (the only absolute level here)

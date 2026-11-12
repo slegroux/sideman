@@ -948,8 +948,37 @@ def test_clean_hit_leaves_out_a_ghost_note_and_hits_before_the_span():
 
 
 def test_clean_hit_when_only_the_last_is_complete():
-    r = oneshot.profile_array(take([0, 0.20, 0.45], 0.85, tau=0.05), SR, hit="clean")   # 40 dB down after 230 ms
+    r = oneshot.profile_array(take([0, 0.15, 0.30], 0.6, tau=0.05), SR, hit="clean")   # 40 dB down after 230 ms
     assert r["hits"] == 3 and r["hit"] == 2
+
+
+def test_clean_hit_of_two_complete_hits_the_one_with_far_less_room_is_not_typical():
+    # tau 50 ms: hit 1 has 250 ms of room (just complete), hit 2 has 400; the median is 325 and 250 < 0.9 * 325
+    r = oneshot.profile_array(take([0, 0.20, 0.45], 0.85, tau=0.05), SR, hit="clean")
+    assert r["hits"] == 3 and r["hit"] == 2
+
+
+def test_clean_hit_a_quiet_lead_in_is_preferred_to_an_earlier_hit_riding_on_a_tail():
+    # tau 50 ms. Hit 0 is cut off by hit 1 100 ms later; hit 1 is complete (600 ms of room) but starts on
+    # hit 0's tail, which is 16 dB down in the 20 ms before it. Hit 2 (500 ms of room) starts from quiet.
+    # Of the two complete hits the one with the quiet lead-in is the pick, though it is later.
+    r = oneshot.profile_array(take([0, 0.10, 0.70], 1.2, tau=0.05), SR, hit="clean")
+    assert r["hits"] == 3 and r["hit"] == 2
+    # with nothing else complete, the hit on the tail is still better than nothing (the rule is a preference)
+    assert oneshot.profile_array(take([0, 0.10], 0.9, tau=0.05), SR, hit="clean")["hit"] == 1
+
+
+def test_clean_hit_a_peak_more_than_3_db_from_the_median_is_not_typical():
+    # four hits with 500 ms of room each; the first is 4 dB louder than the other three (the median), all
+    # within the 6 dB band: the pick is the earliest typical one, hit 1, not hit 0
+    x = take([0, 0.5, 1.0, 1.5], 2.0, tau=0.03)
+    x[int(0.5 * SR):] *= 10 ** (-4 / 20)
+    r = oneshot.profile_array(x, SR, hit="clean")
+    assert r["hits"] == 4 and r["hit"] == 1
+    # 2 dB louder is typical: the earliest, hit 0
+    y = take([0, 0.5, 1.0, 1.5], 2.0, tau=0.03)
+    y[int(0.5 * SR):] *= 10 ** (-2 / 20)
+    assert oneshot.profile_array(y, SR, hit="clean")["hit"] == 0
 
 
 def test_clean_hit_none_complete_is_refused_with_no_clean_hit():
@@ -985,3 +1014,14 @@ def test_clean_hit_near_a_position_is_judged_against_the_span_not_a_louder_hit_a
     assert near["hit"] == 1 and "requested position" in near["notes"][0]
     nothing_inside = oneshot.profile_array(x[:int(1.0 * SR)], SR, hit="clean", within=(0.5, 1.0), near=0.49)
     assert nothing_inside["hit"] == 0                  # only an edge hit exists, and it is the one asked for
+
+
+def test_hit_cut_is_the_same_whatever_the_offset_it_was_read_at():
+    x = take([0.30, 0.90], 1.6, tau=0.04)
+    a = oneshot.hit_cut(x, SR, 0.30, 0.90 - 0.001)
+    shifted = np.concatenate([np.zeros((int(0.0123 * SR), 1)), x])                  # the same audio read 12.3 ms late
+    b = oneshot.hit_cut(shifted, SR, 0.30 + 0.0123 + 0.004, 0.90 + 0.0123 - 0.001)  # and asked for 4 ms off
+    n = min(len(a), len(b))
+    assert abs(len(a) - len(b)) <= 2 and np.allclose(a[:n], b[:n], atol=1e-9)
+    ra, rb = oneshot.profile_array(a, SR), oneshot.profile_array(b, SR)
+    assert oneshot.compare(ra, rb)["readings"] == []
