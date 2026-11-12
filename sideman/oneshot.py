@@ -534,9 +534,11 @@ def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray
     for k, (_, end) in enumerate(segs):
         if k == 0 and skip0:
             continue
+        if within is not None and not within[0] - NEAR_S <= onsets[k] / sr < within[1] + NEAR_S:
+            continue                           # never a candidate (below): not worth measuring
         cut = "the file ends" if k == len(segs) - 1 else "the next hit starts"
         try:
-            got = _measure(x[onsets[k]:end], sr, cut)
+            got = _measure(x[onsets[k]:end], sr, cut, quick=True)
         except ValueError:
             continue
         if got["truncated"]:
@@ -544,7 +546,7 @@ def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray
         lead = mag[max(0, onsets[k] - int(LEAD_S * sr)):onsets[k]]
         quiet = not len(lead) or 20 * math.log10(max(float(lead.max()), 1e-12)) <= got["peak_db"] - LEAD_DB
         room = (onsets[k + 1] if k + 1 < len(segs) else x.shape[0]) - onsets[k]
-        complete.append({"k": k, "got": got, "room": room, "at": onsets[k] / sr, "quiet": quiet})
+        complete.append({"k": k, "got": got, "room": room, "at": onsets[k] / sr, "quiet": quiet, "cut": cut})
     inside = complete
     if within is not None:
         inside = [c for c in complete if within[0] <= c["at"] < within[1]]
@@ -555,21 +557,23 @@ def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray
     if not inside:
         raise ValueError("no clean hit: none of the %d hit%s is complete (not cut off before falling 40 dB) "
                          "and inside the span asked for" % (len(segs), "" if len(segs) == 1 else "s"))
+    c, why = None, None
     if near is not None:                       # like with like: the hit at that place, whatever the span's own band
         close = [c for c in complete if abs(c["at"] - near) <= NEAR_S]
         if close:
-            c = min(close, key=lambda c: abs(c["at"] - near))
-            return c["k"], c["got"], int(round(_ms(c["room"], sr))), "the hit at the requested position"
-    loud = max(c["got"]["peak_db"] for c in inside)
-    cands = [c for c in inside if c["got"]["peak_db"] >= loud - CLEAN_BAND_DB]
-    cands = [c for c in cands if c["quiet"]] or cands
-    med_room = float(np.median([c["room"] for c in cands]))
-    roomy = [c for c in cands if c["room"] >= ROOM_FRAC * med_room]
-    med_peak = float(np.median([c["got"]["peak_db"] for c in roomy]))
-    typical = [c for c in roomy if abs(c["got"]["peak_db"] - med_peak) <= TYPICAL_DB]
-    c = min(typical or roomy, key=lambda c: c["k"])
-    why = "typical of %d candidate%s" % (len(roomy), "" if len(roomy) == 1 else "s")
-    return c["k"], c["got"], int(round(_ms(c["room"], sr))), why
+            c, why = min(close, key=lambda c: abs(c["at"] - near)), "the hit at the requested position"
+    if c is None:
+        loud = max(c["got"]["peak_db"] for c in inside)
+        cands = [c for c in inside if c["got"]["peak_db"] >= loud - CLEAN_BAND_DB]
+        cands = [c for c in cands if c["quiet"]] or cands
+        med_room = float(np.median([c["room"] for c in cands]))
+        roomy = [c for c in cands if c["room"] >= ROOM_FRAC * med_room]
+        med_peak = float(np.median([c["got"]["peak_db"] for c in roomy]))
+        typical = [c for c in roomy if abs(c["got"]["peak_db"] - med_peak) <= TYPICAL_DB]
+        c = min(typical or roomy, key=lambda c: c["k"])
+        why = "typical of %d candidate%s" % (len(roomy), "" if len(roomy) == 1 else "s")
+    got = _measure(x[onsets[c["k"]]:segs[c["k"]][1]], sr, c["cut"])      # only the pick is measured in full
+    return c["k"], got, int(round(_ms(c["room"], sr))), why
 
 
 def hit_cut(x: np.ndarray, sr: int, at: float, length: float | None = None) -> np.ndarray:
@@ -657,9 +661,10 @@ def profile_array(x: np.ndarray, sr: int, hit: int | str | None = None, within: 
     return out
 
 
-def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
+def _measure(y: np.ndarray, sr: int, cut: str, quick: bool = False) -> dict:
     """The profile of one hit y [n, channels], which starts at its onset and
-    ends where `cut` says ("the file ends" or "the next hit starts")."""
+    ends where `cut` says ("the file ends" or "the next hit starts"). `quick`
+    returns only {"peak_db", "truncated"}, as the full profile has them."""
     notes = []
     peak = float(np.abs(y).max())
     if len(y) < FRAME_S[0] * sr:
@@ -683,7 +688,6 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
     b0, b1 = int(t0), int(t1)
     out["body_window_ms"] = [_ms(b0, sr), _ms(b1, sr)]
 
-    z = _analytic(y)
     f0, tonal, body = None, [], None
     if b1 - b0 >= int(FRAME_S[0] * sr):
         body = _spectrum(y, b0, b1, sr)
@@ -724,6 +728,9 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
     else:
         length = int(0.005 * sr)
     env = _boxcar(power, max(1, length))
+    if quick:                  # what the clean-hit pick needs, read as below
+        ip = int(np.argmax(env))
+        return {"peak_db": out["peak_db"], "truncated": _last_above(env, ip, env[ip] * 10 ** (-FALLS_DB[-1] / 10)) is None}
     if pitched:                # harmonics on the body flattened by the whole-period envelope, so a
         flat = _spectrum(y, b0, b1, sr, level=env)      # fast decay does not smear f0 into 2 f0
         near = [t for t in _tonal(flat, nyq_hi) if abs(t[0] - f0) <= HARM_TOL * f0]
@@ -751,6 +758,7 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
         # a fundamental more than STRONG_DB under its strongest harmonic is lost in that
         # harmonic's skirt in a short frame: follow the harmonic and divide by its number
         k = round(tonal[0][0] / f0) if tonal[0][1] - l1 > STRONG_DB and _harmonic(tonal[0][0], f0) else 1
+        z = _analytic(y)
         dense, reached = _track(z, sr, k * f0, round((b0 + b1) / 2 / sr, 3), gate, k)
         dense = [(c, f / k) for c, f in dense]
         if k > 1:
