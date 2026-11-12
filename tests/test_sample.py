@@ -108,7 +108,11 @@ def test_envelope_and_pitch_ignore_sample_rate():
     assert b["click_db"] == pytest.approx(a["click_db"], abs=1.5)
     for band in ("sub", "bass", "low_mid", "mid"):
         assert b["bands_db"][band] == pytest.approx(a["bands_db"][band], abs=0.5), band
-    assert b["pitch_track_hz"] == pytest.approx(a["pitch_track_hz"], rel=0.02)
+    # a point the track cannot read is None on both sides; the others agree. (pytest.approx on the whole dict
+    # relied on older versions letting None through; 9.2 raises TypeError for None with a relative tolerance.)
+    assert {k for k, v in b["pitch_track_hz"].items() if v is None} == {k for k, v in a["pitch_track_hz"].items() if v is None}
+    assert {k: v for k, v in b["pitch_track_hz"].items() if v is not None} == pytest.approx(
+        {k: v for k, v in a["pitch_track_hz"].items() if v is not None}, rel=0.02)
 
 
 def test_envelope_cut_short_is_none_with_a_reason():
