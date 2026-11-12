@@ -87,6 +87,7 @@ SETTLE_ST = 0.5
 SETTLE_HOLD_S = 0.010    # settled = within SETTLE_ST and still there 10 ms later
 EARLY_SPAN_S = 0.030     # zero crossings are read up to the first frame's centre + this
 EARLY_RATIO = 1.8        # one half-period may differ from the last by this factor (a fast kick: 1.5)
+EARLY_STEP_ST = 0.3      # the first half-periods are extended to the onset only for a step this big
 EARLY_ST = 1.5           # and they must meet the first frame within this
 STEP_ST = 2.0            # a track frame may move this far from the one 1 ms before it
 PITCHED_DB = 25.0        # a fundamental this far above the noise around it is pitched...
@@ -252,17 +253,18 @@ def _track(z: np.ndarray, sr: int, f0: float, mid: float, end: int) -> tuple[lis
     return back[::-1] + fwd, reached
 
 
-def _crossings(v: np.ndarray, sr: int, period: float, from_zero: bool) -> np.ndarray:
+def _crossings(v: np.ndarray, sr: int, period: float, from_zero: float | None) -> np.ndarray:
     """Zero-crossing times (s, interpolated) of v, counted with a hysteresis of
     a tenth of the local amplitude (the max over one period either side), so
     noise riding on a slow crossing does not add crossings. The onset counts
-    as one when `from_zero` (the hit starts near zero)."""
+    as one, at `from_zero` (in samples, possibly before it), when the hit
+    starts near zero."""
     w = max(1, int(period * sr))
     a = np.abs(v)
     loc = sliding_window_view(np.pad(a, (w, w)), 2 * w + 1).max(axis=1)[:len(v)]
     out, state, last = [], 0, None
-    if from_zero:
-        out.append(0.0)
+    if from_zero is not None:
+        out.append(from_zero / sr)
     for i in range(1, len(v)):
         if (v[i - 1] <= 0 < v[i]) or (v[i - 1] >= 0 > v[i]):
             last = i - 1 + v[i - 1] / (v[i - 1] - v[i])
@@ -282,10 +284,14 @@ def _early_pitch(y: np.ndarray, sr: int, f1: float, t1: float) -> tuple | None:
     half-period within EARLY_RATIO of the last, reaching t1 within EARLY_ST
     of the frame there. Leading crossings out of step (a click) are skipped;
     otherwise the first two half-periods are extended linearly to the onset
-    when that step stands out of the crossings' jitter."""
+    when that step is at least EARLY_STEP_ST, the third half-period moves the
+    same way, and it stands out of the crossings' jitter."""
     m = y.mean(axis=1)[:int((t1 + EARLY_SPAN_S) * sr)]
-    from_zero = abs(m[0]) < 0.1 * np.abs(m[:max(1, int(sr / f1))]).max()
-    smooth = max(1, int(round(sr / (8 * f1))))       # a centred boxcar: zero phase, takes a click off
+    from_zero = None           # a hit starting near zero crosses it at the onset: where, exactly,
+    if len(m) > 1 and abs(m[0]) < 0.1 * np.abs(m[:max(1, int(sr / f1))]).max() and m[1] != m[0]:
+        from_zero = min(0.0, -m[0] / (m[1] - m[0]))   # often a sample before the trimmed start
+    smooth = max(1, int(round(sr / (8 * f1)))) | 1   # an odd, centred boxcar: zero phase (an even one
+    # would delay every crossing but the onset's by half a sample), takes a click off
     m = np.convolve(m, np.ones(smooth) / smooth, mode="same")
     tz = _crossings(m, sr, 1.0 / f1, from_zero)
     if len(tz) < 4:
@@ -302,7 +308,7 @@ def _early_pitch(y: np.ndarray, sr: int, f1: float, t1: float) -> tuple | None:
     if len(f) < 3 or mid[-1] < t1 or abs(12 * math.log2(np.interp(t1, mid, f) / f1)) > EARLY_ST:
         return None
     points = [(float(t), float(v)) for t, v in zip(mid, f)]
-    since = float(tz[first])               # the first half-period starts here
+    since = float(tz[first])               # the first half-period starts here (0 or just before)
     if first:
         return points, since, True
     # extend the first two half-periods to the onset, but only when the step is
@@ -311,8 +317,10 @@ def _early_pitch(y: np.ndarray, sr: int, f1: float, t1: float) -> tuple | None:
     f0 = f[0] - (f[1] - f[0]) / (mid[1] - mid[0]) * mid[0]
     jitter = np.std(np.diff(f[:8], 2)) / math.sqrt(6) if len(f) >= 4 else 0.0
     spread = jitter * math.sqrt(1 + 2 * (mid[0] / (mid[1] - mid[0])) ** 2)
-    if abs(f0 - f[0]) <= 2 * spread:
-        return points, since, False
+    real = (abs(12 * math.log2(f0 / f[0])) >= EARLY_STEP_ST and (f[2] - f[1]) * (f[1] - f[0]) > 0
+            and abs(f0 - f[0]) > 2 * spread)          # a step of its own, and the third half-period agrees
+    if not real:
+        return points, max(0.0, since), False
     return [(0.0, float(f0))] + points, 0.0, False
 
 

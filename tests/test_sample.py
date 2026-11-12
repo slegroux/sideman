@@ -663,3 +663,18 @@ def test_envelope_capped_file_blames_the_limit():
     r = oneshot.profile_array(hit(100, 20.0, seconds=10.5), SR)
     assert any("10 s limit is reached before the hit falls 20 dB" in n for n in r["notes"])
     assert not any("file ends" in n for n in r["notes"])
+
+
+@pytest.mark.parametrize("f0", [40, 45, 60, 300, 557, 600, 750, 1000])
+def test_pitch_steady_tone_has_no_drop_at_any_phase_or_rate(f0):
+    # a steady sine has no pitch drop, whatever its start phase or sample rate, and two
+    # such hits of one pitch compare with no pitch or drop reading
+    profiles = []
+    for phase in (0.0, 1.0, math.pi / 2, math.pi):
+        for sr in (44100, 48000):
+            r = oneshot.profile_array(hit(f0, 0.1, seconds=0.3, phase=phase, sr=sr), sr)
+            assert abs(r["pitch_drop_st"]) <= 0.2, (phase, sr, r["pitch_drop_st"])
+            profiles.append(r)
+    for a in profiles:
+        for b in profiles:
+            assert not [t for t in oneshot.compare(a, b)["readings"] if "pitch" in t], (a["pitch_start_hz"], b["pitch_start_hz"])
