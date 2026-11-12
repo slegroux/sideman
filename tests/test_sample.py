@@ -96,10 +96,19 @@ def test_envelope_and_pitch_ignore_sample_rate():
     # the same hit synthesised at 44.1 and 48 kHz
     a = oneshot.profile_array(hit(sweep, 0.05, partials={1: 1.0, 3: 0.3}, sr=48000), 48000)
     b = oneshot.profile_array(hit(sweep, 0.05, partials={1: 1.0, 3: 0.3}, sr=44100), 44100)
-    assert b["fall_20_ms"] == pytest.approx(a["fall_20_ms"], abs=2)
+    for k in ("attack_ms", "fall_10_ms", "fall_20_ms", "fall_40_ms", "duration_ms", "pitch_settle_ms"):
+        assert b[k] == pytest.approx(a[k], abs=2), k
     assert b["pitch_body_hz"] == pytest.approx(a["pitch_body_hz"], rel=0.002)
     assert b["pitch_start_hz"] == pytest.approx(a["pitch_start_hz"], rel=0.01)
+    assert b["pitch_drop_st"] == pytest.approx(a["pitch_drop_st"], abs=0.1)
     assert b["harmonics_db"][3] == pytest.approx(a["harmonics_db"][3], abs=0.5)
+    assert a["harmonics_db"][2] < -40 and b["harmonics_db"][2] < -40      # none there: both read the floor
+    for part in ("attack", "body"):
+        assert b["noise_db"][part] == pytest.approx(a["noise_db"][part], abs=1.5), part
+    assert b["click_db"] == pytest.approx(a["click_db"], abs=1.5)
+    for band in ("sub", "bass", "low_mid", "mid"):
+        assert b["bands_db"][band] == pytest.approx(a["bands_db"][band], abs=0.5), band
+    assert b["pitch_track_hz"] == pytest.approx(a["pitch_track_hz"], rel=0.02)
 
 
 def test_envelope_cut_short_is_none_with_a_reason():
@@ -250,7 +259,7 @@ def test_noise_alone_is_unpitched_with_no_harmonic_values():
     # a white-noise periodogram is exponentially distributed: geometric / arithmetic
     # mean = e^(-Euler's gamma) = 0.561
     assert r["flatness"]["body"] == pytest.approx(math.exp(-0.5772156649), abs=0.05)
-    assert r["notes"]
+    assert any("no tonal peak in the body" in n for n in r["notes"])
 
 
 def test_noise_flatness_of_a_pure_tone_is_near_zero():

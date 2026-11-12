@@ -6,6 +6,7 @@ is reachable without shipping new code.
 """
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import socket
@@ -604,20 +605,12 @@ LISTEN_HINT = ("the listening tools need the optional `listen` extra (numpy, "
                "uv pip install -e '.[listen]'")
 
 
-def _listen():
+def _listen(module: str = "listen"):
+    """sideman.listen (or sideman.oneshot), or the install hint when the extra is missing."""
     try:
-        from sideman import listen
+        return importlib.import_module("sideman." + module)
     except ImportError as e:
         raise LiveError("%s (%s)" % (LISTEN_HINT, e))
-    return listen
-
-
-def _oneshot():
-    try:
-        from sideman import oneshot
-    except ImportError as e:
-        raise LiveError("%s (%s)" % (LISTEN_HINT, e))
-    return oneshot
 
 
 def _audio_file(source: str) -> str:
@@ -686,7 +679,7 @@ def audio_compare(a: str, b: str) -> str:
 
 
 def _profile(source: str, hit: int | None) -> dict:
-    oneshot = _oneshot()
+    oneshot = _listen("oneshot")
     path = _audio_file(source)
     try:
         return oneshot.profile(path, hit)
@@ -702,7 +695,7 @@ def sample_analyze(source: str, hit: int | None = None) -> str:
 
     `source` is a mono or stereo file path or an audio clip's LOM path (the
     clip's whole source file). Every measure is relative to the hit itself:
-    times from its onset (the first sample within 40 dB of its peak), levels
+    times from its onset (the first 1 ms within 40 dB of its loudest), levels
     against its own peak or fundamental, so level, leading silence and sample
     rate do not change them. For a mix or a whole track use audio_analyze.
 
@@ -713,18 +706,21 @@ def sample_analyze(source: str, hit: int | None = None) -> str:
     when it rises 15 dB within 10 ms over a tail that has fallen that far,
     so a tremolo or a tom's beating stays one hit, and so does a fast roll.
 
-    Envelope: peak_db (dBFS), attack_ms (onset to the envelope peak, good to
-    half a period of the pitch), fall_10_ms / fall_20_ms / fall_40_ms (from the
+    Envelope: peak_db (dBFS), attack_ms (onset to the first moment within
+    1 dB of the envelope peak, over whole periods), fall_10_ms / fall_20_ms / fall_40_ms (from the
     peak to the last moment above peak - 10/20/40 dB), duration_ms (to -60 dB).
-    Pitch: `pitched` (false for noise or an inharmonic cymbal or bell: then no
+    Pitch: `pitched` (false for noise, a cymbal or an inharmonic bell: then no
     pitch and no harmonics, only `partials`), pitch_body_hz (40-150 ms, the
-    fundamental: the lowest strong partial, not the loudest), pitch_start_hz
-    (read about 1.5 periods in, at pitch_start_at_ms, so a glide faster than
-    that reads low), pitch_drop_st (start minus body), pitch_settle_ms (when it
-    comes within 0.5 st of the body pitch and stays 10 ms), pitch_track_hz at
-    0, 5, 10, 20, 40, 80, 150, 300 ms.
-    Tone, on the body: harmonics_db (2-8, dB against the fundamental) with
-    harmonics_floor_db (the spectral floor around each), `partials` (strongest
+    fundamental: the lowest strong partial, not the loudest, and a weak one
+    under strong overtones when its own series shows it), pitch_start_hz (at
+    the onset, from zero crossings; pitch_start_at_ms says where it was read
+    when a click or a messy start moves it later), pitch_drop_st (start minus
+    body), pitch_settle_ms (when it comes within 0.5 st of the body pitch and
+    stays 10 ms), pitch_track_hz at 0, 5, 10, 20, 40, 80, 150, 300 ms (null
+    where nothing reads it).
+    Tone, on the body: harmonics_db (2-8, dB against the fundamental; null
+    when the body holds under 4 periods; a harmonic with no peak reads the
+    floor) with harmonics_floor_db (the spectral floor around each), `partials` (strongest
     non-harmonic peaks, Hz and dB), noise_db (energy outside the tonal peaks,
     dB against the total) and flatness (0 tone .. 0.56 white noise) for attack
     (0-30 ms) and body, click_db (attack power above 2 kHz against the
@@ -757,7 +753,7 @@ def sample_compare(a: str, b: str, hit_a: int | None = None, hit_b: int | None =
     give no reading. Change the patch, record again, compare again until
     `readings` is empty. Local only; needs the `listen` extra.
     """
-    oneshot = _oneshot()
+    oneshot = _listen("oneshot")
     return json.dumps(oneshot.compare(_profile(a, hit_a), _profile(b, hit_b)), indent=2)
 
 

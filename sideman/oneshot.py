@@ -22,15 +22,20 @@ Choices that are not obvious from the code:
 - Pitch frames are Hann windows on the analytic signal (no negative-frequency
   image), three periods long, zero-padded 8x, with parabolic interpolation on
   the dB spectrum. A spectral peak must be the maximum within one bin of the
-  unpadded FFT, so window sidelobes never count. The fundamental is the
-  lowest peak within 20 dB of the strongest, not the loudest one.
+  unpadded FFT, so window sidelobes never count.
 - The track is chained: frames 1 ms apart, from the body window's centre
   back to the onset and on to 300 ms, each sized by and held within 2 st of
   its neighbour's pitch, so it cannot jump to a harmonic or to a thump below.
-  A frame is centred on its time; one that would start before the onset
-  starts there, so the early points (and pitch_start_hz) are the pitch about
-  1.5 periods in: a glide that moves within its first three periods reads
-  lower than its very first cycle, and pitch_start_at_ms says when it was read.
+  A frame is centred on its time, so the first one sits about 1.5 periods in.
+- Before that, the pitch comes from half-periods between zero crossings
+  (hysteresis a tenth of the local amplitude, after a 1/8-period centred
+  boxcar), when they follow one pitch: each within 1.8x of the last, and
+  meeting the first frame within 1.5 st. Leading crossings out of step (a
+  click) are skipped; otherwise the first two half-periods are extended to
+  the onset when that step stands out of the crossings' jitter.
+  pitch_start_at_ms says where the start was read. Where neither the
+  crossings nor a frame cover a track point, it is None. A stick transient
+  whose crossings run smoothly into the tone reads as part of the glide.
 - The body pitch comes from one long window, 40-150 ms (shortened for a hit
   that is over sooner), since a 25 ms window resolves only about 40 Hz.
 - The fundamental is the lowest peak within 20 dB of the strongest, with two
@@ -62,7 +67,7 @@ import pathlib
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
-from .listen import BANDS, FLOOR_DB, _check_channels, _db, load
+from .listen import BANDS, FLOOR_DB, _band, _check_channels, _db, load
 
 ONSET_DB = 40.0          # the onset is the first 1 ms frame within this of the loudest
 FALLS_DB = (10, 20, 40)
@@ -674,7 +679,7 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
     hit = y[:end]
     spec = (np.abs(np.fft.rfft(hit, axis=0)) ** 2).mean(axis=1)
     hz = np.fft.rfftfreq(len(hit), 1.0 / sr)
-    bands = {name: float(spec[(hz >= lo) & (hz < hi)].sum()) for name, lo, hi in BANDS}
+    bands = {name: _band(spec, hz, lo, hi) for name, lo, hi in BANDS}
     total = sum(bands.values())
     out["bands_db"] = {k: round(_db(v / total), 1) for k, v in bands.items()} if total > 0 else None
     if hit.shape[1] == 2:
@@ -699,12 +704,18 @@ def profile(path: str | pathlib.Path, hit: int | None = None) -> dict:
     attack_ms       onset to the envelope peak (first within 1 dB of it, over whole periods)
     fall_10/20/40_ms  envelope peak to the last moment above peak - 10/20/40 dB
     duration_ms     onset to the last moment above peak - 60 dB
-    pitched         false for noise or an inharmonic sound: no pitch, no harmonics
-    pitch_start_hz  pitch of the first frame (about 1.5 periods in: pitch_start_at_ms)
+    pitched         false for noise, a cymbal or an inharmonic sound: no pitch, no
+                    harmonics (the fundamental must stand 25 dB above the noise around
+                    it, or 15 dB in a body that is not mostly noise)
+    pitch_start_hz  pitch at the onset, from zero crossings (or where pitch_start_at_ms
+                    says: after a click, or at the first frame when the crossings
+                    do not follow one pitch)
     pitch_body_hz   pitch over body_window_ms (40-150 ms, shorter for a short hit)
     pitch_drop_st   start minus body, semitones
     pitch_settle_ms when the pitch comes within 0.5 st of the body pitch and stays 10 ms
-    pitch_track_hz  pitch at 0, 5, 10, 20, 40, 80, 150, 300 ms (None once the hit is 50 dB down)
+                    (None when it never does, or is already there where first read)
+    pitch_track_hz  pitch at 0, 5, 10, 20, 40, 80, 150, 300 ms (None where nothing reads
+                    it: before the first crossing or frame, once the hit is 50 dB down)
     harmonics_db    harmonics 2-8 against the fundamental, on the body (None above
                     min(20 kHz, 0.45 sr); a harmonic with no peak of its own reads the
                     floor there; all None when the body holds under 4 periods)
