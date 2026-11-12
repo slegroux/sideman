@@ -458,3 +458,36 @@ def test_envelope_attack_ignores_start_phase_and_clipping():
         assert oneshot.profile_array(x, SR)["attack_ms"] <= 1.0
     r = oneshot.profile_array(hit(200, 0.15, attack=0.010), SR)
     assert r["attack_ms"] == pytest.approx(10 * 10 ** (-1 / 20), abs=1.0)
+
+
+def test_pitch_weak_fundamental_under_strong_overtones():
+    # 100 Hz at -26 dB under 200, 300, 400 Hz: 300 Hz belongs to 100's series and
+    # not to 200's, so 100 Hz is the fundamental
+    r = oneshot.profile_array(hit(100, 0.2, partials={1: 0.05, 2: 1.0, 3: 0.5, 4: 0.3}), SR)
+    assert r["pitch_body_hz"] == pytest.approx(100, rel=0.02)
+    assert r["harmonics_db"][2] == pytest.approx(20 * math.log10(1 / 0.05), abs=1)    # +26 dB
+
+
+def test_pitch_lone_peak_under_the_pitch_is_named_not_taken():
+    # a 150 Hz tom (and its 2nd harmonic) over a 50 Hz rumble 14 dB down: nothing but the
+    # rumble itself is in 50 Hz's series and not 150 Hz's, so the pitch stays 150 Hz
+    t = np.arange(int(0.6 * SR)) / SR
+    x = (np.sin(2 * np.pi * 150 * t) + 0.3 * np.sin(2 * np.pi * 300 * t)
+         + 0.2 * np.sin(2 * np.pi * 50 * t)) * np.exp(-t / 0.15)
+    r = oneshot.profile_array(x[:, None], SR)
+    assert r["pitch_body_hz"] == pytest.approx(150, rel=0.01)
+    assert any(n.startswith("50 Hz") and "1/3 of the pitch" in n for n in r["notes"])
+    # the same shape with the low peak further down (100 Hz at -22 dB under 300 and 600 Hz)
+    # cannot be told from a rumble either: it is named, not dropped
+    r = oneshot.profile_array(hit(100, 0.2, partials={1: 0.08, 3: 1.0, 6: 0.3}), SR)
+    assert any(n.startswith("100 Hz") and "1/3 of the pitch" in n for n in r["notes"])
+
+
+@pytest.mark.parametrize("snr", [0, -3, -6])
+def test_noise_tone_buried_in_noise_stays_pitched(snr):
+    # a 200 Hz tone with white noise at the tone's power + |snr| dB: per bin the tone
+    # still stands far above the noise, so it is pitched at 200 Hz
+    t = np.arange(int(0.5 * SR)) / SR
+    noise = np.random.default_rng(1).standard_normal(len(t)) * math.sqrt(0.5) * 10 ** (-snr / 20)
+    r = oneshot.profile_array(((np.sin(2 * np.pi * 200 * t) + noise) * np.exp(-t / 0.08))[:, None], SR)
+    assert r["pitched"] is True and r["pitch_body_hz"] == pytest.approx(200, rel=0.01)

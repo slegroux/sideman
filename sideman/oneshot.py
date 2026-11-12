@@ -33,10 +33,19 @@ Choices that are not obvious from the code:
   lower than its very first cycle, and pitch_start_at_ms says when it was read.
 - The body pitch comes from one long window, 40-150 ms (shortened for a hit
   that is over sooner), since a 25 ms window resolves only about 40 Hz.
+- The fundamental is the lowest peak within 20 dB of the strongest, with two
+  corrections: a lone low peak (no harmonic of its own beyond the series of
+  a strong peak 2-4x above it) more than 10 dB down is a rumble, and a weaker
+  peak at 1/2-1/4 of the pitch whose series has a peak of its own beyond the
+  pitch's series is a weak fundamental under strong overtones. A lone peak at
+  1/k of the pitch cannot be told from a rumble, so a note names it.
 - A hit is pitched when the body has a peak at least 15 dB above its local
-  spectral floor and the fundamental's harmonic series holds at least half of
-  the energy of all such peaks. Otherwise (noise, or an inharmonic bell) it
-  reports its partials and no pitch.
+  spectral floor, the fundamental's harmonic series holds at least half of
+  the energy of all such peaks, and the fundamental stands 25 dB above the
+  noise around it, or 15 dB in a body whose noise share is under -3 dB.
+  (Prominence alone cannot separate a ride, 20 dB, from a clave, 20 dB;
+  the noise share alone flipped a tone 30 dB clear of its noise.) Otherwise
+  (noise, a cymbal, an inharmonic bell) it reports its partials and no pitch.
 - Noise share is the energy outside the main lobes of the tonal peaks (every
   peak 15 dB above its local floor, harmonic or not; a lobe runs down to its
   first minimum, at most 4 bins out), against the total, from 20 Hz up. The
@@ -71,7 +80,9 @@ HARM_TOL = 0.03          # a partial within 3 % of k * f0 is harmonic k
 SETTLE_ST = 0.5
 SETTLE_HOLD_S = 0.010    # settled = within SETTLE_ST and still there 10 ms later
 STEP_ST = 2.0            # a track frame may move this far from the one 1 ms before it
-NOISY_DB = -3.0          # a body whose noise share is above this is unpitched
+PITCHED_DB = 25.0        # a fundamental this far above the noise around it is pitched...
+NOISY_DB = -3.0          # ...and so is a less prominent one in a body that is not mostly noise
+LONE_DB = 10.0           # a lone peak at 1/k of a strong one, further down than this, is a rumble
 PARTIALS_DB = 40.0       # inharmonic partials are listed down to this under the strongest peak
 MAX_PARTIALS = 5
 CLICK_HZ = 2000.0
@@ -247,6 +258,42 @@ def _noise_flatness(s: dict, peaks: list, hi_hz: float) -> tuple[float, float]:
     return noise, flat
 
 
+def _fundamental(tonal: list) -> tuple[float, float, int, list]:
+    """(Hz, dB, bin, notes) of the fundamental among the tonal peaks: the
+    lowest within STRONG_DB of the strongest, then
+    - a lone low peak (no harmonic of its own beyond the series of a strong
+      peak 2-4x above it) more than LONE_DB under the strongest is a rumble,
+      and that peak is the fundamental instead;
+    - a weaker peak at 1/2-1/4 of it (down to PARTIALS_DB) is the fundamental
+      when its series has a peak of its own beyond that series: a weak
+      fundamental under strong overtones.
+    A lone peak at 1/k of the result is named in a note."""
+    top = tonal[0][1]
+    cand = sorted((t for t in tonal if t[1] >= top - PARTIALS_DB), key=lambda t: t[0])
+
+    def sub(g, h):             # g at h/k, k = 2-4
+        k = round(h[0] / g[0])
+        return 2 <= k <= 4 and abs(h[0] - k * g[0]) <= HARM_TOL * h[0]
+
+    def backed(g, h):          # a peak besides g in g's series and not in h's
+        return any(t is not g and _harmonic(t[0], g[0]) and not _harmonic(t[0], h[0]) for t in cand)
+    p = min((t for t in cand if t[1] >= top - STRONG_DB), key=lambda t: t[0])
+    for _ in range(len(cand)):
+        up = [h for h in cand if h[1] >= top - STRONG_DB and sub(p, h) and not backed(p, h)]
+        if up and p[1] < top - LONE_DB:
+            p = up[0]
+            continue
+        down = [g for g in cand if sub(g, p) and backed(g, p)]
+        if down:
+            p = down[0]
+            continue
+        break
+    notes = ["%s Hz at %.0f dB sits at 1/%d of the pitch with no harmonics of its own: "
+             "a weak fundamental or a rumble" % (_num(g[0]), g[1] - p[1], round(p[0] / g[0]))
+             for g in cand if sub(g, p)]
+    return p[0], p[1], p[2], notes
+
+
 def _harmonic(hz: float, f0: float) -> bool:
     """Whether hz is within HARM_TOL of a whole multiple (1, 2, ...) of f0."""
     k = round(hz / f0)
@@ -388,15 +435,17 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
         body = _spectrum(z, b0, b1, sr)
         tonal = _tonal(body, nyq_hi)
     if tonal:
-        top = tonal[0][1]
-        f0, l1 = min((t for t in tonal if t[1] >= top - STRONG_DB), key=lambda t: t[0])[:2]
+        f0, l1, i0, said = _fundamental(tonal)
+        notes += said
         series = sum(10 ** (t[1] / 10) for t in tonal if _harmonic(t[0], f0))
+        stands = body["d"][i0] - (_floor(body, i0) or -np.inf)
         if series < 0.5 * sum(10 ** (t[1] / 10) for t in tonal):
             f0 = None
             notes.append("no harmonic series: the partials are listed, no pitch is given")
-        elif _noise_flatness(body, tonal, nyq_hi)[0] > NOISY_DB:
+        elif stands < PITCHED_DB and _noise_flatness(body, tonal, nyq_hi)[0] > NOISY_DB:
             f0 = None
-            notes.append("the body is mostly noise: the partials are listed, no pitch is given")
+            notes.append("the fundamental stands only %.0f dB above the noise around it and the body "
+                         "is mostly noise: the partials are listed, no pitch is given" % stands)
     elif body is None:
         notes.append("the hit is too short for a body window")
     else:
