@@ -554,6 +554,8 @@ def test_profile_refuses_bad_input(tmp_path):
         listen.reference_profile(ref["mix"], {"mix": ref["kick"]}, TEMPO, T0, SECTIONS[:1])
     with pytest.raises(ValueError, match="tempo"):
         listen.reference_profile(ref["mix"], {"kick": ref["kick"]}, 0, T0, SECTIONS[:1])
+
+
 def capture_of(ref, **over):
     """A manifest whose sources are the files of a stem_set (drums as the one summed file)."""
     src = {"master": ref["mix"], "kick": ref["kick"], "bass": ref["bass"], "synth": ref["synth"],
@@ -658,3 +660,22 @@ def test_elements_a_stale_profile_is_reported_and_a_plain_audio_reference_is_unc
         listen.mix_report(capture_of(ref), reference={"sections": []})
 
 
+def test_profile_tools_build_a_profile_and_mix_report_takes_its_path(tmp_path):
+    import json
+
+    import mcp_server.server as S
+    ref = stem_set(tmp_path, "ref")
+    out = tmp_path / "tool.profile.json"
+    prof = json.loads(S.reference_profile(
+        str(ref["mix"]), {"kick": str(ref["kick"]), "bass": str(ref["bass"]),
+                          "drums": [str(ref["hh"]), str(ref["snare"])]},
+        TEMPO, T0, SECTIONS, out=str(out)))
+    assert out.is_file() and prof["json_path"] == str(out.resolve())
+    r = json.loads(S.mix_report(capture_of(ref), reference=str(out), out_dir=str(tmp_path / "out")))
+    assert r["reference_kind"] == "profile" and r["sections"][0]["elements"]["capture_is_reference"]
+    r = json.loads(S.mix_report(capture_of(ref), reference=prof, out_dir=str(tmp_path / "out2")))
+    assert r["reference_kind"] == "profile"
+    with pytest.raises(S.LiveError, match="reference profile"):
+        S.reference_profile(str(ref["mix"]), {"kick": str(ref["kick"])}, TEMPO, T0, SECTIONS + SECTIONS[:1])
+    with pytest.raises(S.LiveError, match="no such profile file"):
+        S.mix_report(capture_of(ref), reference=str(tmp_path / "nope.json"))

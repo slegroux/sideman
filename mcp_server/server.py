@@ -630,6 +630,14 @@ def _audio_file(source: str) -> str:
     return path
 
 
+def _file(path: str, what: str) -> str:
+    """An absolute path of an existing plain file."""
+    path = os.path.abspath(os.path.expanduser(path.strip()))
+    if not os.path.isfile(path):
+        raise LiveError("no such %s file: %s" % (what, path))
+    return path
+
+
 def _analyze(source: str) -> dict:
     listen = _listen()
     path = _audio_file(source)
@@ -765,7 +773,7 @@ def sample_compare(a: str, b: str, hit_a: int | None = None, hit_b: int | None =
 
 
 @mcp.tool()
-def mix_report(manifest: dict[str, Any] | str, reference: str | None = None,
+def mix_report(manifest: dict[str, Any] | str, reference: dict[str, Any] | str | None = None,
                out_dir: str | None = None) -> str:
     """Per-section mix report of a capture: what to fix, section by section.
 
@@ -778,23 +786,81 @@ def mix_report(manifest: dict[str, Any] | str, reference: str | None = None,
     a "kick" (or "drums") plus a "bass" source adds masking.
 
     Per section: integrated / short-term max LUFS, true peak, crest, width,
-    low-end correlation, bands and side-minus-mid; with `reference` (a file
-    path) the bands more than 3 dB off its balance; with kick and bass, their
+    low-end correlation, bands and side-minus-mid; with `reference` as an
+    audio file path the bands more than 3 dB off its balance; with kick and bass, their
     40-120 Hz overlap (0 separate or sidechained .. 1 fully stacked; flagged
     above 0.5 unless the quieter part is more than 20 dB down). Over the whole capture, the spectral change between 4-bar
     blocks, flagging runs of more than 8 bars where nothing changes.
+
+    `reference` may instead be a reference profile (from reference_profile:
+    the path of its .profile.json, or the profile itself). Sections then pair
+    BY NAME with the profile's (same number of bars; one with no match, or of
+    another length, gets the mix layer only, with a note) and each gets the
+    mix compared with the reference's section (bands, width, loudness) and an
+    `elements` layer: every source in both the manifest and the profile as a
+    ratio to the kick in dB (reference, ours, difference; negative = quieter
+    than the kick), roles in the reference only / in ours only, the ratio
+    per 4 bars, and `gaps` (ratios more than 1 dB apart, largest first). The
+    `master` source is never ratioed against the elements, since it sits after
+    the master chain. If the master capture's level and width equal the
+    reference mix's, the section says "the capture is the reference: check
+    solos". With no `kick` source the table is left out with a note and the
+    mix layer still reports. `reference_stale` names profile inputs that
+    changed since it was built. The numbers are measurements, not moves: the
+    ear decides which gaps matter.
 
     Writes mix_report.json and mix_report.md (default: next to the master
     file) and returns the report. Local only; needs the `listen` extra.
     """
     listen = _listen()
-    ref = _audio_file(reference) if reference else None
+    if isinstance(reference, str) and reference.strip().lower().endswith(".json"):
+        ref = _file(reference, "profile")
+    else:
+        ref = reference if isinstance(reference, dict) else (_audio_file(reference) if reference else None)
     try:
         return json.dumps(listen.mix_report(manifest, ref, out_dir), indent=2)
     except MemoryError:
         raise LiveError("not enough memory for this capture; report fewer sections at a time")
     except (OSError, RuntimeError, ValueError, KeyError, TypeError, ArithmeticError) as e:
         raise LiveError("cannot build the mix report: %s: %s" % (type(e).__name__, e))
+
+
+@mcp.tool()
+def reference_profile(mix: str, stems: dict[str, str | list[str]], tempo: float, t0: float,
+                      sections: list[dict[str, Any]], beats_per_bar: int = 4,
+                      out: str | None = None) -> str:
+    """Measure a reference track and its stems once, per section, so a capture of
+    the Set can be compared with it: pass the result to mix_report as `reference`.
+
+    `mix` is the reference mix; `stems` maps a role to a file path or a list of
+    paths summed into that role: {"kick": "k.wav", "bass": "b.wav", "drums":
+    ["hh.wav", "snare.wav", "toms.wav"]}. Roles are free-form; `kick` is the
+    yardstick for every level against the kick. `tempo` (BPM) and `t0` (seconds
+    from the start of the files to bar 0) place the bar grid; `sections` are
+    {"name", "start_bar", "bars"} as in a capture manifest, with unique names
+    (mix_report pairs sections by name). All files must share one sample rate;
+    of different lengths they are trimmed to the shortest, and `notes` says so.
+
+    Per section: the mix's level (mean power, dBFS), integrated LUFS, six
+    bands, width and per-bar levels; for each role its level, `vs_kick_db`,
+    per-bar levels, bands and width. A role silent in a section (or more than
+    60 dB under the mix) is {"absent": true} there, not -120 dB.
+
+    Writes <mix name>.profile.json next to the mix (`out`: a .json path or a
+    folder) and returns the profile, with each input's path, mtime and size
+    under `inputs` (mix_report reports in `reference_stale` any that changed
+    since). Local only; needs the `listen` extra."""
+    listen = _listen()
+    files = {role: ([_audio_file(p) for p in v] if isinstance(v, list) else _audio_file(v))
+             for role, v in stems.items()}
+    try:
+        return json.dumps(listen.reference_profile(
+            _audio_file(mix), files, tempo, t0, sections, beats_per_bar,
+            os.path.abspath(os.path.expanduser(out)) if out else None), indent=2)
+    except MemoryError:
+        raise LiveError("not enough memory for these files; profile fewer stems at a time")
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, ArithmeticError) as e:
+        raise LiveError("cannot build the reference profile: %s: %s" % (type(e).__name__, e))
 
 
 def main() -> None:
