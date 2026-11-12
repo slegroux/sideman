@@ -689,3 +689,16 @@ def test_pitch_steady_tone_with_a_loud_2nd_harmonic_has_no_drop(partials):
     assert r["pitch_body_hz"] == pytest.approx(100, rel=0.01)
     assert abs(r["pitch_drop_st"]) <= 0.2
     assert all(v == pytest.approx(100, rel=0.012) for v in r["pitch_track_hz"].values() if v is not None)
+
+
+def test_pitch_weak_fundamental_is_tracked_like_any_tone():
+    # 100 Hz at -26 dB under 200/300/400 Hz: the track follows the 2nd harmonic and halves it
+    weak = {1: 0.05, 2: 1.0, 3: 0.5, 4: 0.3}
+    r = oneshot.profile_array(hit(100, 0.2, partials=weak), SR)
+    assert r["pitch_start_hz"] == pytest.approx(100, rel=0.02)
+    assert abs(r["pitch_drop_st"]) <= 0.2
+    assert [v for v in r["pitch_track_hz"].values() if v is not None] == pytest.approx([100] * 5, rel=0.02)
+    # the same tone gliding 160 -> 100 Hz over 30 ms reads a drop against it
+    glide160 = oneshot.profile_array(hit(lambda t: np.where(t < 0.03, 160 - 60 * t / 0.03, 100.0), 0.2,
+                                         partials=weak), SR)
+    assert any(t.startswith("pitch drops") for t in oneshot.compare(glide160, r)["readings"])

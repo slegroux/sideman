@@ -210,13 +210,14 @@ def _tonal(s: dict, hi_hz: float) -> list[tuple[float, float, int]]:
     return sorted(out, key=lambda t: -t[1])
 
 
-def _frame_pitch(z: np.ndarray, t: float, sr: int, guess: float, end: int) -> tuple:
+def _frame_pitch(z: np.ndarray, t: float, sr: int, guess: float, end: int, k: int = 1) -> tuple:
     """(Hz, centre in s, clamped) of a frame centred on t, PERIODS periods of
-    `guess` long. A frame that would start before the onset starts there
+    guess / k long (k: which harmonic is followed, so neighbours stay out of
+    its lobe). A frame that would start before the onset starts there
     (clamped); one that would run past `end` is not read. The pitch is the
     lowest peak within STRONG_DB of the frame's strongest that is also within
     STEP_ST of `guess`, so the track cannot jump to a harmonic or to rumble."""
-    w = int(round(min(max(PERIODS / guess, FRAME_S[0]), FRAME_S[1]) * sr))
+    w = int(round(min(max(PERIODS * k / guess, FRAME_S[0]), FRAME_S[1]) * sr))
     a = int(round(t * sr)) - w // 2
     clamped, a = a <= 0, max(0, a)
     if a + w > end:
@@ -231,13 +232,13 @@ def _frame_pitch(z: np.ndarray, t: float, sr: int, guess: float, end: int) -> tu
     return _interp(s, int(idx[0]))[0], (a + w / 2) / sr, clamped
 
 
-def _track(z: np.ndarray, sr: int, f0: float, mid: float, end: int) -> tuple[list, bool]:
+def _track(z: np.ndarray, sr: int, f0: float, mid: float, end: int, k: int = 1) -> tuple[list, bool]:
     """Dense pitch track, frames 1 ms apart, chained outward from `mid` (the
     body window's centre, where f0 holds) back to the onset and on to TRACK_MS's
     last point or `end`. ([(centre s, Hz)] in time order, whether it reached the onset)."""
     back, guess, reached = [], f0, False
     for t in np.arange(mid, -1e-9, -0.001):
-        f, c, clamped = _frame_pitch(z, float(t), sr, guess, end)
+        f, c, clamped = _frame_pitch(z, float(t), sr, guess, end, k)
         if f is None:
             break
         back.append((c, f))
@@ -247,7 +248,7 @@ def _track(z: np.ndarray, sr: int, f0: float, mid: float, end: int) -> tuple[lis
             break
     fwd, guess = [], f0
     for t in np.arange(mid + 0.001, TRACK_MS[-1] / 1000.0 + 0.001, 0.001):
-        f, c, _ = _frame_pitch(z, float(t), sr, guess, end)
+        f, c, _ = _frame_pitch(z, float(t), sr, guess, end, k)
         if f is None:
             break
         fwd.append((c, f))
@@ -629,7 +630,13 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
         out[key] = None
     if pitched:
         out["pitch_body_hz"] = round(f0, 2)
-        dense, reached = _track(z, sr, f0, round((b0 + b1) / 2 / sr, 3), gate)
+        # a fundamental more than STRONG_DB under its strongest harmonic is lost in that
+        # harmonic's skirt in a short frame: follow the harmonic and divide by its number
+        k = round(tonal[0][0] / f0) if tonal[0][1] - l1 > STRONG_DB and _harmonic(tonal[0][0], f0) else 1
+        dense, reached = _track(z, sr, k * f0, round((b0 + b1) / 2 / sr, 3), gate, k)
+        dense = [(c, f / k) for c, f in dense]
+        if k > 1:
+            notes.append("the fundamental is weak: the pitch is followed on harmonic %d" % k)
         early, onset_known = [], False
         if dense:
             c, fs = dense[0]
@@ -810,7 +817,7 @@ def _drop(p: dict) -> str:
     """A profile's pitch drop in words, with how long it takes: a 17 st drop
     over 3 ms is a click, the same drop over 40 ms is a kick's glide."""
     d, t = p["pitch_drop_st"], p.get("pitch_settle_ms")
-    text = "%s %.1f st" % ("drops" if d >= 0 else "rises", abs(d))
+    text = "%s %.1f st" % ("drops" if d > -0.05 else "rises", abs(d))
     if t is not None and abs(d) > DROP_ST:
         text += " over %s ms" % _num(t)
         if t < FAST_SETTLE_MS:
