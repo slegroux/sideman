@@ -1034,3 +1034,23 @@ def test_single_takes_the_whole_array_as_one_hit_without_looking_for_hits_inside
     assert oneshot.profile_array(x, SR)["hits"] == 2
     one = oneshot.profile_array(x, SR, hit=0, single=True)
     assert one["hits"] == 1 and one["hit"] == 0 and one["onsets_ms"] == [one["onset_ms"]]
+
+
+def test_hit_cut_finds_the_same_onset_wherever_it_is_asked_for_near_the_hit():
+    """A noise hat (tau 30 ms) with a soft lead-in, 4 ms of noise at a fifth of its level before its rise, 125 ms after
+    another hat. Where `at` falls (8 ms either side of the main rise) decides what the 20 ms tail window holds, and so
+    which of the rises a single search takes; searching again from what it found, until it finds the same, gives one
+    onset for every `at`, inside the 4 ms lead-in."""
+    rng = np.random.default_rng(3)
+
+    def hat(n, tau):
+        return np.diff(rng.standard_normal(n + 1)) * 0.5 * np.exp(-np.arange(n) / SR / tau)
+
+    x = np.zeros(SR)
+    on = int(0.5 * SR)
+    for t0 in (on - int(0.125 * SR), on):
+        x[t0:t0 + int(0.3 * SR)] += hat(int(0.3 * SR), 0.03)
+    x[on - int(0.004 * SR):on] += 0.2 * hat(int(0.004 * SR), 1.0)
+    found = {oneshot.hit_cut(np.stack([x, x], 1), SR, on / SR + d / 1000, 0.1)[1] for d in np.arange(-8.0, 8.01, 0.5)}
+    assert len(found) == 1, sorted((f - on / SR) * 1000 for f in found)
+    assert -4.0 <= (found.pop() - on / SR) * 1000 <= 0.0

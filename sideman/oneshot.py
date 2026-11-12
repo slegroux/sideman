@@ -586,16 +586,28 @@ def hit_cut(x: np.ndarray, sr: int, at: float, length: float | None = None) -> t
     """(cut, onset s) for the hit near `at` (seconds) in x [n, channels]. The onset is found here from the
     audio alone, not from where an earlier slice began: the first rise out of the tail within 100 ms after
     `at`, the tail's level read as its loudest 1 ms over HIT_TAIL_S from `at` - 30 ms, so the onset is never
-    earlier than `at` - 10 ms. The cut runs from HIT_LEAD_S before the onset to `length` seconds after it (the
-    end of x if None). Two cuts of the same audio with the same `length` are the same samples whatever the
-    offset they were read at. When nothing rises there the onset is None and the cut starts HIT_LEAD_S before
-    `at`. Profile a cut with profile_array(cut, hit=0, single=True): the whole cut is the one hit."""
+    earlier than `at` - 10 ms. The search is then made again from the onset it found, until it finds the same
+    one (at most four times), so where `at` fell does not decide which of two rises a few ms apart is the
+    onset. The cut runs from HIT_LEAD_S before the onset to `length` seconds after it (the end of x if None).
+    Two cuts of the same audio with the same `length` are the same samples whatever the offset they were read
+    at. When nothing rises there the onset is None and the cut starts HIT_LEAD_S before `at`. Profile a cut
+    with profile_array(cut, hit=0, single=True): the whole cut is the one hit."""
     x = np.asarray(x, dtype=np.float64)
-    a, b = max(0, int((at - 0.030) * sr)), min(len(x), int((at + 0.100) * sr))
-    win = x[a:b]
-    i = _onset(win, np.abs(win).max(axis=1), sr, True, HIT_TAIL_S) if len(win) else 0
-    onset = a + i if i > 0 else None           # with the tail read over 20 ms, a rise is never at the window's start
-    start = int(at * sr) if onset is None else onset
+    back, ahead = int(round(0.030 * sr)), int(round(0.100 * sr))
+
+    def rise(i: int) -> int | None:
+        a, b = max(0, i - back), min(len(x), i + ahead)
+        win = x[a:b]
+        k = _onset(win, np.abs(win).max(axis=1), sr, True, HIT_TAIL_S) if len(win) else 0
+        return a + k if k > 0 else None            # with the tail read over 20 ms, a rise is never at the window's start
+
+    onset = rise(int(round(at * sr)))
+    for _ in range(4):
+        again = None if onset is None else rise(onset)
+        if again is None or again == onset:
+            break
+        onset = again
+    start = int(round(at * sr)) if onset is None else onset
     end = len(x) if length is None else min(len(x), start + int(length * sr))
     return x[max(0, start - int(HIT_LEAD_S * sr)):max(end, start + 1)], None if onset is None else onset / sr
 
