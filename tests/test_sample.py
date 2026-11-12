@@ -916,23 +916,48 @@ def test_clean_hit_is_the_third_when_the_gaps_are_120_120_and_500_ms():
     assert any("clean hit" in n and "500 ms" in n for n in r["notes"]), r["notes"]
 
 
-def test_clean_hit_takes_the_longest_gap_and_the_earliest_on_a_tie():
-    longest = oneshot.profile_array(take([0, 0.3, 0.9], 1.2), SR, hit="clean")      # gaps 300, 600, 300 ms, all complete
-    assert longest["hits"] == 3 and longest["hit"] == 1
-    tie = oneshot.profile_array(take([0, 0.4], 0.8), SR, hit="clean")               # 400 and 400 ms
-    assert tie["hits"] == 2 and tie["hit"] == 0
+def test_clean_hit_is_the_earliest_typical_one_not_the_one_with_most_room():
+    # rooms 300, 600, 300 ms, all complete: the median is 300 ms and all are typical -> the earliest
+    r = oneshot.profile_array(take([0, 0.3, 0.9], 1.2), SR, hit="clean")
+    assert r["hits"] == 3 and r["hit"] == 0
+    # the same, the odd long room first: 800, 300, 300, 300 ms -> still the earliest
+    assert oneshot.profile_array(take([0, 0.8, 1.1, 1.4], 1.7), SR, hit="clean")["hit"] == 0
+    # two equal rooms: the earliest
+    assert oneshot.profile_array(take([0, 0.4], 0.8), SR, hit="clean")["hit"] == 0
+
+
+def test_clean_hit_skips_a_complete_hit_with_less_than_90_percent_of_the_median_room():
+    # tau 20 ms: 40 dB down after 92 ms. Rooms 150, 500, 500 ms: all complete, the median is 500, and
+    # 150 < 0.9 * 500 -> not typical (a fill note), so the pick is hit 1
+    x = take([0, 0.15, 0.65], 1.15, tau=0.02)
+    r = oneshot.profile_array(x, SR, hit="clean")
+    assert r["hits"] == 3 and r["hit"] == 1
+
+
+def test_clean_hit_leaves_out_a_ghost_note_and_hits_before_the_span():
+    # two hits at full level and a ghost 14 dB down with the most room: the ghost is not within 6 dB
+    loud, ghost = take([0.2, 0.8], 2.4), 0.2 * take([1.4], 2.4)
+    r = oneshot.profile_array(loud + ghost, SR, hit="clean")
+    assert r["hits"] == 3 and r["hit"] == 0 and r["onset_ms"] == pytest.approx(200, abs=3)
+    # within= keeps hits that start before the span out (the tail of a hit from the section before)
+    r = oneshot.profile_array(take([0.0, 0.7, 1.4], 2.1, tau=0.05), SR, hit="clean", within=(0.5, 2.1))
+    assert r["hit"] == 1 and r["onset_ms"] == pytest.approx(700, abs=3)
+    # near= prefers the hit at that position, within 30 ms
+    r = oneshot.profile_array(take([0.0, 0.7, 1.4], 2.1, tau=0.05), SR, hit="clean", near=1.41)
+    assert r["hit"] == 2
 
 
 def test_clean_hit_when_only_the_last_is_complete():
-    r = oneshot.profile_array(take([0, 0.15, 0.30], 0.6, tau=0.05), SR, hit="clean")   # 40 dB down after 230 ms
+    r = oneshot.profile_array(take([0, 0.20, 0.45], 0.85, tau=0.05), SR, hit="clean")   # 40 dB down after 230 ms
     assert r["hits"] == 3 and r["hit"] == 2
 
 
 def test_clean_hit_none_complete_is_refused_with_no_clean_hit():
     with pytest.raises(ValueError, match="no clean hit"):
         oneshot.profile_array(take([0, 0.06, 0.12], 0.2, tau=0.1), SR, hit="clean")
-    with pytest.raises(ValueError, match="hit must be"):
-        oneshot.profile_array(take([0], 0.5), SR, hit="best")
+    for bad in ("best", "2", 1.0, True, 2.5):
+        with pytest.raises(ValueError, match="hit must be"):
+            oneshot.profile_array(take([0], 0.5), SR, hit=bad)
     # the default and a number are unchanged by "clean" existing
     assert oneshot.profile_array(take([0, 0.3], 0.9), SR)["hit"] == 0
 

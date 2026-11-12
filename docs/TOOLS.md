@@ -599,10 +599,12 @@ them, and `hit` (from 0) picks one; by default the first that is not
 40 dB; its falls past that point are null). A hit is split off only
 when it rises 15 dB within 10 ms over a tail that has fallen that far,
 so a tremolo or a tom's beating stays one hit, and so does a fast roll.
-`hit="clean"` picks the complete hit with the longest stretch from its
-onset to the next onset (or the end of the file), the earliest on a tie;
-the profile's `hit` and a note say which, and a take with no complete hit
-is refused with "no clean hit".
+`hit="clean"` picks a typical complete hit: not cut off, within 6 dB of the
+loudest such hit (a ghost note is not one), starting from quiet, with room to
+the next onset (or the end of the file) of at least 90 % of the median and a
+peak within 3 dB of the median; the earliest of those. A take that begins
+inside a hit does not offer that hit. The profile's `hit` and a note say
+which; a take with no such hit is refused with "no clean hit".
 
 Envelope: peak_db (dBFS), attack_ms (onset to the first moment within
 1 dB of the envelope peak, over whole periods), fall_10_ms / fall_20_ms / fall_40_ms (from the
