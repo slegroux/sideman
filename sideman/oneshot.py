@@ -85,6 +85,7 @@ NOISY_DB = -3.0          # ...and so is a less prominent one in a body that is n
 LONE_DB = 10.0           # a lone peak at 1/k of a strong one, further down than this, is a rumble
 PARTIALS_DB = 40.0       # inharmonic partials are listed down to this under the strongest peak
 MAX_PARTIALS = 5
+MIN_PERIODS = 4          # a body window shorter than this many periods gives no harmonics
 CLICK_HZ = 2000.0
 DC_REL = 1e-3            # a DC offset under -60 dB of the peak is left alone
 MAX_S = 10.0             # a one-shot longer than this is cut, with a note
@@ -128,11 +129,21 @@ def _analytic(y: np.ndarray) -> np.ndarray:
     return np.fft.ifft(np.fft.fft(y, nfft, axis=0) * h[:, None], axis=0)[:n]
 
 
-def _spectrum(z: np.ndarray, a: int, b: int, sr: int) -> dict:
-    """Channel-mean power spectrum (dB) of the analytic signal over [a, b),
-    Hann-windowed, zero-padded at least 8x."""
+def _spectrum(z: np.ndarray, a: int, b: int, sr: int, level: np.ndarray | None = None) -> dict:
+    """Channel-mean power spectrum (dB, positive frequencies) of z over [a, b),
+    Hann-windowed, zero-padded at least 8x. z is the analytic signal for the
+    short pitch frames (no negative-frequency image) and the plain signal for
+    the attack and body windows: the analytic signal of a fast decay carries
+    a 1/t error tail from the onset that is louder than the decay itself 40 dB
+    down. With `level` (a power envelope),
+    the frame is first flattened by an exponential fitted to it, so a fast
+    decay does not widen every peak into its neighbours."""
     m = b - a
     win = np.hanning(m)
+    if level is not None:
+        t = np.arange(m) / sr
+        slope = np.polyfit(t, 10 * np.log10(level[a:b] + 1e-30), 1)[0]      # dB/s
+        win = win * 10 ** (-slope * (t - t.mean()) / 20)
     nfft = 1 << int(math.ceil(math.log2(8 * m)))
     p = (np.abs(np.fft.fft(z[a:b] * win[:, None], nfft, axis=0)[:nfft // 2]) ** 2).mean(axis=1)
     return {"p": p, "d": 10.0 * np.log10(p + 1e-30), "hz": np.arange(nfft // 2) * sr / nfft,
@@ -432,7 +443,7 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
     z = _analytic(y)
     f0, tonal, body = None, [], None
     if b1 - b0 >= int(FRAME_S[0] * sr):
-        body = _spectrum(z, b0, b1, sr)
+        body = _spectrum(y, b0, b1, sr)
         tonal = _tonal(body, nyq_hi)
     if tonal:
         f0, l1, i0, said = _fundamental(tonal)
@@ -462,6 +473,10 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
     else:
         length = int(0.005 * sr)
     env = _boxcar(power, max(1, length))
+    if pitched:                # harmonics on the body flattened by the whole-period envelope, so a
+        flat = _spectrum(y, b0, b1, sr, level=env)      # fast decay does not smear f0 into 2 f0
+        near = [t for t in _tonal(flat, nyq_hi) if abs(t[0] - f0) <= HARM_TOL * f0]
+        lf = max(near, key=lambda t: t[1])[1] if near else _interp(flat, int(np.argmin(np.abs(flat["hz"] - f0))))[1]
     out["attack_ms"] = _ms(int(np.argmax(env >= env.max() * 10 ** (-ATTACK_DB / 10))), sr)
     ip = int(np.argmax(env))
     for drop in FALLS_DB:
@@ -514,26 +529,35 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
 
     # tone: harmonics, inharmonic partials, noise, flatness, click
     out["harmonics_db"] = out["harmonics_floor_db"] = None
-    if pitched:
+    few = pitched and (b1 - b0) * f0 / sr < MIN_PERIODS
+    if few:
+        notes.append("the body window holds under %d periods of the pitch: no harmonics, no body "
+                     "noise or flatness" % MIN_PERIODS)
+    if pitched and not few:
         h, fl = {}, {}
+        peaks = _peaks(flat, nyq_hi)
         for k in range(2, 9):
             target = k * f0
             if target > nyq_hi:
                 h[k] = fl[k] = None
                 continue
-            sel = np.nonzero(np.abs(body["hz"] - target) <= max(HARM_TOL * target, body["hz"][1]))[0]
-            i = int(sel[np.argmax(body["d"][sel])])
-            h[k] = round(max(FLOOR_DB, _interp(body, i)[1] - l1), 1)
-            floor = _floor(body, i)
-            fl[k] = None if floor is None else round(max(FLOOR_DB, floor - l1), 1)
+            near = np.abs(flat["hz"] - target) <= max(HARM_TOL * target, flat["hz"][1])
+            sel = np.intersect1d(np.nonzero(near)[0], peaks)
+            i = int(sel[np.argmax(flat["d"][sel])]) if len(sel) else int(np.argmin(np.abs(flat["hz"] - target)))
+            floor = _floor(flat, i)
+            fl[k] = None if floor is None else round(max(FLOOR_DB, floor - lf), 1)
+            if len(sel):
+                h[k] = round(max(FLOOR_DB, _interp(flat, i)[1] - lf), 1)
+            else:              # no peak of its own: the floor there, an upper bound
+                h[k] = fl[k] if fl[k] is not None else FLOOR_DB
         out["harmonics_db"], out["harmonics_floor_db"] = h, fl
     ref = l1 if pitched else (tonal[0][1] if tonal else None)
     partials = [t for t in tonal if t[1] >= tonal[0][1] - PARTIALS_DB and not (pitched and _harmonic(t[0], f0))]
     out["partials"] = [{"hz": round(t[0], 1), "db": round(t[1] - ref, 1)} for t in partials[:MAX_PARTIALS]]
     a1 = min(n, int(ATTACK_S * sr))
-    att = _spectrum(z, 0, a1, sr)
+    att = _spectrum(y, 0, a1, sr)
     out["noise_db"], out["flatness"] = {}, {}
-    for name, s in (("attack", att), ("body", body)):
+    for name, s in (("attack", att), ("body", None if few else body)):
         if s is None:
             out["noise_db"][name] = out["flatness"][name] = None
             continue
@@ -584,7 +608,9 @@ def profile(path: str | pathlib.Path, hit: int | None = None) -> dict:
     pitch_drop_st   start minus body, semitones
     pitch_settle_ms when the pitch comes within 0.5 st of the body pitch and stays 10 ms
     pitch_track_hz  pitch at 0, 5, 10, 20, 40, 80, 150, 300 ms (None once the hit is 50 dB down)
-    harmonics_db    harmonics 2-8 against the fundamental, on the body (None past 20 kHz)
+    harmonics_db    harmonics 2-8 against the fundamental, on the body (None above
+                    min(20 kHz, 0.45 sr); a harmonic with no peak of its own reads the
+                    floor there; all None when the body holds under 4 periods)
     harmonics_floor_db  the spectral floor around each of those, so a value near it
                     is the floor, not a harmonic
     partials        strongest peaks that are not harmonics: Hz and dB against the

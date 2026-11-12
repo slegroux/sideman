@@ -491,3 +491,17 @@ def test_noise_tone_buried_in_noise_stays_pitched(snr):
     noise = np.random.default_rng(1).standard_normal(len(t)) * math.sqrt(0.5) * 10 ** (-snr / 20)
     r = oneshot.profile_array(((np.sin(2 * np.pi * 200 * t) + noise) * np.exp(-t / 0.08))[:, None], SR)
     assert r["pitched"] is True and r["pitch_body_hz"] == pytest.approx(200, rel=0.01)
+
+
+@pytest.mark.parametrize("f0, tau", [(100, 0.012), (300, 0.003), (60, 0.040), (1000, 0.004), (1000, 0.002)])
+def test_harmonic_short_decay_shows_no_fake_harmonic_or_noise(f0, tau):
+    # a pure tone has no 2nd harmonic and no noise, however fast it decays: either the
+    # body is too short to say (None, with a note) or the reading says so
+    r = oneshot.profile_array(hit(f0, tau, seconds=0.3), SR)
+    assert r["pitch_body_hz"] == pytest.approx(f0, rel=0.02)
+    if r["harmonics_db"] is None:
+        assert r["noise_db"]["body"] is None
+        assert any("under 4 periods" in n for n in r["notes"])
+    else:
+        assert r["harmonics_db"][2] < -40
+        assert r["noise_db"]["body"] < -30
