@@ -286,6 +286,76 @@ twelfth apart on the same partials are one line, not a pitch difference.
 - At 22.05 kHz the bands above 11 kHz are empty, so a hat compared with a
   44.1 kHz file reads "highs low".
 
+## Comparing a scene with a reference track
+
+`reference_profile` and `mix_report` measure one scene of the Set against the
+matching section of a reference track that comes with stems. They run on
+files, in the MCP server, and need the `listen` extra. The report has three
+layers:
+
+- **The mix**: bands, width and loudness of the master capture, against the
+  reference mix's section.
+- **Elements against the yardstick**: each element's level as a ratio to the
+  kick, ours against the reference's, and the difference. Ranked `gaps` come
+  first; `width_gaps` (an element's width more than 0.1 apart) are listed
+  apart from them.
+- **Drum sounds**: for the kick, `toms`, `snare`, `hh`, `clap` and `rim` when
+  both sides have them, the `sample_compare` readings between our clean hit and
+  the reference stem's over the same bars (`hit="clean"`: the complete hit with
+  the most room after it).
+
+**The reference profile** is built once with `reference_profile(mix, stems,
+tempo, t0, sections)`. `stems` maps a role to a file or a list of files that
+are summed (`drums` = hh + snare + toms); `kick` is the yardstick. `t0` is
+where bar 0 sits in the files, in seconds, and the sections are `{name,
+start_bar, bars}`. It is written as JSON next to the mix, with each input's
+path, mtime and size, and `mix_report` says which have changed since. Rebuild
+it when a stem is re-exported; a profile from another version is refused.
+
+**Where to tap.** Record each element at its last bus, Post Mixer, on a muted
+audio track with monitoring Off, and the master on its own track. The master
+tap sits after the master chain and the element taps before it, so the master
+is never ratioed against an element.
+
+**A ratio to the kick** cancels a gain that the stems and the mix share, so a
+stem exported 3 dB hot still reads right; it does not cancel bleed. "Bass
+−6 dB" means the bass is 6 dB under the kick in the same bars, ours and the
+reference's. Where the kick is out on either side (silent, or 30 dB under the
+loudest other element, as in a break) both sides use the loudest element
+present on both as the yardstick instead, and the section says which. With no
+shared element the table is left out with a note.
+
+**Present, trace, absent.** An element is present in a section when at least a
+quarter of its bars (and one) are within 40 dB of the mix, a trace when a
+quarter are within 60 dB, otherwise absent. Absent is not reported as −120 dB.
+A trace is listed and never counted as a gap or as "in the reference only",
+because separation bleed lives there. The first and last 10 ms of each section
+and bar are left out of an element's level, so a note that starts just before
+the grid line does not read into the section before it.
+
+**Pairing.** Sections pair by name: the manifest section "E05" with the
+profile's "E05". A manifest section may carry `"reference": {"section":
+"E05", "from_bar": 4}` to pair with another section or start four bars in; a
+shorter section pairs with the first bars. The reference's bands, widths and
+loudness are then those of the whole profile section. A section with no match,
+or longer than its match, reports the mix layer only, with a note.
+
+**The capture is the reference.** If the master capture matches the reference
+mix, level aside (per-bar curve and bands within 0.3 dB, width within 0.01), the
+section is flagged. The usual causes are the reference track left unmuted, so
+it plays into the capture, and a solo that cuts the Set down to part of itself.
+Guard against it before recording: no solos, and the reference track muted;
+restore both afterwards.
+
+**Limits.**
+
+- Stems carry their own bleed and level. A ratio is only as good as the stem.
+- The drum layer needs one isolated hit. A hat or tom roll has no clean hit, and
+  the report says so instead of reading one.
+- A capture shorter than the section is refused; compare whole bars.
+- The numbers describe the difference. Which gaps are real is the user's ear's
+  call: on one replica two stem reads were wrong, and the ear won.
+
 ## Racks and plug-ins
 
 Two walls, both real, and both worth stating to the user rather than working
