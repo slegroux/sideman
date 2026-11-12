@@ -121,7 +121,7 @@ def test_every_tool_maps_to_the_right_op():
 
 # Tools that run in the server process and send no op of their own (the
 # listening tools read audio files; a clip path costs one `get`).
-LOCAL_TOOLS = {"audio_analyze", "audio_compare", "mix_report"}
+LOCAL_TOOLS = {"audio_analyze", "audio_compare", "mix_report", "sample_analyze"}
 
 
 def test_tool_count_matches_registry():
@@ -345,21 +345,24 @@ def test_errors_reach_the_client():
 
 def test_listen_tools_without_the_extra_give_the_install_hint():
     import sideman
-    saved = sys.modules.get("sideman.listen", "absent")
-    attr = sideman.__dict__.pop("listen", None)  # `from sideman import listen` checks this first
-    sys.modules["sideman.listen"] = None        # makes the import raise ImportError
-    try:
-        S.audio_analyze("/nonexistent.wav")
-        check("audio_analyze without the extra raises", False, "no raise")
-    except S.LiveError as e:
-        check("install hint names the extra", "listen" in str(e) and "pip install" in str(e), str(e))
-    finally:
-        if saved == "absent":
-            del sys.modules["sideman.listen"]
-        else:
-            sys.modules["sideman.listen"] = saved
-        if attr is not None:
-            sideman.listen = attr
+    for mod, tool in (("listen", S.audio_analyze), ("oneshot", S.sample_analyze)):
+        name = "sideman." + mod
+        saved = sys.modules.get(name, "absent")
+        attr = sideman.__dict__.pop(mod, None)  # `from sideman import x` checks this first
+        sys.modules[name] = None                # makes the import raise ImportError
+        try:
+            tool("/nonexistent.wav")
+            check("%s without the extra raises" % tool.__name__, False, "no raise")
+        except S.LiveError as e:
+            check("%s: install hint names the extra" % tool.__name__,
+                  "listen" in str(e) and "pip install" in str(e), str(e))
+        finally:
+            if saved == "absent":
+                del sys.modules[name]
+            else:
+                sys.modules[name] = saved
+            if attr is not None:
+                setattr(sideman, mod, attr)
 
 
 def test_audio_file_resolves_a_clip_path_with_one_get():

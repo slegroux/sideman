@@ -612,6 +612,14 @@ def _listen():
     return listen
 
 
+def _oneshot():
+    try:
+        from sideman import oneshot
+    except ImportError as e:
+        raise LiveError("%s (%s)" % (LISTEN_HINT, e))
+    return oneshot
+
+
 def _audio_file(source: str) -> str:
     """An absolute file path, from a path or an audio clip's LOM path."""
     source = source.strip()
@@ -675,6 +683,46 @@ def audio_compare(a: str, b: str) -> str:
     """
     listen = _listen()
     return json.dumps(listen.compare(_analyze(a), _analyze(b)), indent=2)
+
+
+@mcp.tool()
+def sample_analyze(source: str) -> str:
+    """Profile a drum one-shot, locally, in the terms a synth is programmed in.
+
+    `source` is a mono or stereo file path or an audio clip's LOM path (the
+    clip's whole source file). Every measure is relative to the hit itself:
+    times from its onset (the first sample within 40 dB of the peak), levels
+    against its own peak or fundamental, so level, leading silence and sample
+    rate do not change them. For a mix or a whole track use audio_analyze.
+
+    Envelope: peak_db (dBFS), attack_ms (onset to the envelope peak, good to
+    half a period of the pitch), fall_10_ms / fall_20_ms / fall_40_ms (from the
+    peak to the last moment above peak - 10/20/40 dB), duration_ms (to -60 dB).
+    Pitch: `pitched` (false for noise or an inharmonic cymbal or bell: then no
+    pitch and no harmonics, only `partials`), pitch_body_hz (40-150 ms, the
+    fundamental: the lowest strong partial, not the loudest), pitch_start_hz
+    (read about 1.5 periods in, at pitch_start_at_ms, so a glide faster than
+    that reads low), pitch_drop_st (start minus body), pitch_settle_ms (when it
+    comes within 0.5 st of the body pitch and stays 10 ms), pitch_track_hz at
+    0, 5, 10, 20, 40, 80, 150, 300 ms.
+    Tone, on the body: harmonics_db (2-8, dB against the fundamental),
+    `partials` (strongest non-harmonic peaks, Hz and dB), noise_db (energy
+    outside the tonal peaks, dB against the total) and flatness (0 tone ..
+    0.56 white noise) for attack (0-30 ms) and body, click_db (attack power
+    above 2 kHz against the body), bands_db (six bands as audio_analyze, against
+    the hit's total) and width (0 mono .. 1 all side). A value that cannot be
+    measured is null and `notes` says why.
+
+    Needs the `listen` extra; without it the tool says how to install it.
+    """
+    oneshot = _oneshot()
+    path = _audio_file(source)
+    try:
+        return json.dumps(oneshot.profile(path), indent=2)
+    except MemoryError:
+        raise LiveError("not enough memory to profile %s; trim it to the one hit" % path)
+    except (OSError, RuntimeError, ValueError) as e:   # LibsndfileError is a RuntimeError
+        raise LiveError("cannot measure %s: %s" % (path, e))
 
 
 @mcp.tool()
