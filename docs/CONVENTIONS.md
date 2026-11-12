@@ -302,10 +302,16 @@ layers:
 - **Drum sounds**: for the kick, `toms`, `snare`, `hh`, `clap` and `rim` when
   both sides have them and sound in the paired bars, the `sample_compare`
   readings between a typical clean hit of ours and of the reference stem. A
-  clean hit is complete, within 6 dB of the loudest complete hit, starts from
-  quiet, and has room (to the next onset) close to the median; each side is
-  cut with a beat of pre-roll, only hits that start inside the section count,
-  and ours is the one at the same place as the reference's.
+  clean hit is complete (it falls 40 dB before the next one), within 6 dB of the
+  loudest such hit, starts from quiet if any does (20 ms before it 20 dB down),
+  has room to the next onset of at least 90 % of the median, and, if any does,
+  a peak within 3 dB of the median; the earliest of those. Each side is cut with
+  a beat of pre-roll and post-roll, only hits that start inside the section (its
+  window starting 20 ms early, as below) count, the reference's is picked first,
+  and ours is the one within 30 ms of the same place when there is one (else its
+  own, with a note that the readings compare different hits). The two hits are
+  then measured again on cuts made from the hits themselves, so the same audio
+  gives the same readings however it is offset against the grid.
 
 **The reference profile** is built once with `reference_profile(mix, stems,
 tempo, t0, sections)`. `stems` maps a role to a file or a list of files that
@@ -326,9 +332,9 @@ stem exported 3 dB hot still reads right; it does not cancel bleed. "Bass
 reference's. Where the kick is out on either side (silent, or 30 dB under the
 loudest other element, as in a break) both sides use the loudest element
 present on both as the yardstick instead, and the section says which. A kick
-that is out on one side only is also listed as a difference ("kick in the
-reference only, out in ours: 41 dB under"). With no shared element the table
-is left out with a note.
+that is out on one side only is also listed as a difference ("In the
+reference only: kick (kick out in ours: 35 dB under the loudest other role,
++6.0 dB vs bass)"). With no shared element the table is left out with a note.
 
 **Present, trace, absent.** An element is present in a section when at least a
 quarter of its bars (and one) are within 40 dB of the elements together, a
@@ -338,9 +344,11 @@ master capture: its make-up gain would move the line. Absent is not reported as
 −120 dB. A trace on both sides, or against an absent element, is listed and
 never counted as a gap or as "in the reference only", because separation bleed
 lives there; an element present on one side and a trace on the other is
-compared and can be a gap. The first and last 10 ms of a section (not its
-inner bar lines) are left out of an element's level, so a note that starts
-just before the grid line does not read into the section before it.
+compared and can be a gap. Every section and bar window, on both sides, starts
+20 ms before its grid line, so a hit that starts a few ms early (real drums do,
+and a capture is never sample-aligned with the reference) belongs to its own
+section and bar, and a note that starts just before the line is not in the
+section before it.
 
 **Pairing.** Sections pair by name: the manifest section "E05" with the
 profile's "E05". A manifest section may carry `"reference": {"section":

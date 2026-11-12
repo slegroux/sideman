@@ -505,11 +505,12 @@ def change_rate(x: np.ndarray, sr: int, bar_s: float, offset_s: float, first_bar
 # a gain the stems and the mix share.
 
 PROFILE_KIND = "reference_profile"
-PROFILE_VERSION = 4        # 4: `stems_sum` per section, per-bar levels for absent roles, section-end guard only
-ABSENT_DB = 60.0           # a role with under a quarter of its bars within this of the mix is absent, not -120 dB
-TRACE_DB = 40.0            # ...and between this and ABSENT_DB under the mix it is a trace: listed, never a gap
-EDGE_GUARD_S = 0.010       # a section's first and last 10 ms are left out of a role's level (never an inner bar
-                           # line): a note starting just before the grid line must not read into the section before
+PROFILE_VERSION = 5        # 5: windows start GRID_LEAD_S early (no edge guard); 4: `stems_sum`, per-bar levels for absent roles
+ABSENT_DB = 60.0           # a role with under a quarter of its bars within this of the stems' sum is absent, not -120 dB
+TRACE_DB = 40.0            # ...and within ABSENT_DB but not this of it, a trace: listed, not a gap against an absent one
+GRID_LEAD_S = 0.020        # every section and bar window starts this early, on both sides: a hit that starts a few
+                           # ms before the grid line (real drums do, and a capture is never sample-aligned) belongs to
+                           # its own bar, and a note starting 5 ms before a line is not in the section before it
 ELEMENT_GAP_DB = 1.0       # an element's ratio to the kick differing by more than this is a gap
 WIDTH_GAP = 0.1            # an element's width (0 mono .. 1 all side) differing by more than this is a width gap
 CAPTURE_IS_REF_DB = 0.3    # a master capture is the reference when, with the level offset removed,
@@ -524,31 +525,23 @@ def _level_db(x: np.ndarray) -> float:
     return _db_amp(_peak_rms(x)[1])
 
 
-def _guard(t0: float, t1: float, start: bool = True, end: bool = True) -> tuple[float, float]:
-    """(t0, t1) without EDGE_GUARD_S at the ends asked for (unless that would leave almost nothing)."""
-    if t1 - t0 <= 4 * EDGE_GUARD_S:
-        return t0, t1
-    return (t0 + EDGE_GUARD_S if start else t0), (t1 - EDGE_GUARD_S if end else t1)
-
-
-def _bar_levels(x: np.ndarray, sr: int, t0: float, bar_s: float, first_bar: int, n: int,
-                start: bool = True, end: bool = True) -> list:
+def _bar_levels(x: np.ndarray, sr: int, t0: float, bar_s: float, first_bar: int, n: int) -> list:
     """Level in dBFS of each of `n` bars from `first_bar` (bar 0 at t0 s); None for a silent bar.
-    Only the first bar's start and the last bar's end are guarded (and only when `start` / `end`),
-    never an inner bar line, so the mean power of the bars is the level of the span."""
+    Callers pass t0 already moved GRID_LEAD_S early."""
     out = []
     for i in range(n):
         a = t0 + (first_bar + i) * bar_s
-        lv = _level_db(_slice(x, sr, *_guard(a, a + bar_s, start and i == 0, end and i == n - 1)))
+        lv = _level_db(_slice(x, sr, a, a + bar_s))
         out.append(None if lv <= FLOOR_DB else round(lv, 2))
     return out
 
 
 def _presence(per_bar: list, mix_level: float | None) -> str:
-    """"present", "trace" or "absent" from the per-bar levels against the mix's level. Present
-    when at least a quarter of the bars (and one) are within TRACE_DB of the mix; otherwise a trace
-    when at least a quarter are within ABSENT_DB of it; otherwise absent. A phrase in a few bars
-    counts, a stray few milliseconds at the section's edge (the guard leaves them out) does not."""
+    """"present", "trace" or "absent" from the per-bar levels against a reference level (the power sum
+    of the stems, or of our element sources; never the mix or the master capture). Present when at
+    least a quarter of the bars (and one) are within TRACE_DB of it; otherwise a trace when at least a
+    quarter are within ABSENT_DB of it; otherwise absent. A phrase in a few bars counts; a note that
+    starts a few ms before a section line is in the next section's window, not this one's."""
     if mix_level is None or not per_bar:
         return "absent"
     need = max(1.0, len(per_bar) / 4.0)
@@ -605,8 +598,8 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
     mix, so a master's make-up gain does not change it. A role with under a quarter of its
     bars (and one) within ABSENT_DB of the stems' sum is {"absent": true, "per_bar_db": [...]}
     there, with no other numbers; with a quarter within ABSENT_DB but not within TRACE_DB the
-    entry carries "trace": true. A section's first and last EDGE_GUARD_S are left out of a
-    role's level, never an inner bar line. Files must share one sample rate
+    entry carries "trace": true. Section and bar windows for the roles and the per-bar levels
+    start GRID_LEAD_S early (the mix's bands, width and LUFS use the window itself). Files must share one sample rate
     (refused otherwise); of different lengths they are trimmed to the shortest
     and `notes` says so.
 
@@ -677,7 +670,7 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
         a = analyze_array(_slice(x, sr, *span(sec)), sr)
         mix_rows.append({"level_db": a["rms_db"], "integrated_lufs": a["integrated_lufs"],
                          "width": a["width"], "bands_db": a["bands_db"],
-                         "per_bar_db": _bar_levels(_stereo(x), sr, t0, bar_s, sec["start_bar"], sec["bars"])})
+                         "per_bar_db": _bar_levels(_stereo(x), sr, t0 - GRID_LEAD_S, bar_s, sec["start_bar"], sec["bars"])})
     nsec = len(sections)
     measured: dict[str, list] = {}
     for role, paths in files.items():
@@ -687,11 +680,11 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
             y = z.copy() if y is None else y + z
         measured[role] = []
         for sec in sections:
-            seg = _slice(y, sr, *_guard(*span(sec)))
+            seg = _slice(y, sr, span(sec)[0] - GRID_LEAD_S, span(sec)[1] - GRID_LEAD_S)
             lv = _level_db(seg)
             bands, width = _bands_width(seg, sr)
             measured[role].append({"level": lv, "bands": bands, "width": width,
-                                   "bars": _bar_levels(y, sr, t0, bar_s, sec["start_bar"], sec["bars"])})
+                                   "bars": _bar_levels(y, sr, t0 - GRID_LEAD_S, bar_s, sec["start_bar"], sec["bars"])})
     # presence is judged against the stems together, not the mix: the mix can carry a master's make-up gain
     sums = []
     for i, sec in enumerate(sections):
@@ -843,8 +836,8 @@ def _pair(prof: dict, sec: dict, name: str) -> tuple[dict | None, int, list]:
     notes = []
     if fb or sec["bars"] != psec["bars"]:
         notes.append("paired with bars %d-%d of the profile's %r (%d bars); the reference's bands, widths "
-                     "and loudness are for the whole section, so the capture-is-the-reference check is "
-                     "not made" % (fb + 1, fb + sec["bars"], pname, psec["bars"]))
+                     "and loudness are for the whole section, so width gaps are not ranked and the "
+                     "capture-is-the-reference check is not made" % (fb + 1, fb + sec["bars"], pname, psec["bars"]))
     return psec, fb, notes
 
 
@@ -876,14 +869,14 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
     listed in the one-side lists as well."""
     n = sec["bars"]
     partial = bool(fb) or n != psec["bars"]
-    g_start, g_end = fb == 0, fb + n == psec["bars"]      # guard our ends only where the profile's section ends
+    lead_t0 = t0 - GRID_LEAD_S                           # our windows start as early as the profile's
     pm = psec["mix"]
     c = compare(a, {"bands_db": pm["bands_db"], "side_minus_mid_db": {},
                     "integrated_lufs": pm["integrated_lufs"], "width": pm["width"]})
     vs = {"band_balance_db": c["band_balance_db"], "flagged_bands": [f["band"] for f in c["flagged_bands"]],
           "lufs_diff": c["diff"].get("integrated_lufs"), "width_diff": c["diff"].get("width")}
     notes = list(notes)
-    master_bars = _bar_levels(_stereo(_slice(audio["master"][0], sr, t0, t0 + n * bar_s)), sr, 0.0, bar_s, 0, n)
+    master_bars = _bar_levels(_stereo(_slice(audio["master"][0], sr, lead_t0, lead_t0 + n * bar_s)), sr, 0.0, bar_s, 0, n)
     is_ref = not partial and _same_shape(a, pm, master_bars, pm["per_bar_db"])
     if is_ref:
         notes.append("the capture is the reference: check solos")
@@ -904,8 +897,8 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
     for role in audio:
         if role == "master":                     # sits after the master chain: never ratioed against elements
             continue
-        seg = _stereo(_slice(audio[role][0], sr, t0, t0 + n * bar_s))
-        ours[role] = _bar_levels(seg, sr, 0.0, bar_s, 0, n, g_start, g_end)
+        seg = _stereo(_slice(audio[role][0], sr, lead_t0, lead_t0 + n * bar_s))
+        ours[role] = _bar_levels(seg, sr, 0.0, bar_s, 0, n)
         raw_lv[role] = seg
     ours_power = [sum(0.0 if v[j] is None else 10 ** (v[j] / 10) for v in ours.values()) for j in range(n)]
     ours_sum = _mean_db([round(_db(p), 2) if p > 0 else None for p in ours_power])
@@ -915,8 +908,7 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
         if ours_kind[role] == "absent":
             ours_lv[role], ours_width[role] = None, None
         else:
-            gseg = _slice(seg, sr, *_guard(0.0, n * bar_s, g_start, g_end))
-            ours_lv[role], ours_width[role] = _level_db(gseg), _bands_width(gseg, sr)[1]
+            ours_lv[role], ours_width[role] = _level_db(seg), _bands_width(seg, sr)[1]
 
     def kick_under(lv):
         """dB the kick sits under the loudest other role in `lv`; None when it is silent, -inf when alone."""
@@ -998,7 +990,7 @@ def _element_layer(prof: dict, psec: dict, fb: int, notes: list, sec: dict, a: d
     el = {"paired": True, "paired_with": {"section": psec["name"], "from_bar": fb, "bars": n},
           "notes": notes, "capture_is_reference": bool(is_ref), "yardstick": yard,
           "kick_out": kick_is_out,
-          "table": table if yard else None, "gaps": gaps if yard else [], "width_gaps": width_gaps if yard else [],
+          "table": table if yard else None, "gaps": gaps if yard else [], "width_gaps": width_gaps if yard and not partial else [],
           "reference_only": ref_only, "ours_only": ours_only, "traces": traces, "silent_in_both": silent_both,
           "arc": arc if yard else {},
           "presence": {r: {"reference": ref_kind.get(r), "ours": ours_kind.get(r)} for r in set(ref_kind) | set(ours_kind)}}
@@ -1025,12 +1017,16 @@ def _drum_layer(prof: dict, psec: dict, fb: int, sec: dict, audio: dict, sr: int
     """For each drum role in both the manifest's sources and the profile's stems, and present on
     both sides in the paired bars: the readings of oneshot.compare(ours, reference) on a typical
     clean hit of each side. Each side is cut with one beat of pre-roll and post-roll (clamped to the
-    file), and only hits whose onset lies inside the section are candidates, so the tail of a hit
-    from before the section line is never one. The reference's hit is picked first; on our side the
-    hit at the same position in the section (within 30 ms) is taken when there is one, otherwise our
-    own typical hit, with a note. The reference stems are read again from the profile's paths,
-    only the span needed; a role whose stems changed or are missing since the profile is skipped.
-    Any failure on one role is that role's note."""
+    file); only hits whose onset lies inside the section are candidates, its window starting
+    GRID_LEAD_S early like the elements layer's, so the tail of a hit from before the line is never
+    one and a hit a few ms early belongs to its own section. The reference's hit is picked first; on
+    our side the hit within 30 ms of the same place in the section is taken when there is one,
+    otherwise our own typical hit, with a note that the readings then compare different hits. The two
+    hits are then measured again on cuts made from the hits themselves (oneshot.hit_cut: onset found
+    again, up to the next onset), so the slice a hit was picked in does not change its reading. The
+    reference stems are read again from the profile's paths, only the span needed; a role whose
+    stems changed or are missing since the profile is skipped. Any failure on one role is that
+    role's note."""
     from . import oneshot
     n = sec["bars"]
     pbar = float(prof["beats_per_bar"]) * 60.0 / float(prof["tempo"])
@@ -1060,7 +1056,8 @@ def _drum_layer(prof: dict, psec: dict, fb: int, sec: dict, audio: dict, sr: int
             ref_pre = r0 - ref_start
             profs, errs = {}, []
             try:
-                profs["reference"] = oneshot.profile_array(ref_x, rrate, hit="clean", within=(ref_pre, ref_pre + n * pbar))
+                profs["reference"] = oneshot.profile_array(
+                    ref_x, rrate, hit="clean", within=(ref_pre - GRID_LEAD_S, ref_pre + n * pbar - GRID_LEAD_S))
             except ValueError as e:
                 errs.append("the reference: %s" % e)
             a0 = max(0, int(round((t0 - bar_s / beats) * sr)))
@@ -1071,19 +1068,45 @@ def _drum_layer(prof: dict, psec: dict, fb: int, sec: dict, audio: dict, sr: int
                 pos = profs["reference"]["onset_ms"] / 1000.0 - ref_pre          # s into the section, reference time
                 near = our_pre + pos * bar_s / pbar
             try:
-                profs["ours"] = oneshot.profile_array(our_x, sr, hit="clean", within=(our_pre, our_pre + n * bar_s),
-                                                      near=near)
+                profs["ours"] = oneshot.profile_array(
+                    our_x, sr, hit="clean", within=(our_pre - GRID_LEAD_S, our_pre + n * bar_s - GRID_LEAD_S), near=near)
             except ValueError as e:
                 errs.append("ours: %s" % e)
-            entry["notes"] += errs
-            if len(profs) == 2:
-                at_ours = profs["ours"]["onset_ms"] / 1000.0 - our_pre
-                if abs(profs["ours"]["onset_ms"] / 1000.0 - near) > oneshot.NEAR_S:
-                    entry["notes"].append("the hits are not at the same place: the reference's is %.0f ms into the "
-                                          "section, ours %.0f ms" % (pos * 1000, at_ours * 1000))
-                entry["readings"] = oneshot.compare(profs["ours"], profs["reference"])["readings"]
-                entry["ours_hit"], entry["reference_hit"] = profs["ours"]["hit"], profs["reference"]["hit"]
-                entry["ours_at_ms"], entry["reference_at_ms"] = round(at_ours * 1000, 1), round(pos * 1000, 1)
+
+            if "reference" in profs:
+                rp_ = profs["reference"]
+                ons = rp_["onsets_ms"]
+                # the reference slice does not move with the capture's offset, so its hit's length (to the next
+                # onset) is the one both cuts use: the same audio gives the same two cuts at any offset
+                length = ons[rp_["hit"] + 1] / 1000.0 - rp_["onset_ms"] / 1000.0 - 0.001 if rp_["hit"] + 1 < len(ons) else None
+                ref_cut = oneshot.hit_cut(ref_x, rrate, rp_["onset_ms"] / 1000.0, length)
+                same_place = "ours" in profs and abs(profs["ours"]["onset_ms"] / 1000.0 - near) <= oneshot.NEAR_S + 0.0005
+                our_cut, our_at = None, None
+                if same_place:
+                    our_cut, our_at = oneshot.hit_cut(our_x, sr, profs["ours"]["onset_ms"] / 1000.0, length), profs["ours"]["onset_ms"] / 1000.0
+                else:
+                    # our own segmentation did not offer a complete hit there (its thresholds follow the slice's
+                    # loudest hit, and a fast pattern splits differently): look for the hit at that place anyway
+                    win = our_x[max(0, int((near - oneshot.NEAR_S) * sr)):int((near + oneshot.NEAR_S) * sr + 1)]
+                    if len(win) and np.abs(win).max() >= np.abs(our_x).max() * 10 ** (-30 / 20):
+                        our_cut, our_at = oneshot.hit_cut(our_x, sr, near, length), near
+                        errs = [e for e in errs if not e.startswith("ours:")]
+                        entry["notes"].append("ours: measured at the reference's place; our own segmentation did "
+                                              "not offer a complete hit there")
+                    elif "ours" in profs:
+                        our_cut, our_at = oneshot.hit_cut(our_x, sr, profs["ours"]["onset_ms"] / 1000.0, length), profs["ours"]["onset_ms"] / 1000.0
+                        entry["notes"].append("the hits are not at the same place: the reference's is %.0f ms into "
+                                              "the section, ours %.0f ms; the readings compare different hits"
+                                              % (pos * 1000, (our_at - our_pre) * 1000))
+                entry["notes"] += errs
+                if our_cut is not None:
+                    entry["readings"] = oneshot.compare(oneshot.profile_array(our_cut, sr, hit=0, single=True),
+                                                        oneshot.profile_array(ref_cut, rrate, hit=0, single=True))["readings"]
+                    entry["ours_hit"] = profs["ours"]["hit"] if "ours" in profs and same_place else None
+                    entry["reference_hit"] = profs["reference"]["hit"]
+                    entry["ours_at_ms"], entry["reference_at_ms"] = round((our_at - our_pre) * 1000, 1), round(pos * 1000, 1)
+            else:
+                entry["notes"] += errs
         except Exception as e:                    # one role failing must not take the report down
             entry["readings"] = []
             entry["notes"].append("failed: %s: %s" % (type(e).__name__, e))
@@ -1107,7 +1130,7 @@ def mix_report(manifest: dict | str | pathlib.Path,
     optional) to pair with another section, or N bars into it. The range must
     fit inside the profile's section: a shorter manifest section pairs with its
     first bars (noted; the reference's bands, widths and loudness are then those of
-    the whole section, and the capture-is-the-reference check is not made); a
+    the whole section: no width gaps are ranked and the capture-is-the-reference check is not made); a
     section with no match, or a longer one, reports the mix layer only, with a note.
     A paired section gets the mix compared with the profile's section (bands,
     width, loudness), an `elements` layer and a `drums` layer.

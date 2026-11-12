@@ -572,28 +572,30 @@ def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray
     return c["k"], c["got"], int(round(_ms(c["room"], sr))), why
 
 
-def hit_cut(x: np.ndarray, sr: int, at: float, until: float | None = None) -> np.ndarray:
-    """The cut of x [n, channels] that holds the hit near `at` (seconds) and nothing before it:
-    from HIT_LEAD_S before its onset, found again here (the rise out of the level just before
-    `at` - 30 ms, within 100 ms after `at`) so it does not depend on where an earlier slice began,
-    to `until` (seconds, e.g. the next onset) or the end of x. Profile it with profile_array(cut):
-    the same audio gives the same cut whatever the offset it was read at."""
+def hit_cut(x: np.ndarray, sr: int, at: float, length: float | None = None) -> np.ndarray:
+    """The cut of x [n, channels] that holds the hit near `at` (seconds): from HIT_LEAD_S before its
+    onset, found here from the audio alone (the rise out of the level just before `at` - 30 ms, within
+    100 ms after `at`), not from where an earlier slice began, to `length` seconds after that onset
+    (the end of x if None). Two cuts of the same audio with the same `length` are the same samples
+    whatever the offset they were read at. Profile one with profile_array(cut, hit=0): the hit is the
+    first one in it, even if a later hit cuts it off."""
     x = np.asarray(x, dtype=np.float64)
     a, b = max(0, int((at - 0.030) * sr)), min(len(x), int((at + 0.100) * sr))
     win = x[a:b]
     onset = a + _onset(win, np.abs(win).max(axis=1), sr, True)
-    end = len(x) if until is None else min(len(x), int(until * sr))
+    end = len(x) if length is None else min(len(x), onset + int(length * sr))
     return x[max(0, onset - int(HIT_LEAD_S * sr)):max(end, onset + 1)]
 
 
 def profile_array(x: np.ndarray, sr: int, hit: int | str | None = None, within: tuple | None = None,
-                  near: float | None = None) -> dict:
+                  near: float | None = None, single: bool = False) -> dict:
     """The one-shot profile of one signal [n, channels]: of hit `hit` (from 0)
     when it holds several, by default the first that is not cut off; "clean"
     picks a typical complete hit (see profile()). `within` (start s, end s) and
     `near` (s) only apply to "clean": hits must start inside the span, and the
     hit starting within 30 ms of `near` is preferred. Raises ValueError("no clean
-    hit ...") when there is no candidate."""
+    hit ...") when there is no candidate. `single` takes the whole of x as one hit (hit 0), without
+    looking for hits inside it: for a cut made with hit_cut."""
     if isinstance(hit, bool) or not (hit is None or hit == "clean" or isinstance(hit, (int, np.integer))):
         raise ValueError("hit must be a whole number, \"clean\" or None, got %r" % (hit,))
     _check_channels(x)
@@ -608,7 +610,7 @@ def profile_array(x: np.ndarray, sr: int, hit: int | str | None = None, within: 
     mag = np.abs(x).max(axis=1)
     if not len(mag) or mag.max() <= 0:
         raise ValueError("the file is silent")
-    segs = _segments(x, sr)
+    segs = [(0, x.shape[0])] if single else _segments(x, sr)
     if isinstance(hit, (int, np.integer)) and not 0 <= hit < len(segs):
         raise ValueError("hit %r is out of range: the take has %d hit%s (0-%d)"
                          % (hit, len(segs), "" if len(segs) == 1 else "s", len(segs) - 1))

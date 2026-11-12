@@ -1018,10 +1018,19 @@ def test_clean_hit_near_a_position_is_judged_against_the_span_not_a_louder_hit_a
 
 def test_hit_cut_is_the_same_whatever_the_offset_it_was_read_at():
     x = take([0.30, 0.90], 1.6, tau=0.04)
-    a = oneshot.hit_cut(x, SR, 0.30, 0.90 - 0.001)
+    a = oneshot.hit_cut(x, SR, 0.30, 0.55)
     shifted = np.concatenate([np.zeros((int(0.0123 * SR), 1)), x])                  # the same audio read 12.3 ms late
-    b = oneshot.hit_cut(shifted, SR, 0.30 + 0.0123 + 0.004, 0.90 + 0.0123 - 0.001)  # and asked for 4 ms off
+    b = oneshot.hit_cut(shifted, SR, 0.30 + 0.0123 + 0.004, 0.55)                    # and asked for 4 ms off
     n = min(len(a), len(b))
     assert abs(len(a) - len(b)) <= 2 and np.allclose(a[:n], b[:n], atol=1e-9)
-    ra, rb = oneshot.profile_array(a, SR), oneshot.profile_array(b, SR)
+    assert abs(len(a) / SR - (0.55 + 0.002)) < 0.002          # the lead before the onset, then the length asked for
+    ra = oneshot.profile_array(a, SR, hit=0, single=True)
+    rb = oneshot.profile_array(b, SR, hit=0, single=True)
     assert oneshot.compare(ra, rb)["readings"] == []
+
+
+def test_single_takes_the_whole_array_as_one_hit_without_looking_for_hits_inside():
+    x = take([0.0, 0.40], 0.8, tau=0.05)                       # two hits
+    assert oneshot.profile_array(x, SR)["hits"] == 2
+    one = oneshot.profile_array(x, SR, hit=0, single=True)
+    assert one["hits"] == 1 and one["hit"] == 0 and one["onsets_ms"] == [one["onset_ms"]]

@@ -574,11 +574,13 @@ of different lengths they are trimmed to the shortest, and `notes` says so.
 Per section: the mix's level (mean power, dBFS), integrated LUFS, six
 bands, width and per-bar levels; for each role its level, `vs_kick_db`,
 per-bar levels, bands and width. A role is present in a section when at least
-a quarter of its bars (and one) are within 40 dB of the mix, a trace when a
-quarter are within 60 dB (listed, not a gap in mix_report), else absent
-there (not -120 dB), judged against the stems' power sum rather than the
-mix. A section's first and last 10 ms (not inner bar lines) are left out of
-a role's level; every role keeps its per-bar levels, absent ones too.
+a quarter of its bars (and one) are within 40 dB of the stems' power sum, a
+trace when a quarter are within 60 dB (listed, not a gap against an absent
+role in mix_report), else absent there (not -120 dB); the mix is not the
+reference for this, so a limiter's make-up gain does not move it. Section and
+bar windows start 20 ms early, so a hit that starts a few ms before a grid
+line belongs to its own bar (the same lead is used on the capture side);
+every role keeps its per-bar levels, absent ones too.
 
 Writes <mix name>.profile.json next to the mix (`out`: a .json path or a
 folder), which holds everything above plus each input's path, mtime and

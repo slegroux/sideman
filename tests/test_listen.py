@@ -429,6 +429,10 @@ def gain(db):
 def level_sine(freq, db_by_bar):
     """A sine at KICK_AMP * gain(db) per bar (None = silent), T0 of silence in front."""
     amp = np.repeat([0.0 if d is None else KICK_AMP * gain(d) for d in db_by_bar], bars(1))
+    per = [0.0 if d is None else KICK_AMP * gain(d) for d in db_by_bar]
+    for i in range(len(per) - 1):              # the windows start 20 ms early, so the last 20 ms of a block that is
+        if per[i + 1] < 0.3 * per[i]:          # followed by a much quieter one would count in the next bar: end it
+            amp[(i + 1) * bars(1) - int(0.025 * SR):(i + 1) * bars(1)] = per[i + 1]      # 25 ms short
     t = np.arange(len(amp)) / SR
     return np.concatenate([np.zeros(int(T0 * SR)), amp * np.sin(2 * np.pi * freq * t)])
 
@@ -854,25 +858,26 @@ def test_elements_kick_out_is_decided_for_both_sides_together(tmp_path):
         assert abs(t["difference_db"]) <= 0.2, t
 
 
-def edge_leak_files(tmp_path):
-    """kick all through; a bass that starts 5 ms before the line between bar 8 and bar 9 (A | B) and
-    plays on at -6 dB against the kick, so section A holds only the last 5 ms of it."""
-    d = tmp_path / "leak"
+def edge_leak_files(tmp_path, early=0.005):
+    """kick all through; a bass that starts `early` s before the line between bar 8 and bar 9 (A | B) and
+    plays on at -6 dB against the kick, so section A holds only the last few ms of it."""
+    d = tmp_path / ("leak%g" % early)
     d.mkdir()
     kick = level_sine(ROLE_HZ["kick"], [0.0] * 24)
     t = np.arange(len(kick)) / SR
-    start = int((T0 + 16.0 - 0.005) * SR)
+    start = int((T0 + 16.0 - early) * SR)
     bass = np.where(np.arange(len(kick)) >= start, KICK_AMP * gain(-6.0) * np.sin(2 * np.pi * 110 * t), 0.0)
     return {"kick": write(d, "kick.wav", stereo(kick)), "bass": write(d, "bass.wav", stereo(bass)),
             "mix": write(d, "mix.wav", stereo(kick + bass))}
 
 
-def test_profile_a_note_starting_just_before_the_section_edge_is_not_in_the_section(tmp_path):
-    f = edge_leak_files(tmp_path)
+@pytest.mark.parametrize("early", [0.0013, 0.005, 0.019])
+def test_profile_a_note_starting_just_before_the_section_edge_is_not_in_the_section(tmp_path, early):
+    f = edge_leak_files(tmp_path, early)
     secs = [{"name": "A", "start_bar": 0, "bars": 8}, {"name": "B", "start_bar": 8, "bars": 8}]
     p = listen.reference_profile(f["mix"], {"kick": f["kick"], "bass": f["bass"]}, TEMPO, T0, secs)
     a = p["sections"][0]["roles"]["bass"]
-    assert a["absent"] and a["per_bar_db"] == [None] * 8, a      # the guard left the last 5 ms out of the last bar
+    assert a["absent"] and a["per_bar_db"] == [None] * 8, a      # it belongs to the next section's window (20 ms early)
     b = p["sections"][1]["roles"]["bass"]
     assert not b["absent"] and not b["trace"] and abs(b["vs_kick_db"] - (-6.0)) <= 0.1
 
@@ -1094,8 +1099,11 @@ def test_profile_a_phrase_in_four_of_eight_bars_is_present_and_one_bar_in_eight_
     sig = {"kick": level_sine(50, [0.0] * 8),
            "phrase": level_sine(1500, [-6.0 if i in (0, 1, 5, 6) else None for i in range(8)]),     # 4 of 8 bars
            "pair": level_sine(3000, [-6.0 if i in (2, 5) else None for i in range(8)]),             # 2 of 8: a quarter
-           "stray": level_sine(110, [-6.0 if i == 3 else None for i in range(8)]),                  # 1 of 8
+           "stray": level_sine(110, [-6.0 if i == 3 else None for i in range(8)]),                  # 1 of 8 (see below)
            "quiet_phrase": level_sine(200, [-50.0 if i < 4 else None for i in range(8)])}           # 4 bars, trace zone
+    # the windows start 20 ms early, so the last 20 ms of a block that ends on a bar line belong to the next bar:
+    # stop the stray note 30 ms short, or it would count as two bars
+    sig["stray"][int((T0 + 8.0) * SR) - int(0.03 * SR):int((T0 + 8.0) * SR)] = 0.0
     paths = {k: write(d, k + ".wav", stereo(v)) for k, v in sig.items()}
     mix = write(d, "mix.wav", stereo(sum(sig.values())))
     r = listen.reference_profile(mix, paths, TEMPO, T0, SECTIONS[:1])["sections"][0]["roles"]
@@ -1127,7 +1135,7 @@ def test_elements_a_role_panned_wider_on_our_side_is_one_width_gap_and_no_level_
     assert "Width (ref / ours)" in md and "Width gaps (more than 0.1 apart): synth 0.35 -> 0.75." in md
     m["sections"] = [{"name": "A", "start_bar": 0, "bars": 4}]           # a partial section: the note says whole section
     e = listen.mix_report(m, reference=prof)["sections"][0]["elements"]
-    assert "widths and loudness are for the whole section" in e["notes"][0] and e["width_gaps"][0]["role"] == "synth"
+    assert "widths and loudness are for the whole section" in e["notes"][0] and e["width_gaps"] == []
 
 
 def test_elements_mono_on_both_sides_has_no_width_gap(tmp_path):
@@ -1138,7 +1146,7 @@ def test_elements_mono_on_both_sides_has_no_width_gap(tmp_path):
         assert all(t["reference_width"] == t["ours_width"] == 0.0 for t in s["elements"]["table"])
 
 
-# ------------------------------------------------ review round 2: guard, presence, trace, kick, drums
+# ------------------------------------------------ review round 2: grid lead, presence, trace, kick, drums
 
 def hit_train(freq, tau, times, total_s, amp=1.0, sr=SR):
     """Decaying sines `amp * exp(-t/tau)` starting at each time in `times` (s), in a file `total_s` long."""
@@ -1170,7 +1178,7 @@ def identical_material(tmp_path, folder, shift_s, tau, bars_n=8):
 @pytest.mark.parametrize("tau,shift", [(0.04, -0.003), (0.015, 0.004), (0.008, -0.003)])
 def test_elements_partial_pairing_of_identical_material_has_no_bias_and_the_arc_agrees(tmp_path, tau, shift):
     """4 and 6 of 8 bars of the same material (the same timing on both sides): every row and every arc
-    block within 0.05 dB. The guard is at the section's ends only, on both sides, never at inner bar lines."""
+    block within 0.05 dB. Every window starts 20 ms early on both sides, so nothing is cut at a section or bar line."""
     ref = identical_material(tmp_path, "ref", shift, tau)
     ours = identical_material(tmp_path, "ours", shift, tau)
     secs = [{"name": "A", "start_bar": 0, "bars": 8}]
@@ -1196,14 +1204,14 @@ def test_elements_partial_pairing_of_identical_material_has_no_bias_and_the_arc_
                 assert abs(r - o) <= 0.05, (label, role, a)
 
 
-def drum_pattern(tmp_path, folder, shift_s, early_s=0.003, extra=None, ghosts=False, bars_n=8):
+def drum_pattern(tmp_path, folder, shift_s, early_s=0.003, extra=None, ghosts=False, bars_n=8, skip_first=False):
     """kick (60 Hz, every beat, `early_s` early like Flare's), snare (200 Hz, beats 2 and 4), hh (8 kHz, every
     8th), 120 BPM, 0.5 s lead; all `shift_s` late. `extra` = (time, Hz) adds one more kick hit; `ghosts` plays
     three beats of each bar 14 dB down."""
     d = tmp_path / folder
     d.mkdir()
     total = 0.5 + bars_n * 2.0 + 1.0
-    beats = [0.5 + b * 0.5 - early_s + shift_s for b in range(bars_n * 4)]
+    beats = [0.5 + b * 0.5 - early_s + shift_s for b in range(1 if skip_first else 0, bars_n * 4)]
     if ghosts:        # an accent on beat 2 of each bar, ghosts (-14 dB) on the other three: most hits are ghosts
         loud = [t for i, t in enumerate(beats) if i % 4 == 1]
         k = 0.8 * hit_train(60, 0.05, loud, total) + 0.8 * 0.2 * hit_train(60, 0.05, [t for i, t in enumerate(beats) if i % 4 != 1], total)
@@ -1234,7 +1242,7 @@ def test_drum_layer_identical_audio_shifted_5_ms_gives_no_readings(tmp_path, shi
     roles = drum_report(tmp_path, ref, ours, 0.5 + shift)
     assert [d["role"] for d in roles] == ["kick", "snare", "hh"]
     for d in roles:
-        assert d["readings"] == [] and d["ours_hit"] is not None and d["reference_hit"] is not None, d
+        assert d["readings"] == [] and d["ours_at_ms"] is not None and d["reference_hit"] is not None, d
         assert not any("not at the same place" in n for n in d["notes"]), d["notes"]
         assert abs(d["ours_at_ms"] - d["reference_at_ms"] - 1000 * shift * -1) <= 12, d    # the same hit, 5 ms apart
 
@@ -1242,8 +1250,8 @@ def test_drum_layer_identical_audio_shifted_5_ms_gives_no_readings(tmp_path, shi
 def test_drum_layer_a_hit_before_the_section_line_is_never_the_clean_hit(tmp_path):
     """The reference kick has an odd hit (90 Hz) 150 ms before the line, with the most room; the pattern in the
     section is 60 Hz. Picking the odd hit would read a pitch difference against ours."""
-    ref = drum_pattern(tmp_path, "ref", 0.0, extra=(0.5 - 0.150, 90))
-    # make the section's first beat late so that the odd hit has 650 ms of room: drop the early hit at the line
+    # the odd hit has 650 ms of room: the beat at the line is dropped from the reference, so nothing sits on its tail
+    ref = drum_pattern(tmp_path, "ref", 0.0, extra=(0.5 - 0.150, 90), skip_first=True)
     ours = drum_pattern(tmp_path, "ours", 0.0)
     roles = drum_report(tmp_path, ref, ours, 0.5)
     kick = roles[0]
@@ -1268,7 +1276,7 @@ def test_drum_layer_runs_only_for_roles_present_on_both_sides_and_one_failure_is
     ours2 = dict(ours, kick=quiet)
     roles = {d["role"]: d for d in drum_report(tmp_path, ref, ours2, 0.5)}
     assert roles["kick"]["readings"] == [] and "not present on both sides" in roles["kick"]["notes"][0]
-    assert roles["snare"]["readings"] == [] and roles["snare"]["ours_hit"] is not None       # the others still run
+    assert roles["snare"]["readings"] == [] and roles["snare"]["ours_at_ms"] is not None       # the others still run
     from sideman import oneshot
 
     def boom(*a, **k):
@@ -1329,7 +1337,7 @@ def test_elements_presence_does_not_depend_on_the_master_makeup_gain(tmp_path):
     ref, _ = files("ref", -35.0)                                    # 36 dB under the elements together
     ours, sig = files("ours", -29.0)                                # 6 dB louder: 30 dB under
     prof = listen.reference_profile(ref["mix"], {k: v for k, v in ref.items() if k != "mix"}, TEMPO, T0, SECTIONS[:1])
-    for makeup in (0.0, 12.0, 24.0):
+    for makeup in (0.0, 12.0, 24.0, 36.0):          # at 36 dB the pad is 66 dB under the master: absent if judged by it
         master = write(tmp_path, "master_%d.wav" % makeup, stereo(sum(sig.values()) * gain(makeup)))
         m = {"tempo": TEMPO, "offset_s": T0, "sections": [dict(SECTIONS[0])],
              "sources": {"master": str(master), **{k: str(v) for k, v in ours.items() if k != "mix"}}}
@@ -1390,3 +1398,80 @@ def test_elements_the_capture_is_the_reference_tolerance_is_a_third_of_a_db(tmp_
         return [s["elements"]["capture_is_reference"] for s in r["sections"]]
 
     assert flagged(0.1, "a") == [True, True, True] and flagged(1.5, "b") == [False, False, False]
+
+
+def test_profile_presence_is_against_the_stems_and_not_a_hotter_mix_file(tmp_path):
+    """The reference mix file is 20 dB hotter than its stems (a limited master). A pad 35 dB under the stems'
+    sum is present in the profile; judged against the mix it would be 55 dB under and a trace."""
+    d = tmp_path / "hot"
+    d.mkdir()
+    sig = {"kick": level_sine(50, [0.0] * 8), "bass": level_sine(110, [-6.0] * 8), "pad": level_sine(700, [-34.0] * 8)}
+    paths = {k: write(d, k + ".wav", stereo(v)) for k, v in sig.items()}
+    mix = write(d, "mix.wav", stereo(sum(sig.values()) * gain(20.0)))
+    pad = listen.reference_profile(mix, paths, TEMPO, T0, SECTIONS[:1])["sections"][0]["roles"]["pad"]
+    assert not pad["absent"] and not pad["trace"]          # 34 + 0.97 = 35 dB under the stems' sum
+
+
+def test_elements_no_width_gaps_on_a_partial_pairing_and_a_note_says_so(tmp_path):
+    """Identical stereo material whose pad is mono in bars 1-4 and wide in bars 5-8. Paired as 4 of 8 bars the
+    reference's width is the whole section's, which is not comparable with the paired bars: no width gaps."""
+    def files(folder):
+        d = tmp_path / folder
+        d.mkdir()
+        k = level_sine(50, [0.0] * 8)
+        pad = level_sine(900, [-6.0] * 8)
+        right = pad.copy()
+        right[int((T0 + 8.0) * SR):] *= -1.0                       # the second half in antiphase: all side
+        return {"kick": write(d, "kick.wav", stereo(k)), "pad": write(d, "pad.wav", np.stack([pad, right], axis=1)),
+                "mix": write(d, "mix.wav", np.stack([k + pad, k + right], axis=1))}
+
+    ref, ours = files("ref"), files("ours")
+    prof = listen.reference_profile(ref["mix"], {"kick": ref["kick"], "pad": ref["pad"]}, TEMPO, T0, SECTIONS[:1])
+    m = {"tempo": TEMPO, "offset_s": T0, "sources": {"master": str(ours["mix"]), "kick": str(ours["kick"]), "pad": str(ours["pad"])},
+         "sections": [{"name": "A", "start_bar": 0, "bars": 4}]}
+    e = listen.mix_report(m, reference=prof)["sections"][0]["elements"]
+    assert e["width_gaps"] == [] and "width gaps are not ranked" in e["notes"][0]
+    assert e["table"][0]["reference_width"] > 0.2 and e["table"][0]["ours_width"] == 0.0       # they do differ
+    m["sections"] = [{"name": "A", "start_bar": 0, "bars": 8}]                              # the whole section: all fine
+    assert listen.mix_report(m, reference=prof)["sections"][0]["elements"]["width_gaps"] == []
+
+
+# ------------------------------------------------ round 3: the grid lead, and identical audio at any offset
+
+def lead_pattern(tmp_path, folder, bars_n=4):
+    """120 BPM, 0.5 s lead-in, two 2-bar sections. A kick on every beat 3 ms early; a sparse tom (100 Hz) with a hit
+    10 ms before the line of each section and one more 1.75 s into it; hats (8 kHz, short decay) on every 8th."""
+    d = tmp_path / folder
+    d.mkdir()
+    total = 0.5 + bars_n * 2.0 + 1.0
+    kick = 0.8 * hit_train(60, 0.05, [0.5 + b * 0.5 - 0.003 for b in range(bars_n * 4)], total)
+    toms = []
+    for sec in range(bars_n // 2):
+        toms += [0.5 + sec * 4.0 - 0.010, 0.5 + sec * 4.0 + 1.75]
+    tom = 0.5 * hit_train(100, 0.15, toms, total)
+    hh = 0.25 * hit_train(8000, 0.01, [0.5 + b * 0.25 for b in range(bars_n * 8)], total)
+    paths = {"kick": write(d, "kick.wav", stereo(kick)), "toms": write(d, "toms.wav", stereo(tom)),
+             "hh": write(d, "hh.wav", stereo(hh)), "mix": write(d, "mix.wav", stereo(kick + tom + hh))}
+    return paths
+
+
+@pytest.mark.parametrize("lines_moved", [0.0, -0.020])
+def test_drum_layer_and_levels_are_the_same_for_identical_audio_read_at_any_offset(tmp_path, lines_moved):
+    """The same audio on both sides, read -20 .. +20 ms apart, with every section line also moved 20 ms against the
+    pattern: no gaps, no width gaps, no one-side roles, no drum readings."""
+    ref = lead_pattern(tmp_path, "ref")
+    ours = lead_pattern(tmp_path, "ours")
+    secs = [{"name": "K", "start_bar": 0, "bars": 2}, {"name": "L", "start_bar": 2, "bars": 2}]
+    t0 = 0.5 + lines_moved
+    prof = listen.reference_profile(ref["mix"], {r: ref[r] for r in ("kick", "toms", "hh")}, 120.0, t0, secs)
+    for delta in (-0.020, -0.015, -0.010, -0.005, 0.005, 0.010, 0.015, 0.020):
+        m = {"tempo": 120.0, "offset_s": t0 + delta, "sections": secs,
+             "sources": {"master": ours["mix"], **{r: ours[r] for r in ("kick", "toms", "hh")}}}
+        for sec in listen.mix_report(m, reference=prof)["sections"]:
+            e = sec["elements"]
+            label = (lines_moved, delta, sec["name"])
+            assert e["gaps"] == [] and e["width_gaps"] == [] and e["reference_only"] == [] and e["ours_only"] == [], (label, e)
+            assert {t["role"] for t in e["table"]} == {"toms", "hh"}, label
+            for d in sec["drums"]["roles"]:
+                assert d["readings"] == [] and d["ours_at_ms"] is not None, (label, d)
+                assert not any("not at the same place" in n or "failed" in n for n in d["notes"]), (label, d["notes"])
