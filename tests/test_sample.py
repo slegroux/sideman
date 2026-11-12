@@ -702,3 +702,17 @@ def test_pitch_weak_fundamental_is_tracked_like_any_tone():
     glide160 = oneshot.profile_array(hit(lambda t: np.where(t < 0.03, 160 - 60 * t / 0.03, 100.0), 0.2,
                                          partials=weak), SR)
     assert any(t.startswith("pitch drops") for t in oneshot.compare(glide160, r)["readings"])
+
+
+@pytest.mark.parametrize("rumble", [40.0, 50.0, 63.0, 75.0])
+def test_pitch_tom_over_any_rumble_stays_at_150(rumble):
+    # a 150 Hz tom (with its 2nd harmonic) over a rumble 14 dB down, at 1/k of the pitch
+    # or not: the tom's series holds nearly all the energy, so the pitch is 150 Hz and
+    # the rumble is listed as a partial
+    t = np.arange(int(0.6 * SR)) / SR
+    x = (np.sin(2 * np.pi * 150 * t) + 0.3 * np.sin(2 * np.pi * 300 * t)
+         + 0.2 * np.sin(2 * np.pi * rumble * t)) * np.exp(-t / 0.15)
+    r = oneshot.profile_array(x[:, None], SR)
+    assert r["pitched"] is True and r["pitch_body_hz"] == pytest.approx(150, rel=0.01)
+    assert r["partials"][0]["hz"] == pytest.approx(rumble, rel=0.01)
+    assert r["partials"][0]["db"] == pytest.approx(20 * math.log10(0.2), abs=1)          # -14 dB

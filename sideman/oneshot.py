@@ -579,11 +579,19 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
         body = _spectrum(y, b0, b1, sr)
         tonal = _tonal(body, nyq_hi)
     if tonal:
-        f0, l1, i0, said = _fundamental(tonal)
+        total, pool = sum(10 ** (t[1] / 10) for t in tonal), tonal
+        while True:            # a low peak whose series holds too little is a rumble: try the next up
+            f0, l1, i0, said = _fundamental(pool)
+            series = sum(10 ** (t[1] / 10) for t in tonal if _harmonic(t[0], f0))
+            higher = [t for t in pool if t[0] > f0 * (1 + HARM_TOL)]
+            if series >= 0.5 * total or not any(t[1] >= tonal[0][1] - STRONG_DB for t in higher):
+                break
+            notes.append("%s Hz at %.0f dB holds too little of the energy in its series: "
+                         "taken as a rumble" % (_num(f0), l1 - tonal[0][1]))
+            pool = higher
         notes += said
-        series = sum(10 ** (t[1] / 10) for t in tonal if _harmonic(t[0], f0))
         stands = body["d"][i0] - (_floor(body, i0, both=True) or -np.inf)
-        if series < 0.5 * sum(10 ** (t[1] / 10) for t in tonal):
+        if series < 0.5 * total:
             f0 = None
             notes.append("no harmonic series: the partials are listed, no pitch is given")
         elif stands < PITCHED_DB and _noise_flatness(body, tonal, nyq_hi)[0] > NOISY_DB:
