@@ -554,3 +554,107 @@ def test_profile_refuses_bad_input(tmp_path):
         listen.reference_profile(ref["mix"], {"mix": ref["kick"]}, TEMPO, T0, SECTIONS[:1])
     with pytest.raises(ValueError, match="tempo"):
         listen.reference_profile(ref["mix"], {"kick": ref["kick"]}, 0, T0, SECTIONS[:1])
+def capture_of(ref, **over):
+    """A manifest whose sources are the files of a stem_set (drums as the one summed file)."""
+    src = {"master": ref["mix"], "kick": ref["kick"], "bass": ref["bass"], "synth": ref["synth"],
+           "drums": ref["drums"]}
+    src.update(over)
+    return {"tempo": TEMPO, "beats_per_bar": 4, "offset_s": T0,
+            "sources": {k: str(v) for k, v in src.items() if v is not None},
+            "sections": [dict(s) for s in SECTIONS]}
+
+
+def test_elements_bass_raised_4_db_is_the_only_gap(tmp_path):
+    prof = profile_of(tmp_path, stem_set(tmp_path, "ref"))
+    ours = stem_set(tmp_path, "ours", bass_db=-6.0 + 4.0)
+    r = listen.mix_report(capture_of(ours), reference=prof, out_dir=tmp_path / "out")
+    assert r["reference_kind"] == "profile" and r["reference_stale"] == []
+    for s in r["sections"]:
+        e = s["elements"]
+        assert e["paired"] and not e["capture_is_reference"], s["name"]
+        assert [g["role"] for g in e["gaps"]] == ["bass"], (s["name"], e["gaps"])
+        assert abs(e["gaps"][0]["difference_db"] - 4.0) <= 0.2
+        row = {t["role"]: t for t in e["table"]}
+        assert abs(row["bass"]["reference_db"] - (-6.0)) <= 0.1 and abs(row["bass"]["ours_db"] - (-2.0)) <= 0.1
+        assert abs(row["drums"]["difference_db"]) <= 0.1
+    b = r["sections"][1]["elements"]
+    assert "synth" not in {t["role"] for t in b["table"]} and b["silent_in_both"] == ["synth"]
+    assert "master" not in {t["role"] for s in r["sections"] for t in s["elements"]["table"]}
+    md = pathlib.Path(r["md_path"]).read_text()
+    assert "## Elements against the kick" in md and "bass +4.0 dB" in md
+    assert "bass" in pathlib.Path(r["json_path"]).read_text()
+
+
+def test_elements_the_capture_that_is_the_reference_is_flagged(tmp_path):
+    ref = stem_set(tmp_path, "ref")
+    prof = profile_of(tmp_path, ref)
+    r = listen.mix_report(capture_of(ref), reference=prof["json_path"], out_dir=tmp_path / "out")   # a profile path
+    for s in r["sections"]:
+        e = s["elements"]
+        assert e["capture_is_reference"] and "the capture is the reference: check solos" in e["notes"]
+        assert e["gaps"] == []
+        assert s["vs_reference"]["flagged_bands"] == []
+    assert "the capture is the reference: check solos" in pathlib.Path(r["md_path"]).read_text()
+    ours = stem_set(tmp_path, "ours", bass_db=-6.0 + 4.0)           # a different master: no flag
+    assert not any(s["elements"]["capture_is_reference"] for s in listen.mix_report(capture_of(ours), reference=prof)["sections"])
+
+
+def test_elements_without_a_kick_source_leaves_the_table_out_but_keeps_the_mix_layer(tmp_path):
+    ref = stem_set(tmp_path, "ref")
+    prof = profile_of(tmp_path, ref)
+    r = listen.mix_report(capture_of(ref, kick=None), reference=prof, out_dir=tmp_path / "out")
+    for s in r["sections"]:
+        e = s["elements"]
+        assert e["table"] is None and e["gaps"] == [] and e["arc"] == {}
+        assert any("no kick source" in n for n in e["notes"]), e["notes"]
+        assert s["integrated_lufs"] is not None and "bands_db" in s and "vs_reference" in s
+    assert "no kick source" in pathlib.Path(r["md_path"]).read_text()
+
+
+def test_elements_roles_in_one_side_only_and_sections_that_do_not_pair(tmp_path):
+    ref = stem_set(tmp_path, "ref")
+    prof = profile_of(tmp_path, ref)
+    ours = stem_set(tmp_path, "ours")
+    m = capture_of(ours, drums=None, vox=ours["hh"])
+    m["sections"] = [{"name": "A", "start_bar": 0, "bars": 8}, {"name": "Z", "start_bar": 8, "bars": 8},
+                     {"name": "C", "start_bar": 16, "bars": 4}]
+    r = listen.mix_report(m, reference=prof)
+    a, z, c = (s["elements"] for s in r["sections"])
+    assert [x["role"] for x in a["reference_only"]] == ["drums"] and a["reference_only"][0]["reason"] == "not in the manifest"
+    assert abs(a["reference_only"][0]["vs_kick_db"] - DRUMS_VS_KICK) <= 0.1
+    assert [x["role"] for x in a["ours_only"]] == ["vox"] and a["ours_only"][0]["reason"] == "not in the profile"
+    assert z == {"paired": False, "notes": ["no section named 'Z' in the profile: mix layer only"]}
+    assert not c["paired"] and "4 bars here and 8 in the profile" in c["notes"][0]
+    assert "vs_reference" not in r["sections"][1] and r["sections"][1]["integrated_lufs"] is not None
+
+
+def test_elements_arc_follows_the_ratio_per_four_bars(tmp_path):
+    one = [{"name": "A", "start_bar": 0, "bars": 8}]
+    ref = stem_set(tmp_path, "ref", bass_db=-6.0)
+    prof = listen.reference_profile(ref["mix"], {"kick": ref["kick"], "bass": ref["bass"]}, TEMPO, T0, one)
+    ours = stem_set(tmp_path, "ours", bass_db=[-6.0] * 4 + [-2.0] * 4 + [-6.0] * 16)
+    m = capture_of(ours)
+    m["sections"] = one
+    arc = listen.mix_report(m, reference=prof)["sections"][0]["elements"]["arc"]["bass"]
+    assert all(abs(v - w) <= 0.2 for v, w in zip(arc["reference"], [-6.0, -6.0])), arc
+    assert all(abs(v - w) <= 0.2 for v, w in zip(arc["ours"], [-6.0, -2.0])), arc
+
+
+def test_elements_a_stale_profile_is_reported_and_a_plain_audio_reference_is_unchanged(tmp_path):
+    import os
+    ref = stem_set(tmp_path, "ref")
+    prof = profile_of(tmp_path, ref)
+    st = ref["kick"].stat()
+    os.utime(ref["kick"], (st.st_atime, st.st_mtime + 5))
+    r = listen.mix_report(capture_of(stem_set(tmp_path, "ours")), reference=prof, out_dir=tmp_path / "o1")
+    assert [s["role"] for s in r["reference_stale"]] == ["kick"]
+    assert "changed since the profile was built" in pathlib.Path(r["md_path"]).read_text()
+    r = listen.mix_report(capture_of(ref), reference=str(ref["mix"]), out_dir=tmp_path / "o2")
+    assert "reference_kind" not in r and r["reference"] == str(ref["mix"])
+    for s in r["sections"]:
+        assert "elements" not in s and set(s["vs_reference"]) == {"band_balance_db", "flagged_bands", "lufs_diff"}
+    assert "Elements against the kick" not in pathlib.Path(r["md_path"]).read_text()
+    with pytest.raises(ValueError, match="not a reference profile"):
+        listen.mix_report(capture_of(ref), reference={"sections": []})
+
+

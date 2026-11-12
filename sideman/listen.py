@@ -677,13 +677,120 @@ def profile_stale(profile: dict) -> list:
     return out
 
 
-def mix_report(manifest: dict | str | pathlib.Path, reference: str | pathlib.Path | None = None,
+def _load_profile(reference) -> dict | None:
+    """The reference as a profile dict when it is one (a dict, or a path to a .json file);
+    None for an audio file path or no reference."""
+    import json
+    if isinstance(reference, dict):
+        prof = reference
+    elif isinstance(reference, (str, pathlib.Path)) and str(reference).lower().endswith(".json"):
+        p = pathlib.Path(reference).expanduser()
+        if not p.is_file():
+            raise ValueError("no such profile: %s" % p)
+        prof = json.loads(p.read_text())
+        prof.setdefault("json_path", str(p.resolve()))
+    else:
+        return None
+    if prof.get("kind") != PROFILE_KIND or "sections" not in prof or "inputs" not in prof:
+        raise ValueError("not a reference profile (build one with reference_profile)")
+    return prof
+
+
+def _element_layer(prof: dict, sec: dict, name: str, a: dict, audio: dict, sr: int, t0: float,
+                   bar_s: float) -> tuple[dict | None, dict]:
+    """(vs_reference, elements) for one manifest section against the profile section of the
+    same name. Unpaired, or paired with a different number of bars: (None, {"paired": False, ...})."""
+    psec = next((s for s in prof["sections"] if s["name"] == name), None)
+    if psec is None:
+        return None, {"paired": False, "notes": ["no section named %r in the profile: mix layer only" % name]}
+    if psec["bars"] != sec["bars"]:
+        return None, {"paired": False, "notes": [
+            "section %r is %d bars here and %d in the profile: mix layer only" % (name, sec["bars"], psec["bars"])]}
+    pm = psec["mix"]
+    c = compare(a, {"bands_db": pm["bands_db"], "side_minus_mid_db": {},
+                    "integrated_lufs": pm["integrated_lufs"], "width": pm["width"]})
+    vs = {"band_balance_db": c["band_balance_db"], "flagged_bands": [f["band"] for f in c["flagged_bands"]],
+          "lufs_diff": c["diff"].get("integrated_lufs"), "width_diff": c["diff"].get("width")}
+    notes = []
+    is_ref = (a["width"] is not None and pm["width"] is not None
+              and abs(a["rms_db"] - pm["level_db"]) <= CAPTURE_IS_REF_DB
+              and abs(a["width"] - pm["width"]) <= CAPTURE_IS_REF_WIDTH)
+    if is_ref:
+        notes.append("the capture is the reference: check solos")
+    ref_roles = {r: e for r, e in psec["roles"].items() if r != "master"}
+    ours = {}
+    for role in audio:
+        if role == "master":                     # sits after the master chain: never ratioed against elements
+            continue
+        seg = _stereo(_slice(audio[role][0], sr, t0, t0 + sec["bars"] * bar_s))
+        lv = _level_db(seg)
+        ours[role] = (None if lv <= FLOOR_DB or lv < a["rms_db"] - ABSENT_DB else lv,
+                      _bar_levels(seg, sr, 0.0, bar_s, 0, sec["bars"]))
+    kick_ref = (ref_roles.get("kick") or {}).get("level_db")
+    kick_ours = (ours.get("kick") or (None,))[0]
+    if "kick" not in ours:
+        notes.append("no kick source in the manifest: elements against the kick left out")
+    elif "kick" not in ref_roles:
+        notes.append("no kick in the profile: elements against the kick left out")
+    elif kick_ref is None or kick_ours is None:
+        notes.append("the kick is silent in %s here: elements against the kick left out"
+                     % ("both" if kick_ref is None and kick_ours is None else
+                        "the reference" if kick_ref is None else "ours"))
+    ratios = kick_ref is not None and kick_ours is not None
+    table, ref_only, ours_only, arc, silent_both = [], [], [], {}, []
+    for role in sorted((set(ref_roles) | set(ours)) - {"kick"}):
+        r_lv = (ref_roles.get(role) or {}).get("level_db")
+        o_lv = (ours.get(role) or (None,))[0]
+        r_ratio = ref_roles[role].get("vs_kick_db") if role in ref_roles and ratios else None
+        o_ratio = round(o_lv - kick_ours, 2) if o_lv is not None and ratios else None
+        if r_lv is not None and o_lv is not None:
+            if ratios:
+                table.append({"role": role, "reference_db": r_ratio, "ours_db": o_ratio,
+                              "difference_db": round(o_ratio - r_ratio, 2)})
+                if sec["bars"] > CHANGE_BLOCK_BARS:
+                    arc[role] = {"reference": _arc(ref_roles[role]["per_bar_db"], ref_roles["kick"]["per_bar_db"]),
+                                 "ours": _arc(ours[role][1], ours["kick"][1])}
+        elif r_lv is not None:
+            ref_only.append({"role": role, "vs_kick_db": r_ratio,
+                             "reason": "not in the manifest" if role not in ours else "silent in ours"})
+        elif o_lv is not None:
+            ours_only.append({"role": role, "vs_kick_db": o_ratio,
+                              "reason": "not in the profile" if role not in ref_roles else "silent in the reference"})
+        else:
+            silent_both.append(role)
+    gaps = sorted(({"role": t["role"], "difference_db": t["difference_db"]} for t in table
+                   if abs(t["difference_db"]) > ELEMENT_GAP_DB), key=lambda g: -abs(g["difference_db"]))
+    el = {"paired": True, "notes": notes, "capture_is_reference": bool(is_ref),
+          "table": table if ratios else None, "gaps": gaps if ratios else [],
+          "reference_only": ref_only, "ours_only": ours_only, "silent_in_both": silent_both,
+          "arc": arc if ratios else {}}
+    return vs, el
+
+
+def mix_report(manifest: dict | str | pathlib.Path,
+               reference: dict | str | pathlib.Path | None = None,
                out_dir: str | pathlib.Path | None = None) -> dict:
     """Per-section measurements of a capture, plus change rate and masking.
     Writes mix_report.json and mix_report.md into out_dir (default: the
     master file's folder), replacing earlier ones there, and returns the
     report with their paths. Every section must lie inside every source;
-    `whole` and the change rate span first to last bar, gaps included."""
+    `whole` and the change rate span first to last bar, gaps included.
+
+    `reference` is an audio file (each section's bands are compared with the
+    whole file's), or a reference_profile: the profile dict or the path of its
+    .profile.json. With a profile, sections pair BY NAME (the manifest's
+    section "A" with the profile's section "A", same number of bars); a section
+    with no match, or of another length, reports the mix layer only, with a note.
+    A paired section gets the mix compared with the profile's section (bands,
+    width, loudness) and an `elements` layer: each source in both the manifest
+    and the profile as a ratio to the kick (reference, ours, difference), roles in
+    one side only, the ratio per 4 bars, and `gaps` (ratios differing by more than
+    ELEMENT_GAP_DB, largest first). The `master` source is never ratioed against
+    the elements: it sits after the master chain. A master capture whose level and
+    width equal the reference mix's is flagged ("the capture is the reference:
+    check solos"). Without a `kick` source (or kick stem) the table is left out
+    with a note; the mix layer still reports. `reference_stale` lists profile
+    inputs that changed since it was built."""
     import json
     m, mpath = _load_manifest(manifest)
     audio = {}
@@ -704,7 +811,8 @@ def mix_report(manifest: dict | str | pathlib.Path, reference: str | pathlib.Pat
         if have + 0.01 < end_s:
             raise ValueError("%s is %.2f s long but the sections run to bar %d = %.2f s"
                              % (role, have, last, end_s))
-    ref = analyze(reference) if reference else None
+    prof = _load_profile(reference)
+    ref = analyze(reference) if reference and prof is None else None
     kick_role = "kick" if "kick" in audio else ("drums" if "drums" in audio else None)
     rows = []
     for sec in m["sections"]:
@@ -721,6 +829,10 @@ def mix_report(manifest: dict | str | pathlib.Path, reference: str | pathlib.Pat
             row["vs_reference"] = {"band_balance_db": c["band_balance_db"],
                                    "flagged_bands": [f["band"] for f in c["flagged_bands"]],
                                    "lufs_diff": c["diff"].get("integrated_lufs")}
+        if prof is not None:
+            vs, row["elements"] = _element_layer(prof, sec, row["name"], a, audio, sr, t0, bar_s)
+            if vs is not None:
+                row["vs_reference"] = vs
         if kick_role and "bass" in audio:
             mk = masking(_slice(audio[kick_role][0], sr, t0, t1), _slice(audio["bass"][0], sr, t0, t1), sr)
             row["kick_bass_overlap"] = mk and mk["overlap"]
@@ -732,11 +844,16 @@ def mix_report(manifest: dict | str | pathlib.Path, reference: str | pathlib.Pat
     names = sorted((s["start_bar"], s["start_bar"] + s["bars"], s.get("name", "")) for s in m["sections"])
     for f in cr["static_runs"]:
         f["sections"] = [n for a0, a1, n in names if a0 < f["end_bar"] and a1 > f["start_bar"]]
-    report = {"manifest": str(mpath) if mpath else None, "reference": str(reference) if reference else None,
+    report = {"manifest": str(mpath) if mpath else None,
+              "reference": (prof.get("json_path") or prof["mix"]) if prof is not None
+              else (str(reference) if reference else None),
               "tempo": m["tempo"], "sections": rows, "change_rate": cr,
               "whole": {k: v for k, v in analyze_array(
                   _slice(audio["master"][0], sr, off + first * bar_s, off + last * bar_s), sr).items()
                   if k in ("integrated_lufs", "short_term_max_lufs", "true_peak_dbtp", "crest_db", "width")}}
+    if prof is not None:
+        report["reference_kind"] = "profile"
+        report["reference_stale"] = profile_stale(prof)
     out = pathlib.Path(out_dir) if out_dir else pathlib.Path(m["sources"]["master"]).parent
     out.mkdir(parents=True, exist_ok=True)
     jp, mdp = out / "mix_report.json", out / "mix_report.md"
@@ -750,6 +867,39 @@ def _fmt(v, nd=1):
     return "—" if v is None else ("%.*f" % (nd, v) if isinstance(v, float) else str(v))
 
 
+def _elements_markdown(r: dict) -> list:
+    lines = ["", "## Elements against the kick", "",
+             "Each element's mean power minus the kick's over the same bars (dB; negative = quieter than the "
+             "kick). A gap is a difference of more than %.1f dB. The master capture is never ratioed against "
+             "the elements: it sits after the master chain." % ELEMENT_GAP_DB, ""]
+    for s in r["sections"]:
+        e = s["elements"]
+        lines += ["### %s" % s["name"], ""]
+        lines += ["- ⚠ %s" % n if "check solos" in n else "- %s" % n for n in e["notes"]]
+        if not e["paired"]:
+            lines.append("")
+            continue
+        if e["table"] is not None:
+            lines += ["| Element | Reference | Ours | Diff |", "|---|---|---|---|"]
+            lines += ["| %s | %s | %s | %s |" % (t["role"], _fmt(t["reference_db"]), _fmt(t["ours_db"]),
+                                                 "%+.1f" % t["difference_db"]) for t in e["table"]]
+            lines.append("")
+            lines.append("Gaps, largest first: " + ("; ".join("%s %+.1f dB" % (g["role"], g["difference_db"])
+                                                             for g in e["gaps"]) or "none") + ".")
+        for key, label in (("reference_only", "In the reference only"), ("ours_only", "In ours only")):
+            if e[key]:
+                lines.append("%s: " % label + "; ".join(
+                    "%s (%s%s)" % (x["role"], x["reason"], "" if x["vs_kick_db"] is None
+                                   else ", %+.1f dB vs kick" % x["vs_kick_db"]) for x in e[key]) + ".")
+        if e["arc"]:
+            lines += ["", "Per 4 bars (reference / ours):"]
+            for role, a in e["arc"].items():
+                lines.append("- %s: " % role + " | ".join("%s / %s" % (_fmt(x), _fmt(y))
+                                                         for x, y in zip(a["reference"], a["ours"])))
+        lines.append("")
+    return lines
+
+
 def _markdown(r: dict) -> str:
     w = r["whole"]
     lines = ["# Mix report", "",
@@ -758,6 +908,11 @@ def _markdown(r: dict) -> str:
                                          _fmt(w["short_term_max_lufs"]), _fmt(w["true_peak_dbtp"]),
                                          _fmt(w["crest_db"]), _fmt(w["width"], 2)),
              ""]
+    if r.get("reference_kind") == "profile":
+        lines += ["Reference profile: `%s`. Sections are paired with the profile's by name." % r["reference"], ""]
+        lines += ["- ⚠ %s `%s` %s since the profile was built" % (s["role"], s["path"], s["reason"])
+                  for s in r["reference_stale"]]
+        lines += [""] if r["reference_stale"] else []
     if r["reference"]:
         lines += ["Reference: `%s`. Band balance is relative to it after removing the overall level "
                   "offset; bands more than 3 dB away are listed." % r["reference"], ""]
@@ -779,6 +934,8 @@ def _markdown(r: dict) -> str:
             cells.append(_fmt(ov, 2) + ("" if q is None else " (quieter %+.0f dB)" % q)
                          + (" ⚠" if s.get("masking_flag") else ""))
         lines.append("| " + " | ".join(cells) + " |")
+    if r.get("reference_kind") == "profile":
+        lines += _elements_markdown(r)
     cr = r["change_rate"]
     lines += ["", "## Change rate", "",
               "Spectral change between consecutive %d-bar blocks (mean third-octave difference, dB). "
