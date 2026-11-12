@@ -448,3 +448,13 @@ def test_envelope_5ms_file_is_none_with_reasons_not_numbers():
     assert r["fall_20_ms"] is None and r["fall_40_ms"] is None and r["truncated"] is True
     assert r["pitch_body_hz"] is None and r["harmonics_db"] is None
     assert any("too short" in n for n in r["notes"])
+
+
+def test_envelope_attack_ignores_start_phase_and_clipping():
+    # both start phases of an instant 40 Hz hit, and a hit clipped flat at full scale,
+    # peak at the onset; a 10 ms linear ramp first comes within 1 dB of its top at
+    # 10 * 10^(-1/20) = 8.9 ms
+    for x in (hit(40, 0.2), hit(40, 0.2, phase=math.pi / 2), np.clip(4 * hit(100, 0.1), -1, 1)):
+        assert oneshot.profile_array(x, SR)["attack_ms"] <= 1.0
+    r = oneshot.profile_array(hit(200, 0.15, attack=0.010), SR)
+    assert r["attack_ms"] == pytest.approx(10 * 10 ** (-1 / 20), abs=1.0)

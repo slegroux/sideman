@@ -16,10 +16,9 @@ Choices that are not obvious from the code:
   (5 ms for an unpitched hit), so partials beating against each other do not
   read as decay. A fall time is the last moment the envelope is still above
   the threshold, measured from the envelope's peak. The attack time is where
-  a 1 ms-smoothed power envelope first comes within 1 dB of its peak: a
-  crest, so it is good to about half a period of a low tone (and reads a
-  linear ramp about 11 % short). (An analytic
-  envelope was tried: it dips 6 dB or spikes 5 dB at an abrupt onset.)
+  that same envelope first comes within 1 dB of its peak: whole periods, so
+  the start phase and a clipped plateau do not move it, and a linear ramp
+  reads at 10^(-1/20) = 89 % of its length.
 - Pitch frames are Hann windows on the analytic signal (no negative-frequency
   image), three periods long, zero-padded 8x, with parabolic interpolation on
   the dB spectrum. A spectral peak must be the maximum within one bin of the
@@ -405,18 +404,16 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
     pitched = f0 is not None
     out["pitched"] = pitched
 
-    # envelope: the attack ends where a 1 ms envelope first comes within
-    # ATTACK_DB of its peak (a crest, so within half a period of a low tone;
-    # the argmax itself wanders between near-equal crests when noise rides on
-    # them), falls on whole periods of the body pitch
-    fine = _boxcar(power, max(1, int(0.001 * sr)))
-    out["attack_ms"] = _ms(int(np.argmax(fine >= fine.max() * 10 ** (-ATTACK_DB / 10))), sr)
+    # envelope over whole periods of the body pitch: the attack ends where it
+    # first comes within ATTACK_DB of its peak (whole periods, so the start
+    # phase does not move it, and a clipped plateau does not either)
     if pitched:
         period = sr / f0
         length = int(round(period * math.ceil(0.0025 * f0)))
     else:
         length = int(0.005 * sr)
     env = _boxcar(power, max(1, length))
+    out["attack_ms"] = _ms(int(np.argmax(env >= env.max() * 10 ** (-ATTACK_DB / 10))), sr)
     ip = int(np.argmax(env))
     for drop in FALLS_DB:
         k = _last_above(env, ip, env[ip] * 10 ** (-drop / 10))
@@ -529,7 +526,7 @@ def profile(path: str | pathlib.Path, hit: int | None = None) -> dict:
     onset_ms        where the hit starts in the file (first 1 ms within 40 dB of its loudest)
     truncated       the next hit or the end of the file cuts it before it falls 40 dB
     peak_db         sample peak, dBFS (the only absolute level here)
-    attack_ms       onset to the envelope peak (first within 1 dB of it)
+    attack_ms       onset to the envelope peak (first within 1 dB of it, over whole periods)
     fall_10/20/40_ms  envelope peak to the last moment above peak - 10/20/40 dB
     duration_ms     onset to the last moment above peak - 60 dB
     pitched         false for noise or an inharmonic sound: no pitch, no harmonics
