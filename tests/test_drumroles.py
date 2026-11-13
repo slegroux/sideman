@@ -519,3 +519,29 @@ def test_bars_0_to_3_alone_and_inside_16_bars_give_the_same_groups_on_separated_
     keep = lambda groups: [(g["count"], g["pattern"], g["bars_with"], g["off_grid"], g["tentative"]) for g in groups]  # noqa: E731
     assert keep(big["sections"][0]["groups"]) == keep(small["groups"])
     assert [g["count"] for g in big["groups"]] == [192, 64] and [g["count"] for g in small["groups"]] == [48, 16]
+
+
+def test_an_overlapped_hit_between_two_alike_groups_is_not_assigned_and_one_next_to_a_group_is():
+    # _assign_overlapped on hand-made hits: group A's medoid a hat of tau 5 ms, group B's of tau 7 ms (about 0.9 apart), the
+    # overlapped hit one of tau 6 ms: it is within the threshold of both and not 15 % nearer to either, so it stays
+    # overlapped, with the numbers in its reason; against a group of tau 40 ms (far) it goes to the group of tau 5 ms
+    def hat(i, tau):
+        return noise_hit(i, tau)[:int(STEP * SR)]
+    parts = [hat(1, 0.005), hat(2, 0.007), hat(3, 0.006), hat(4, 0.04)]
+    x = np.concatenate([np.concatenate([p, np.zeros(SR // 10)]) for p in parts])[:, None]
+    starts = np.cumsum([0] + [len(p) + SR // 10 for p in parts])[:4]
+    hits = [{"id": i, "start": int(a), "end": int(a) + len(p), "status": "grouped", "reason": None, "lead_db": None,
+             "group": None, "distance": None} for i, (a, p) in enumerate(zip(starts, parts))]
+    hits[2].update(status="overlapped", reason="it starts out of a tail or bed only 20 dB under its own loudest ms (it needs 30)",
+                   lead_db=-20.0)
+
+    def assign(medoids):
+        hits[2].update(group=None, distance=None)
+        hits[2]["status"], hits[2]["reason"] = "overlapped", "it starts out of a tail or bed only 20 dB under its own loudest ms (it needs 30)"
+        found = [(gid, {"medoid": m, "assigned": []}) for gid, m in enumerate(medoids)]
+        drumroles._assign_overlapped(x, SR, hits, found, drumroles.THRESHOLD)
+        return hits[2]["status"], hits[2]["reason"], found
+    status, reason, _ = assign([0, 1])
+    assert status == "overlapped" and "not assigned" in reason and "groups 0 and 1" in reason, reason
+    status, reason, found = assign([0, 3])
+    assert status == "assigned" and hits[2]["group"] == 0 and found[0][1]["assigned"] == [2] and "first 40 ms" in reason, reason

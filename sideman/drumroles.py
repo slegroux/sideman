@@ -10,48 +10,80 @@ Choices that are not obvious from the code:
 - Where a hit sits: the grid line nearest its onset (bar from t0, 16th 0..15 from the bar's start). `offset_ms` is the
   onset minus that line, so a hit 8 ms early reads -8 and keeps its 16th. A hit more than GRID_LEAD_S (20 ms, the
   tolerance the reference-profile windows use) from every line is `on_grid: false`: it keeps its group but counts in no
-  pattern. A pattern is the share of the scope's bars (the stem: first to last bar with a hit; a section: its `bars`)
-  in which the group plays at that 16th; `unmeasured_pattern` is the same for the hits that could not be grouped.
+  pattern. A pattern is the share of the scope's bars (the stem: first to last bar with a real hit; a section: its `bars`)
+  in which the group plays at that 16th.
 - Onsets: oneshot's, so hit detection is `oneshot._segments` (a new hit rises 15 dB within 10 ms, to within 6 dB of its
-  peak, and 6 dB over the 50 ms before it, at least 50 ms after the last). The first hit's onset is read with
-  `_hit_onset` (12 dB over the bed before it), the others with `hit_cut`'s (the first rise out of the tail, which it
-  reads as the loudest ms over 20 ms: one ms of a low tom's tail is loud or quiet with the phase it falls on, and read
-  from 1 ms the onset came 5 ms early).
+  peak, and 6 dB over the 50 ms before it, at least 50 ms after the last), and it is relative to the stem's loudest
+  moment: a hit more than 40 dB under the loudest 5 ms of the stem is not found (a stem with one very loud hit loses
+  its quiet ones). The first hit's onset is read with `_hit_onset` (12 dB over the bed before it), the others with
+  `hit_cut`'s (the first rise out of the tail, which it reads as the loudest ms over 20 ms: one ms of a low tom's tail
+  is loud or quiet with the phase it falls on, and read from 1 ms the onset came 5 ms early).
 - What is compared: each hit's cut runs from its onset to 2 ms before the next hit's onset, or `max_cut_s` after it, and
   two cuts are compared over the shorter of the two (both ended with a 5 ms fade, so the cut itself is not a click). What
-  follows a hit never decides its group, and a hit is only compared as far as it is alone: an open hat and the closed
-  hat a 16th after it are compared over that 16th, loud against fallen.
+  follows a hit never decides its group, and a hit is only compared as far as it is alone: two hats a 16th apart are
+  compared over that 16th.
 - Hits that cannot be measured are listed with their reason, never dropped and never put in a group:
   `too_short` (under MIN_CUT_S before the next hit: a grace note or flam; the distance was measured down to 60 ms),
   `no_lead` (the stem starts just before it: nothing says what lies under it), `overlapped` (the 10 ms before its onset
   are less than OVERLAP_DB under its loudest ms: the tail of an earlier hit or a bleed bed), `faint` (FAINT_DB under
   the median of the hits around it: with a bleed bed under the whole stem `_segments` reports the bed before the first
-  hit as a hit), `silent`, `ungrouped` (more than `max_groups` sounds: not forced into the nearest). OVERLAP_DB is
-  measured: a closed noise hat (tau 12 ms) over the tail of an open one, against a clean closed hat, reads 0.8-0.9 with
-  the tail 35 dB under it, 1.0-1.1 at 30, 1.2-1.3 at 27, 1.4-1.5 at 24 and 1.6-1.7 at 21 (the threshold below is
-  1.5); a constant bed that every hit shares does not separate them until about 20 dB (within 0.8 and between 2.5 at
-  40 dB, review round 2), but one rule cannot tell a shared bed from an earlier hit's tail, so a bed at -30 dB or
-  louder under the hits makes them overlapped, and the report says so.
-  What this cannot report: a hit that does not rise out of a tail as `_segments` asks (16th hats under an open hat of tau
-  120 ms, whose tail is only 9 dB down one 16th later) is part of the earlier hit. Each hit lists the 16th lines its own tail still
-  sounds through (`through`), which is where such a hit could hide, and the result says so.
+  hit as a hit, and a ghost note reads the same, so faint hits are counted in `unmeasured_pattern`), `silent`,
+  `ungrouped` (more than `max_groups` sounds: not forced into the nearest).
+- Overlapped hits and groups: an overlapped hit never forms or moves a group. Once the groups exist it is compared with
+  each group's medoid, over the whole cut when its tail is ASSIGN_FULL_DB (-24 dB) or more under it, over its first 40 ms
+  when the tail is between -24 and -14 dB under it, not at all when louder; it goes to the nearest medoid when that is
+  within the threshold and 15 % nearer than the second nearest, else it stays "overlapped" with the numbers in its
+  reason. An assigned hit has status "assigned", counts in its group's `pattern` (and in `assigned_pattern`, the same for
+  the assigned hits alone), `bars_with` and `assigned`, never in `count`, `level_db`, `spread`, the medoid or the clean hit.
+  Measured on 24 stems of 8 bars (open hats of tau 80, 120, 160 and 200 ms on the offbeats, closed hats of tau 12 ms
+  on the other 16ths, 3 seeds, the search off and on): no hat in a group of the other kind; the closed hats placed
+  went from 2 to about 50 (tau 120) and 14 (200) without the search and 61-63 and 29-33 with it. The 25 ms window the
+  review also tried (tail louder than -14 dB) placed 368 right and 69 wrong, so it is not used. OVERLAP_DB is measured: a closed noise hat (tau 12 ms) over the tail of an open
+  one, against a clean closed hat, reads 0.8-0.9 with the tail 35 dB under it, 1.0-1.1 at 30, 1.2-1.3 at 27, 1.4-1.5 at
+  24 and 1.6-1.7 at 21 (the threshold below is 1.5); a bed that every hit shares does not separate them until about
+  20 dB under (within 0.8, between 2.5 at 40 dB, review round 2), but one rule cannot tell a shared bed from an earlier
+  hit's tail, so a bed at -30 dB or louder under the hits makes them overlapped, and the report says so.
+- Hits the detector cannot see: a hit that does not rise out of a tail as `_segments` asks (a closed hat on the 16th
+  after an open hat of tau 120 ms, whose tail is only 9 dB down there) is part of the earlier hit. `through` lists the
+  16th lines each hit's tail still sounds through (within 40 dB), and `hidden_pattern` (per 16th, the share of bars in
+  which that line is inside a tail with no hit found at it) says where they could be, even without the search.
+  `unmeasured_pattern` leaves them out, and every hit that was never found. `grid_onsets=True` looks at every 16th line
+  with no onset within 50 ms for a rise of 6 dB or more (the first-difference power, 3 ms after against 5 ms before, the
+  best point within 20 ms of the line, no more than 60 dB under the stem's peak) and adds it as a hit with
+  `source: "grid"`. It is meant for hat-like stems (`hat_like`: the share of energy above 4 kHz; a hat stem reads
+  0.9 and more, kick, snare and toms stems well under 0.2): on the others it finds bleed and the phase of a low tone's
+  tail as hits (118-355 hits on the Flare kick, snare and toms stems, review round 1; a synthetic kick stem here reads
+  the kick's own tail at every line after a kick), which `grid_hits` and `source` count and mark. It reads only a
+  window of the stem around each line, never the whole stem at once.
 - Grouping: agglomerative, average linkage, cut at `threshold` (1.5). Average linkage because single linkage chains (a
   velocity gradient or a bleed bed links closed to open through the hits between them: 0, 1.4 and 2.8 are one group
   at 1.5) and complete linkage splits one sound on its one worst pair, which for a noise hit is the noise realisation.
   The number is measured on noise hats (tau 12 and 120 ms, cuts of 60 to 500 ms): two realisations of one hat read
   0.55-0.74 (closed) and 0.65-0.82 (open); a hat with a 50 % longer decay 0.7-1.3; a closed hat against an open one
   2.8-4.9; and the review of the distance measured at least 2.5 between two sounds over a bleed bed. 1.5 is 1.8 times the
-  worst pair of one sound and 1.7 times under the nearest of two. It is coarser on low pitched drums, where the
-  distance moves little with pitch (the review, linear scale: a 50 Hz kick reads 0.38 for 1.5 semitones and 0.78 for an octave; on the
-  Flare stems a 45 Hz kick against a 136 Hz tom read 1.06), so two toms a fifth apart can still share a group.
+  worst pair of one sound and 1.7 times under the nearest of two.
+  Material whose distances lie around the threshold (a continuum of decays, a velocity gradient: 48 of 247 hat member
+  distances on Flare lie between 1.3 and 1.5) is cut where the sample puts the cut: a different sample, or the same
+  bars inside a longer stem, gives other groups for it (the review: ARI 0.65-0.95 for the sample at 16 to 128 hits). Well
+  separated sounds do not move. `stability` says which groups moved (see hit_groups), and groups under 4 measured
+  hits are `tentative`.
+- Pitch: the distance moves little with pitch on low drums, so a group whose members' body pitches (`profile_array`'s
+  `pitch_body_hz` on each member's cut) fall in two clusters more than 3 semitones apart is split after grouping, each
+  side keeping at least two hits; members with no pitch stay with the larger cluster. Measured as the same drum
+  shifted up by 7 / 12 / 19 semitones, the distance reads 0.44 / 0.61 / 0.98 (45 Hz kick), 0.65 / 1.06 / 1.55 (100 Hz
+  tom), 0.87 / 1.37 / 1.87 (150 Hz tom, review round 1): toms an octave apart and a kick a fifth to an octave up share a
+  group without the split. A group is read only when at least half of 8 members spread over it have a pitch (a hat
+  group costs 8 reads of 7 ms; a tom, 150 ms for each member, which is most of the run time of a kick or toms stem).
 - Cost: every distance is one `spectral_distance` (about 2 ms on a 120 ms cut, 6 ms on 500 ms). The hits are not
   compared pairwise: a deterministic sample of SAMPLE_HITS hits (evenly spaced in time) is grouped (S^2 / 2 distances),
   every other hit goes to the nearest of the sample's medoids if within `threshold` of it (n * k distances for k
-  groups), and what is left over is sampled again, until nothing is or `max_groups` groups exist. About 40-120 ms a hit
-  on real stems (a nine-minute stem of 3000 hits: a few minutes). The hits are put in time order first, so the order
-  they come in never matters; ties go to the earlier hit. Memory: the stem as float64.
+  groups), and what is left over is sampled again, until nothing is or `max_groups` groups exist. Overlapped hits cost
+  one distance per group. `stability_runs` regroupings with a shifted sample reuse every distance already measured, and
+  cost about as much again for each. The hits are put in time order first, so the order they come in never matters;
+  ties go to the earlier hit. Memory: the stem as float64.
 - Sections do not regroup: a section's groups are the stem's groups restricted to the hits whose bar lies in the section
-  (the same ids in every section; the count, pattern, level, spread and clean hit are the section's own).
+  (the same ids in every section; the count, pattern, level, spread and clean hit are the section's own, `stability`
+  is the stem's).
 """
 from __future__ import annotations
 
@@ -581,8 +613,7 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     out["hits"] = hits
     if not hits:
         return out
-    occupied = {int(round((h["onset_s"] - t0) / step_s)) for h in hits if h["on_grid"]}
-    hidden = {divmod(n, steps) for ns in tails.values() for n in ns if n not in occupied}
+    hidden = {divmod(n, steps) for ns in tails.values() for n in ns}      # a tail's cut ends at the next hit: no line with a hit
     real = [h["bar"] for h in hits if h["status"] not in ("faint", "silent", "no_lead")]
     first, last = (min(real), max(real)) if real else (0, 0)
     whole = _scope(x, sr, hits, found, hidden, {h["id"] for h in hits}, first, last - first + 1, steps)
