@@ -1511,3 +1511,20 @@ def test_bleed_is_not_marked_without_enough_hits_or_a_clean_hit_and_says_so():
         drumroles.mark_bleed({"x": pair["x"], "y": other})
     assert drumroles._tail([0.5, 0.5], 2) == pytest.approx(0.25) and drumroles._tail([0.5, 0.5], 1) == pytest.approx(0.75)
     assert drumroles._tail([1.0, 1.0, 1.0], 3) == pytest.approx(1.0) and drumroles._tail([0.25] * 4, 4) == pytest.approx(0.25 ** 4)
+
+
+def test_a_result_without_tail_levels_says_its_hidden_cells_were_not_judged():
+    # a hat on the "a" 16ths whose "e" lines are hidden in every bar, from a result that carries no tail levels (built by
+    # hand, or stored before they existed): the cells stay hidden, and the role says they could not be judged
+    hits, cells = [], []
+    for bar in range(8):
+        for st in (3, 7, 11, 15):
+            hits.append({"bar": bar, "step": st, "on_grid": True})
+        cells += [[bar, st] for st in (1, 5, 9, 13)]
+    g = {"id": 0, "members": list(range(len(hits))), "assigned_members": [], "pattern": [0.0] * 16, "level_db": -20.0}
+    result = {"hits": hits, "hidden_cells": cells, "unmeasured_cells": []}
+    assert drumroles._use(result, g)["hidden_unjudged"] is True
+    result["hidden_tail_db"] = [-60.0] * len(cells)            # a quiet tail: a hit of -20 dB would have been found
+    use = drumroles._use(result, g)
+    assert use["hidden_unjudged"] is False
+    assert [r["state"] for r in use["steps"] if r["step"] in (1, 5, 9, 13)] == ["not in use"] * 4

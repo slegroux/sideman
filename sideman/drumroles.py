@@ -805,10 +805,13 @@ def _use(result: dict, g: dict) -> dict:
     blind = {(b, st) for b, st in result.get("unmeasured_cells", [])}      # a hit was found there: it may be this group's
     tails = result.get("hidden_tail_db")
     rise = GRID_RISE_DB if result.get("grid_onsets") else oneshot.RISE_DB
+    # Without tail levels (a hand-built result, or one stored before they existed) or a group level, a hidden cell cannot
+    # be judged and stays hidden, which can make a sparse part read dense; `hidden_unjudged` says so in the output
+    tails_known = tails is not None and g.get("level_db") is not None
     for k, (b, st) in enumerate(result.get("hidden_cells", [])):
         # hidden FOR THIS GROUP only when a hit of its level would not have risen out of the tail: the tail within `rise` dB of the
-        # group's level. A result without tail levels, or a group without a level, has every hidden cell hidden
-        if tails is None or g.get("level_db") is None or tails[k] > g["level_db"] - rise:
+        # group's level
+        if not tails_known or tails[k] > g["level_db"] - rise:
             blind.add((b, st))
     counts, rows = np.zeros(steps), []
     for st in range(steps):
@@ -821,7 +824,8 @@ def _use(result: dict, g: dict) -> dict:
                      "share_all": round(len(played) / len(own), 3) if own else 0.0,
                      "share_observable": None if share_obs is None else round(share_obs, 3),
                      "state": "unknown" if seen < OBSERVE_MIN else "in use" if share_obs >= STEP_MIN else "not in use"})
-    return {"counts": counts, "n": int(counts.sum()), "steps": rows}
+    return {"counts": counts, "n": int(counts.sum()), "steps": rows,
+            "hidden_unjudged": bool(result.get("hidden_cells")) and not tails_known}
 
 
 def _read(audio: np.ndarray, sr: int) -> tuple[dict | None, str | None]:
@@ -1073,6 +1077,7 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
              "bleed": bool(bleed.get(gid, {}).get("bleed")), "role": None, "note": None,
              "measures": {"hits": g["count"] + g["assigned"], "measured": g["count"], "assigned": g["assigned"],
                           "offbeat_share": round(_pattern_numbers(u)["share_off"], 3), "steps": u["steps"],
+                          "hidden_unjudged": u["hidden_unjudged"],
                           "unknown_steps": [r["step"] for r in u["steps"] if r["state"] == "unknown"],
                           "density": {k: round(_pattern_numbers(u)[k], 3) for k in ("off_per_bar", "off_density", "odd_per_bar", "odd_density")},
                           "members_read": len(reads), "stability_status": g.get("stability_status"), **(m or {"clean_hit": why_clean})}}
