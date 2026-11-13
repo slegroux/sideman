@@ -446,6 +446,10 @@ def profile_of(true: dict, seed: int, **kw) -> dict:
 noise_onset_db = patch.noise_onset_db
 
 
+PE_DECAY_PER_TAU = 7.94      # Pe Decay / tau: the same constant as the amp envelope's, 1 / (0.29 / ln 10), hard-coded
+#                              here so that a wrong patch.PE_DECAY_PER_TAU changes what the stand-in plays
+
+
 def standin_from_live(live: dict) -> dict:
     """The stand-in's parameters for what operator_live asks Live to play (the test double's reading of Operator's
     physical values, under the assumptions in patch.ASSUMPTIONS). The mapping goes through operator_live, so a
@@ -456,7 +460,7 @@ def standin_from_live(live: dict) -> dict:
     if p["Osc-A On"]:
         out["decay"] = p["Ae Decay"] * TAU_FROM_T / 1000
     if p["Pe On"]:
-        out["pitch_st"], out["pitch_tau"] = p["Pe Init"], p["Pe Decay"] / patch.PE_DECAY_PER_TAU / 1000
+        out["pitch_st"], out["pitch_tau"] = p["Pe Init"], p["Pe Decay"] / PE_DECAY_PER_TAU / 1000
     if p["Osc-B On"]:
         out["noise_db"] = p["Osc-B Level"] - p["Osc-A Level"] if p["Osc-A On"] else 40.0
         out["noise_decay"] = p["Be Decay"] * TAU_FROM_T / 1000
@@ -1078,3 +1082,13 @@ def test_to_live_merges_only_adjacent_rows_with_the_same_display_so_a_table_with
     assert patch.from_live({"Ae Decay": 0.3}, plateau)["Ae Decay"] == pytest.approx(10.0)
     falling = {"Ae Decay": [[0, 100, "ms"], [0.5, 10, "ms"], [0.6, 10, "ms"], [1, 1, "ms"]]}
     assert patch.to_live({"Ae Decay": 10.0}, falling)["Ae Decay"] == pytest.approx(0.55)
+
+
+def test_the_end_to_end_stand_in_reads_pe_decay_by_the_amp_envelopes_constant():
+    """standin_from_live divides Pe Decay by a constant written in this file (7.94), so a patch.PE_DECAY_PER_TAU that
+    is not the amp envelope's 1 / (0.29 / ln 10) makes the stand-in glide for the wrong time. A glide of tau 40 ms
+    must come back as 40 ms."""
+    q = {"carrier_hz": 100.0, "pitch_drop_st": 12.0, "pitch_tau_ms": 40.0, "tone_attack_ms": 1.5, "tone_decay_ms": 300.0,
+         "tone_level_db": 0.0, "output_db": -6.0}
+    st = {"tone_on": True, "noise_on": False, "pitch_env_on": True, "filter_on": False}
+    assert standin_from_live(patch.operator_live(q, st))["pitch_tau"] == pytest.approx(0.040, rel=1e-3)
