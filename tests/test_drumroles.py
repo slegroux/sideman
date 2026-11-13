@@ -658,23 +658,23 @@ def fake_result(specs, n_bars=8, threshold=drumroles.THRESHOLD):
     """A hit_groups-shaped result built by hand: each spec is {steps, bars, audio (the clean hit, [n] or None), level (dB),
     stability, separation, nearest, assigned (steps whose hits count as assigned, not measured), hidden / unmeasured
     ((bar, step) cells with no hit that are listed as hidden under a tail / as holding an unmeasured hit), read (the audio of the
-    members the measurement rules read, as `hit_groups` keeps them; without it the clean hit is the one member read)}. Group i has id i; its
-    hits sit exactly on the 16th of every bar in `bars` at each step."""
+    members the measurement rules read, as `hit_groups` keeps them; without it the clean hit is the one member read), cells (the
+    (bar, step) pairs the group plays at, instead of steps x bars)}. Group i has id i; its hits sit exactly on the 16th of every
+    bar in `bars` at each step."""
     hits, groups, hidden, unmeasured = [], [], [], []
     for gid, s in enumerate(specs):
         members, assigned = [], []
         hidden += [list(c) for c in s.get("hidden", [])]              # (bar, step) cells the group is not seen in: under a tail
         unmeasured += [list(c) for c in s.get("unmeasured", [])]      # ...or held an unmeasured hit
-        for b in s.get("bars", range(n_bars)):
-            for st in s["steps"]:
-                if (b, st) in s.get("hidden", ()) or (b, st) in s.get("unmeasured", ()):
-                    continue
-                h = {"id": len(hits), "bar": b, "step": st, "on_grid": True, "onset_s": at(b * 16 + st),
-                     "level_db": s.get("level", -10.0), "status": "grouped", "group": gid}
-                (assigned if st in s.get("assigned", ()) else members).append(h["id"])
-                if st in s.get("assigned", ()):
-                    h["status"] = "assigned"
-                hits.append(h)
+        for b, st in s.get("cells") or [(b, st) for b in s.get("bars", range(n_bars)) for st in s["steps"]]:
+            if (b, st) in s.get("hidden", ()) or (b, st) in s.get("unmeasured", ()):
+                continue
+            h = {"id": len(hits), "bar": b, "step": st, "on_grid": True, "onset_s": at(b * 16 + st),
+                 "level_db": s.get("level", -10.0), "status": "grouped", "group": gid}
+            (assigned if st in s.get("assigned", ()) else members).append(h["id"])
+            if st in s.get("assigned", ()):
+                h["status"] = "assigned"
+            hits.append(h)
         bars_with = len({hits[i]["bar"] for i in members + assigned})
         pat = [len({hits[i]["bar"] for i in members + assigned if hits[i]["step"] == st}) / n_bars for st in range(16)]
         audio = s.get("audio")
@@ -725,6 +725,28 @@ def test_names_a_hat_that_plays_one_16th_of_each_beat_is_not_a_16th_hat():
 
 def odd_steps(r, gid=0):
     return {row["step"]: row for row in drumroles.name_roles(r, "hh")["groups"][gid]["measures"]["steps"] if row["step"] % 2 == 1}
+
+
+def test_names_a_hat_that_plays_two_hits_a_bar_over_the_odd_16ths_or_one_over_the_offbeats_is_not_named_from_the_pattern():
+    # 8 bars. Bar b plays two odd 16ths, rotating: each of the 8 odd 16ths is played in 2 of the 8 bars (25 %, in use), but the
+    # group plays 2 hits a bar where a 16th hat plays 4 or more. And one offbeat a bar, rotating: each offbeat in 2 of 8 bars
+    two = fake_result([{"cells": [(b, ODDS[(2 * b + k) % 8]) for b in range(8) for k in (0, 1)], "audio": noise_hit(1, 0.005)}])
+    rows = odd_steps(two)
+    assert all(rows[st]["played_bars"] == 2 and rows[st]["state"] == "in use" for st in ODDS)
+    got, out = names(two, "hh")
+    assert got == ["hh 1"]
+    assert "0.0 hits a bar on the offbeats and 2.0 on the odd 16ths" in out["groups"][0]["reason"]
+    one = fake_result([{"cells": [(b, OFFBEATS[b % 4]) for b in range(8)], "audio": noise_hit(1, 0.005)}])
+    got, out = names(one, "hh")
+    assert got == ["hh 1"] and "1.0 hits a bar on the offbeats and 0.0 on the odd 16ths" in out["groups"][0]["reason"]
+    assert [r["state"] for r in out["groups"][0]["measures"]["steps"] if OFFBEAT(r["step"])] == ["in use"] * 4
+    # exactly at the limit (4 odd 16ths a bar, 2 offbeats a bar, each step in 4 of 8 bars) they are named
+    four = fake_result([{"cells": [(b, ODDS[(4 * b + k) % 8]) for b in range(8) for k in range(4)], "audio": noise_hit(1, 0.005)}])
+    got, out = names(four, "hh")
+    assert got == ["hh 16th"] and "4.0 hits a bar" in out["groups"][0]["rule"]
+    off2 = fake_result([{"cells": [(b, OFFBEATS[(2 * b + k) % 4]) for b in range(8) for k in (0, 1)], "audio": noise_hit(1, 0.025)}])
+    got, out = names(off2, "hh")
+    assert got == ["hh offbeat"] and "2.0 hits a bar" in out["groups"][0]["rule"]
 
 
 def test_names_judge_a_step_over_the_bars_it_could_be_seen_in_closed_hats_under_an_open_hats_tail():

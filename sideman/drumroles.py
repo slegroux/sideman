@@ -141,6 +141,10 @@ OFFBEAT_SHARE = 0.9      # hh offbeat: this share of the group's on-grid hits fa
 OFFBEAT_STEPS = 3        # ...and at least this many of the 4 offbeats are in use
 ODD_STEPS = 6            # hh 16th: at least this many of the 8 odd 16ths (the "e" and "a" of each beat) are in use (4 let a hat
 #                          that plays only the "e" of each beat, Flare hh group 2, take the name)
+ODD_PER_BAR = 4.0        # hh 16th: and the group plays at least this many hits a bar on the odd 16ths, over its own bars (half of the 8: with
+#                          each of 6 odd 16ths in use in a quarter of its bars, 2 hits a bar rotating over them passed; a 16th-note hat plays most)
+OFFBEAT_PER_BAR = 2.0    # hh offbeat: and at least this many hits a bar on the offbeats (half of the 4; one a bar rotating over them is no offbeat
+#                          hat. Flare hh group 0 plays its offbeats in 56-89 % of the bars: 2.2 to 3.6 a bar)
 OBSERVE_MIN = 4          # a 16th observable in fewer bars than this is unknown: it counts neither for nor against the pattern
 OFFBEAT_KNOWN = 3        # the offbeat rule needs at least this many of the 4 offbeats known (3/4, as many as it asks to be in use)
 ODD_KNOWN = 6            # the 16th rule needs at least this many of the 8 odd 16ths known (6/8 = the number it asks in use: with 4 known,
@@ -829,14 +833,18 @@ def _member_readings(g: dict, sr: int, cache: dict) -> list[dict]:
 
 def _pattern_numbers(use: dict) -> dict:
     """The pattern numbers the hh rules read: "share_off" (share of the on-grid hits on the offbeats), and for the offbeats
-    ("off") and the odd 16ths ("odd") (in use, unknown, known, the number of 16ths of that kind)."""
+    ("off") and the odd 16ths ("odd") (in use, unknown, known, the number of 16ths of that kind), and "off_per_bar" and
+    "odd_per_bar": hits a bar on those 16ths, over the group's own bars."""
     rows = use["steps"]
     kind = lambda pick: [r for r in rows if pick(r["step"])]  # noqa: E731
     off, odd = kind(lambda st: st % 4 == 2), kind(lambda st: st % 2 == 1)
     count = lambda rs: (sum(r["state"] == "in use" for r in rs), sum(r["state"] == "unknown" for r in rs),  # noqa: E731
                         sum(r["state"] != "unknown" for r in rs), len(rs))
+    bars = rows[0]["own_bars"] if rows else 0
     return {"share_off": float(sum(use["counts"][r["step"]] for r in off) / use["n"]) if use["n"] else 0.0,
-            "off": count(off), "odd": count(odd)}
+            "off": count(off), "odd": count(odd),
+            "off_per_bar": float(sum(use["counts"][r["step"]] for r in off) / bars) if bars else 0.0,
+            "odd_per_bar": float(sum(use["counts"][r["step"]] for r in odd) / bars) if bars else 0.0}
 
 
 def _enough(in_use: int, known: int, total: int, needed: int, known_min: int) -> bool:
@@ -889,11 +897,13 @@ def _apply_rules(kind: str, use: dict, reads: list) -> tuple[str | None, str | N
     pn = _pattern_numbers(use)
     if kind == "hh":
         (off_used, off_unk, off_known, _), (odd_used, odd_unk, odd_known, _) = pn["off"], pn["odd"]
-        if pn["share_off"] >= OFFBEAT_SHARE and _enough(off_used, off_known, 4, OFFBEAT_STEPS, OFFBEAT_KNOWN):
-            return "hh offbeat", "%.0f %% of its hits on the offbeats, %d of %d known offbeats in use%s" % (
-                100 * pn["share_off"], off_used, off_known, _unknown_text(off_unk, "offbeats"))
-        if _enough(odd_used, odd_known, 8, ODD_STEPS, ODD_KNOWN):
-            return "hh 16th", "%d of %d known odd 16ths in use%s" % (odd_used, odd_known, _unknown_text(odd_unk, "odd 16ths"))
+        if pn["share_off"] >= OFFBEAT_SHARE and _enough(off_used, off_known, 4, OFFBEAT_STEPS, OFFBEAT_KNOWN) \
+                and pn["off_per_bar"] >= OFFBEAT_PER_BAR:
+            return "hh offbeat", "%.0f %% of its hits on the offbeats, %d of %d known offbeats in use%s, %.1f hits a bar on them" % (
+                100 * pn["share_off"], off_used, off_known, _unknown_text(off_unk, "offbeats"), pn["off_per_bar"])
+        if _enough(odd_used, odd_known, 8, ODD_STEPS, ODD_KNOWN) and pn["odd_per_bar"] >= ODD_PER_BAR:
+            return "hh 16th", "%d of %d known odd 16ths in use%s, %.1f hits a bar on them" % (
+                odd_used, odd_known, _unknown_text(odd_unk, "odd 16ths"), pn["odd_per_bar"])
     if kind not in ("hh", "snare", "toms", "kick") or not reads:
         return None, None
     votes = _votes(kind, reads)
@@ -931,6 +941,8 @@ def _no_rule(kind: str, use: dict, m: dict | None, why_no_clean: str | None, rea
                      "bars they could be seen in (a name needs %.0f %% and %d of 4, or %d of 8; at least %d and %d known)" % (
                          100 * pn["share_off"], off_used, off_known, _unknown_text(off_unk, "offbeats"), odd_used, odd_known,
                          _unknown_text(odd_unk, "odd 16ths"), 100 * OFFBEAT_SHARE, OFFBEAT_STEPS, ODD_STEPS, OFFBEAT_KNOWN, ODD_KNOWN))
+        parts.append("%.1f hits a bar on the offbeats and %.1f on the odd 16ths, over its own bars (a name needs %.0f and %.0f)" % (
+            pn["off_per_bar"], pn["odd_per_bar"], OFFBEAT_PER_BAR, ODD_PER_BAR))
     if m is None:
         parts.append("no clean hit to measure: %s" % why_no_clean)
     else:
