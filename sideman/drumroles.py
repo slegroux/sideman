@@ -142,8 +142,9 @@ OFFBEAT_STEPS = 3        # ...and at least this many of the 4 offbeats are in us
 ODD_STEPS = 6            # hh 16th: at least this many of the 8 odd 16ths (the "e" and "a" of each beat) are in use (4 let a hat
 #                          that plays only the "e" of each beat, Flare hh group 2, take the name)
 OBSERVE_MIN = 4          # a 16th observable in fewer bars than this is unknown: it counts neither for nor against the pattern
-OFFBEAT_KNOWN = 2        # the offbeat rule needs at least this many of the 4 offbeats known (half)
-ODD_KNOWN = 4            # the 16th rule needs at least this many of the 8 odd 16ths known (half)
+OFFBEAT_KNOWN = 3        # the offbeat rule needs at least this many of the 4 offbeats known (3/4, as many as it asks to be in use)
+ODD_KNOWN = 6            # the 16th rule needs at least this many of the 8 odd 16ths known (6/8 = the number it asks in use: with 4 known,
+#                          Flare hh group 2, seen at its four "e" steps with the "a" steps unobservable, was named from half the evidence)
 OPEN_FALL_20_MS = 140.0  # hh open: the clean hit takes this long to fall 20 dB (library: closed hats 18-130 ms, open 15-269)
 RIM_FALL_20_MS = 30.0    # rim: it falls 20 dB in under this (library: 3 rims 5-28 ms, the other 28 snares and claps 35-167)
 SNARE_NOISE_DB = -1.0    # snare: the noise share of the body is at most this (a tone under the noise; library: 9 snares, 0 claps)
@@ -842,6 +843,10 @@ def _no_rule(kind: str, use: dict, m: dict | None, why_no_clean: str | None) -> 
     if kind == "hh":
         pn = _pattern_numbers(use)
         (off_used, off_unk, off_known, _), (odd_used, odd_unk, odd_known, _) = pn["off"], pn["odd"]
+        if odd_known < ODD_KNOWN:
+            parts.append("only %d of 8 odd 16ths could be observed (%d needed to name a 16th hat)" % (odd_known, ODD_KNOWN))
+        if off_known < OFFBEAT_KNOWN:
+            parts.append("only %d of 4 offbeats could be observed (%d needed to name an offbeat hat)" % (off_known, OFFBEAT_KNOWN))
         parts.append("%.0f %% of its hits on the offbeats, %d of %d known offbeats%s and %d of %d known odd 16ths%s in use over the "
                      "bars they could be seen in (a name needs %.0f %% and %d of 4, or %d of 8; at least %d and %d known)" % (
                          100 * pn["share_off"], off_used, off_known, _unknown_text(off_unk, "offbeats"), odd_used, odd_known,

@@ -526,9 +526,18 @@ not play there. Without that, a hat that plays every "a" but is hidden in three
 bars of four reads 25 %. A 16th observable in fewer than 4 bars is *unknown*: it
 counts neither for nor against, and a name given with unknown 16ths says how many
 in its `note`. The per-16th bar counts and shares (over all bars and over the
-observable ones) are in each role's `steps`. "n of 6 in use" is read over the
+observable ones) are in each role's `steps`. "n of m in use" is read over the
 known 16ths: the share asked for (6 of 8, 3 of 4) of the known ones, rounded up,
-with at least half of them known.
+and **at least as many known as the rule asks in use**: 6 of the 8 odd 16ths for
+`hh 16th`, 3 of the 4 offbeats for `hh offbeat`. A group seen at only half the
+steps is not named from them: on Flare a hat group seen at its four "e" steps,
+its four "a" steps hidden under a tail, passed 4 of 4 known and was named from half
+the evidence. With fewer known the group stays neutral, "only N of 8 odd 16ths could
+be observed". The offbeat floor was first 2 of 4; a group seen at two offbeats
+with every hit on the offbeats would have been named from two steps, the same
+weakness, so it is 3 (the two floors are the same 3/4). The denominator is the
+group's own bars (every bar it has a hit in), so a group that lives in one section
+is judged over that section, not over the stem.
 
 | Stem | Name | Rule | Where the number comes from |
 |------|------|------|-----------------------------|

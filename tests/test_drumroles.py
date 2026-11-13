@@ -764,11 +764,38 @@ def test_names_a_step_observable_in_too_few_bars_is_unknown_counts_for_nothing_a
     assert names(four, "hh")[0] == ["hh 1"]
     few = fake_result([{"steps": [3, 7, 11, 0, 4, 8, 12], "audio": noise_hit(1, 0.012), "hidden": hide}])
     assert names(few, "hh")[0] == ["hh 1"]
-    # too few known (3 of 8: the other 5 unknown) is not enough to name it, whatever the three show
+    # too few known (3 of 8: the other 5 unknown) is not enough to name it, whatever the three show: a 16th hat needs at least
+    # 6 of the 8 odd 16ths known
     hid5 = [(b, s) for b in range(2, 8) for s in (1, 3, 5, 7, 9)]
     scarce = fake_result([{"steps": ODDS + [0, 4, 8, 12], "audio": noise_hit(1, 0.012), "hidden": hid5}])
     got, out = names(scarce, "hh")
-    assert got == ["hh 1"] and "at least 2 and 4 known" in out["groups"][0]["reason"] and len(out["groups"][0]["measures"]["unknown_steps"]) == 5
+    assert got == ["hh 1"] and "only 3 of 8 odd 16ths could be observed (6 needed to name a 16th hat)" in out["groups"][0]["reason"] and len(out["groups"][0]["measures"]["unknown_steps"]) == 5
+
+
+def test_names_a_16th_hat_needs_six_of_the_eight_odd_16ths_known_not_only_the_ones_it_was_seen_at():
+    # the "a" steps (3, 7, 11, 15) are under a tail in 6 of 8 bars, so unknown; the group is seen at its four "e" steps, in use at
+    # all four: 4 of 4 known in use is not 6 of 8 known, so it stays neutral and says how many could be observed. With 3 unknown
+    # (5 known, all in use) it is also neutral; with 2 unknown (6 known) it is named
+    def group(unknown):
+        hide = [(b, s) for b in range(2, 8) for s in unknown]
+        return fake_result([{"steps": ODDS + [0, 4, 8, 12], "audio": noise_hit(1, 0.012), "hidden": hide}])
+    got, out = names(group([3, 7, 11, 15]), "hh")
+    assert got == ["hh 1"] and "only 4 of 8 odd 16ths could be observed (6 needed to name a 16th hat)" in out["groups"][0]["reason"]
+    assert names(group([3, 7, 11]), "hh")[0] == ["hh 1"]
+    assert names(group([3, 7]), "hh")[0] == ["hh 16th"]
+
+
+def test_names_an_offbeat_hat_needs_three_of_the_four_offbeats_known_a_group_seen_at_two_is_not_named():
+    # every hit on the offbeats (100 %); steps 10 and 14 are under a tail in 6 of 8 bars. Seen at 2 and 6 only (2 of 4 known, both in
+    # use) it plays two offbeats of the bar as far as anyone can tell: neutral. With only step 14 hidden (3 known, all in use) it
+    # is an offbeat hat, named without one offbeat, and says so
+    two = fake_result([{"steps": OFFBEATS, "audio": noise_hit(1, 0.025), "hidden": [(b, s) for b in range(2, 8) for s in (10, 14)]}])
+    got, out = names(two, "hh")
+    assert got == ["hh 1"] and "only 2 of 4 offbeats could be observed (3 needed to name an offbeat hat)" in out["groups"][0]["reason"]
+    three = fake_result([{"steps": OFFBEATS, "audio": noise_hit(1, 0.025), "hidden": [(b, 14) for b in range(2, 8)]}])
+    got, out = names(three, "hh")
+    assert got == ["hh offbeat"] and "3 of 3 known offbeats in use" in out["groups"][0]["rule"]
+    assert "named without 1 of the 4 offbeats: [14]" in out["groups"][0]["note"]
 
 
 def test_names_an_unmeasured_hit_at_a_16th_makes_that_bar_unobservable_there_like_a_hidden_one():
