@@ -1123,3 +1123,80 @@ def test_search_arguments_offers_the_noise_layer_at_its_lower_bound_as_a_probe_o
     narrow = dict(GENEROUS, **{"Osc-B Level": [[0.0, -30.0, "dB"], [1.0, 0.0, "dB"]]})
     pulled = patch.search_arguments(free, narrow)
     assert pulled["probes"][0]["noise_level_ref_db"] == pulled["bounds"]["noise_level_ref_db"][0] > patch.NOISE_OFF_DB
+
+
+PHANTOM_SILENT = -80.0
+PHANTOM_SEEDS = range(5)
+
+
+def phantom_search(true: dict, target, reading_db, seed: int, profile=None):
+    """One search from the free layer a guess gives for a noise reading of `reading_db` dB (None: no layer), through
+    search_arguments (start, bounds, probes), against `target`. The profile is that of the noiseless target with the
+    reading replaced (a free layer needs: click_db 50 dB down, flatness 0.0: no evidence); the stand-in plays each
+    candidate through operator_live. Returns (the level played at the onset, final distance on fresh noise, start's level)."""
+    if profile:
+        prof = profile
+    elif reading_db is None:
+        prof = dict(profile_of(dict(true, noise_db=PHANTOM_SILENT), 1), noise_db={"attack": None, "body": None})
+    else:
+        prof = dict(profile_of(dict(true, noise_db=PHANTOM_SILENT), 1), noise_db={"attack": reading_db, "body": None},
+                    click_db=-50.0, flatness={"attack": 0.0, "body": 0.0})
+    g = patch.operator_guess(prof)
+    args = patch.search_arguments(g)
+    assert g["structure"]["noise_on"] is (reading_db is not None or bool(profile)) and ("probes" in args) is g["structure"]["noise_on"]
+
+    def play(p):
+        return standin_from_live(patch.operator_live(p, g["structure"]))
+    count = [0]
+
+    def render(ps):
+        out = []
+        for p in ps:
+            count[0] += 1
+            out.append(standin(play(p), 10 ** 6 + 17 + 1000 * seed + count[0]))
+        return out
+    res = patch.search(args["start"], args["bounds"], render, target, SR, seed=seed, **({"probes": args["probes"]} if "probes" in args else {}))
+    dist = float(np.mean([oneshot.spectral_distance(standin(play(res.best), 7 * 10 ** 6 + k), target, SR) for k in range(8)]))
+
+    def level(p):
+        return play(p)["noise_db"] if g["structure"]["noise_on"] else None
+    return level(res.best), dist, level(args["start"])
+
+
+@pytest.mark.parametrize("kind", ["kick", "tom"])
+def test_the_search_brings_a_phantom_noise_layer_down_to_where_the_noiseless_start_scores(kind):
+    """The target is the tone and its glide with NO noise, so the true level of the layer is "off". The start is a free
+    layer at a reading of -15 and of -21 dB (played onsets -6.5 / -12.6 dB kick, -4.2 / -10.3 dB tom), 5 seeds here
+    (10 in the report's script) of 8 rounds of 16. Measured over 10 (report, "Review round 2, phantom layers"): the final level is 22 to 43 dB under the
+    start in every seed, the median under -37 dB (the played level cannot go under -48 dB: the lower bound of -60 at
+    the reference time, plus the 12 dB onset clamp); the median final distance is within 0.003 of the search that has
+    no layer at all. Without the probe at the lower bound, the drop was 17 to 46 dB and the median distance 0.007 to
+    0.019 over."""
+    true = TRUE[kind]
+    target = standin(dict(true, noise_db=PHANTOM_SILENT), TARGET_SEED)
+    none = np.array([phantom_search(true, target, None, s)[1] for s in PHANTOM_SEEDS])
+    for reading_db in (-15.0, -21.0):
+        runs = [phantom_search(true, target, reading_db, s) for s in PHANTOM_SEEDS]
+        final, dist, start = np.array([r[0] for r in runs]), np.array([r[1] for r in runs]), runs[0][2]
+        assert np.all(start - final >= 20.0), (kind, reading_db, start - final)
+        assert np.median(final) <= -35.0, (kind, reading_db, np.median(final))
+        assert np.median(dist) - np.median(none) <= 0.005, (kind, reading_db, np.median(dist), np.median(none))
+
+
+def test_the_search_keeps_a_real_band_passed_noise_layer_whose_level_it_may_switch_off():
+    """The target is the tom with noise at -10 dB band-passed 1 to 5 kHz (the candidates' noise is white: the stand-in
+    has no filter). The guess has a free layer (flatness 0.0), and the probe at off is rendered in round 0. The final
+    level stays within 6 dB of the truth in every seed (measured: -9.3 to -13.3, median -12.0): freeing the level does
+    not make the search throw a real layer away."""
+    true = TRUE["tom"]
+    t = np.arange(int(SECONDS * SR)) / SR
+    white = np.random.default_rng(TARGET_SEED).standard_normal(len(t)) * math.sqrt(0.5)
+    noise = band_limited(white, 1000.0, 5000.0, SR) * 10 ** (true["noise_db"] / 20) * np.exp(-t / true["noise_decay"]) * np.minimum(1.0, t / ATTACK_S)
+    target = standin(dict(true, noise_db=PHANTOM_SILENT), TARGET_SEED) + noise
+    prof = oneshot.profile_array(target[:, None], SR, single=True)
+    assert prof["flatness"]["attack"] < patch.FLAT_ATTACK          # why the layer is free
+    g = patch.operator_guess(prof)
+    assert g["structure"]["noise_on"] and "noise_level_ref_db" in g["free"]
+    levels = np.array([phantom_search(true, target, None, seed, profile=prof)[0] for seed in PHANTOM_SEEDS])
+    assert np.all(np.abs(levels - true["noise_db"]) <= 6.0), levels
+    assert abs(np.median(levels) - true["noise_db"]) <= 6.0
