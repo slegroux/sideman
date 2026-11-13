@@ -549,7 +549,7 @@ Two roles that get one name are numbered (`hh offbeat`, `hh offbeat 2`).
 
 **Two groups that may be one sound.** The grouping cuts a continuum where the
 sample puts the cut (the threshold's own limit, above). Two groups of one name
-that play the same 16ths (cosine of their hits per 16th at least 0.8) and are
+that play at the same 16ths (cosine of the two sets of 16ths with at least one hit, at least 0.8; counts per 16th were tried first and gave 0.68 for the real Flare pair, because one of the two plays mostly on the second offbeat) and are
 within 1.15 times the threshold (1.73) of each other, one the other's nearest
 group, are reported as **one role with variants** (each variant has its
 decay, level and stability): on Flare two offbeat hat groups 1.54 apart with

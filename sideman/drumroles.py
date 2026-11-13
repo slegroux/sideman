@@ -146,7 +146,7 @@ RIM_FALL_20_MS = 30.0    # rim: it falls 20 dB in under this (library: 3 rims 5-
 SNARE_NOISE_DB = -1.0    # snare: the noise share of the body is at most this (a tone under the noise; library: 9 snares, 0 claps)
 KICK_MAX_HZ = 70.0       # kick: pitched, body pitch at most this (library: 33 kicks at 28-56 Hz)
 NEAR_SEPARATION = 1.15   # two groups whose separation is at most this times the threshold may be one sound...
-SAME_PATTERN = 0.8       # ...when the cosine of their hits per 16th is at least this
+SAME_PATTERN = 0.8       # ...when the cosine of the sets of 16ths they play at (one hit is enough) is at least this
 
 # Bleed (mark_bleed). Reasons in docs/CONVENTIONS.md, "Drum roles".
 COINCIDE_S = 0.025       # two hits of different stems are one event when their onsets are this close (the reviews' reading)
@@ -818,10 +818,10 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
 
 def _close_alike(a: dict, b: dict, ua: dict, ub: dict, threshold: float) -> bool:
     """Two groups that may be one sound: one is the other's nearest group within NEAR_SEPARATION times the threshold,
-    and they play the same 16ths (cosine of the hits per 16th at least SAME_PATTERN)."""
+    and they play at the same 16ths (cosine of the two sets of 16ths with at least one hit, at least SAME_PATTERN)."""
     near = any(x["nearest_group"] == y["id"] and x["separation"] is not None and x["separation"] <= NEAR_SEPARATION * threshold
                for x, y in ((a, b), (b, a)))
-    return near and _cosine(ua["counts"], ub["counts"]) >= SAME_PATTERN
+    return near and _cosine((ua["counts"] > 0).astype(float), (ub["counts"] > 0).astype(float)) >= SAME_PATTERN
 
 
 def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -> dict:
