@@ -3,6 +3,7 @@
 Needs the `listen` extra:  uv run --extra listen pytest tests/test_sample.py -q
 Skipped (not failed) when numpy or soundfile is missing.
 """
+import functools
 import json
 import math
 import pathlib
@@ -1072,3 +1073,180 @@ def test_hit_cut_reads_a_low_tail_over_20_ms_not_one_frame(tau, gap):
     found = {oneshot.hit_cut(np.stack([x, x], 1), SR, on + d / 1000, 0.2)[1] for d in np.arange(-6.0, 6.01, 0.25)}
     assert len(found) == 1, sorted((f - on) * 1000 for f in found if f is not None)
     assert 0.0 <= (found.pop() - on) * 1000 <= 2.0
+
+
+# ---------------------------------------------------------------- spectral distance
+# Every expectation follows from how the hits are built: the same hit moved in time
+# or gain is one timbre (distance ~0); a longer decay, a higher pitch or more noise
+# is further away, in that order; a kick is further from a hat than any of them.
+
+def delayed(freq, tau, delay, partials=None, seconds=0.6):
+    """hit(freq, tau) starting `delay` seconds into the file (not a whole number of samples)."""
+    t = np.arange(int(seconds * SR)) / SR - delay
+    live = np.maximum(t, 0.0)
+    x = sum(a * np.sin(2 * np.pi * k * freq * live) for k, a in (partials or {1: 1.0}).items())
+    return (x * np.exp(-live / tau) * (t >= 0))[:, None]
+
+
+def tom(tau=0.05, semitones=0.0):
+    return hit(200 * 2 ** (semitones / 12), tau, partials=BASE)
+
+
+def noisy(x, db):
+    """x plus white noise `db` under the tone's power (0.5 * 1.13 for BASE), with the tone's envelope."""
+    t = np.arange(len(x)) / SR
+    w = np.random.default_rng(3).standard_normal(len(x)) * np.exp(-t / 0.05)
+    return x + (w * math.sqrt(0.5 * 1.13 * 10 ** (-db / 10)))[:, None]
+
+
+def kick():
+    return hit(kick_glide, 0.12)
+
+
+def hat():
+    t = np.arange(int(0.6 * SR)) / SR
+    return (np.diff(np.random.default_rng(2).standard_normal(len(t) + 1)) * 0.5 * np.exp(-t / 0.03))[:, None]
+
+
+def dist(a, b, **kw):
+    return oneshot.spectral_distance(a, b, SR, **kw)
+
+
+@functools.lru_cache(maxsize=None)
+def smallest():
+    """The smallest real difference tested below: the least of a decay 25 % longer (tau 50 against 40 ms),
+    one semitone, and noise 60 dB under the tone."""
+    x = tom()
+    return min(dist(tom(0.05), tom(0.04)), dist(tom(), tom(semitones=1)), dist(x, noisy(x, 60)))
+
+
+@pytest.mark.parametrize("name,x", [("tom", tom()), ("kick", kick()), ("hat", hat()),
+                                    ("stereo hat", np.repeat(hat(), 2, axis=1) * [1.0, 0.5])])
+def test_distance_identical_audio_is_zero(name, x):
+    assert dist(x, x) < 1e-9
+    assert dist(x, x.copy(), match_level=False) < 1e-9
+
+
+def test_distance_a_mono_hit_and_the_same_hit_in_both_channels_are_the_same():
+    x = tom()
+    assert dist(x, np.repeat(x, 2, axis=1)) < 1e-9
+    assert dist(x[:, 0], x) < 1e-9          # a plain [n] array is a mono hit
+
+
+@pytest.mark.parametrize("name,x", [("tom", tom()), ("kick", kick()), ("hat", hat())])
+@pytest.mark.parametrize("ms", [5.0, 12.3])
+def test_distance_the_same_hit_read_late_is_not_a_difference(name, x, ms):
+    # whole samples of silence in front: nothing but the position moved
+    late = pad(x, ms)
+    assert dist(x, late) < 1e-9
+    assert dist(late, x) < 1e-9
+
+
+@pytest.mark.parametrize("ms", [5.0, 12.3])
+def test_distance_a_tone_started_between_two_samples_is_far_under_the_smallest_real_difference(ms):
+    # 12.3 ms is 590.4 samples: the second hit starts 0.4 samples off the first's grid.
+    # What is left (about 8 % of the smallest real difference) is the sub-sample position of the onset
+    x = delayed(200, 0.04, 0.0, partials=BASE)
+    d = dist(x, delayed(200, 0.04, ms / 1000, partials=BASE))
+    assert d < 0.1 * smallest(), (d, smallest())
+
+
+def test_distance_the_same_hit_at_another_gain_is_zero_unless_the_gain_is_kept():
+    x = tom()
+    for db in (-30.0, -6.0, 6.0):
+        assert dist(x, x * 10 ** (db / 20)) < 1e-9, db
+    # kept, the raw level difference counts, and counts more the larger it is
+    kept = [dist(x, x * 10 ** (db / 20), match_level=False) for db in (0.0, -3.0, -6.0, -12.0)]
+    assert kept[0] < 1e-9 and kept[1] > 0.3 * smallest() and kept == sorted(kept), kept
+
+
+def test_distance_grows_with_the_decay_time():
+    d = [dist(tom(0.04), tom(tau)) for tau in (0.04, 0.05, 0.07, 0.10)]
+    assert d[0] < 1e-9 and d[0] < d[1] < d[2] < d[3], d
+
+
+def test_distance_grows_with_the_pitch():
+    d = [dist(tom(), tom(semitones=s)) for s in (0, 1, 3, 7)]
+    assert d[0] < 1e-9 and d[0] < d[1] < d[2] < d[3], d
+
+
+def test_distance_grows_with_the_noise_level():
+    x = tom()
+    d = [dist(x, noisy(x, db)) for db in (60, 40, 30, 20)]    # from 60 dB under the tone to 20 dB under
+    assert 0 < d[0] < d[1] < d[2] < d[3], d
+
+
+def test_distance_is_symmetric():
+    for a, b in ((tom(0.05), tom(0.04)), (tom(), tom(semitones=3)), (kick(), hat()),
+                 (tom(), noisy(tom(), 30)), (tom(0.1), tom(0.1)[:int(0.15 * SR)])):
+        assert dist(a, b) == pytest.approx(dist(b, a), rel=1e-12, abs=1e-12)
+
+
+def test_distance_a_kick_against_a_hat_is_further_than_any_single_property():
+    x = tom(0.04)
+    single = [dist(x, tom(0.10)), dist(tom(), tom(semitones=7)), dist(tom(), noisy(tom(), 20))]
+    far = dist(kick(), hat())
+    assert far > max(single), (far, single)
+
+
+def test_distance_a_longer_tail_on_one_side_costs_and_costs_more_the_more_is_missing():
+    # the same decay; one file is cut after 300 ms or 150 ms, the other runs 600 ms (e^-6 = -52 dB at the end)
+    full = hit(200, 0.1)
+    cut300, cut150 = dist(full, full[:int(0.3 * SR)]), dist(full, full[:int(0.15 * SR)])
+    assert cut300 > 0.3 * smallest() and cut150 > cut300, (cut300, cut150)
+    # over a shared length (max_s) nothing differs
+    assert dist(full, full[:int(0.15 * SR)], max_s=0.15) < 1e-9
+    # and the shared 150 ms of a different decay still costs, as the decay test shows
+    assert dist(hit(200, 0.1), hit(200, 0.05), max_s=0.15) > 0
+
+
+def test_distance_terms_add_up_to_the_distance():
+    t = oneshot.distance_terms(tom(0.04), tom(0.07), SR)
+    assert t["distance"] == pytest.approx(t["convergence"] + t["log_magnitude"], rel=1e-12)
+    assert [r["fft"] for r in t["resolutions"]] == [1024, 2048, 512]
+    for key in ("convergence", "log_magnitude"):
+        assert t[key] == pytest.approx(sum(r[key] for r in t["resolutions"]) / 3, rel=1e-12)
+    assert t["length_ms"] == pytest.approx(602.0, abs=0.1)    # the 600 ms hit and the 2 ms of lead before its onset
+
+
+def test_distance_does_not_move_when_the_hit_has_a_dc_offset():
+    x = tom()
+    assert dist(x, x + 0.05) < 0.02 * smallest()
+
+
+def test_distance_refuses_what_it_cannot_measure():
+    with pytest.raises(ValueError, match="silent"):
+        dist(np.zeros((SR // 2, 1)), tom())
+    with pytest.raises(ValueError, match="NaN"):
+        dist(tom() * np.nan, tom())
+    with pytest.raises(ValueError, match="too short"):
+        dist(tom()[:800], tom()[:800])
+
+
+def test_distance_reads_the_hit_chosen_from_a_take_and_files_at_two_rates(tmp_path):
+    import mcp_server.server as S
+    take = np.concatenate([tom(0.04)[:int(0.5 * SR)], tom(0.10)[:int(0.5 * SR)]])
+    p, q, r = tmp_path / "take.wav", tmp_path / "second.wav", tmp_path / "second44.wav"
+    sf.write(str(p), take, SR, subtype="FLOAT")
+    sf.write(str(q), pad(tom(0.10)[:int(0.5 * SR)], 20), SR, subtype="FLOAT")
+    sf.write(str(r), fft_resample(tom(0.10)[:int(0.5 * SR)], 48000, 44100), 44100, subtype="FLOAT")
+    # hit 1 of the take is the 100 ms hit; hit 0 is the 40 ms one
+    same = json.loads(S.sample_compare(str(p), str(q), hit_a=1, hit_b=0))
+    other = json.loads(S.sample_compare(str(p), str(q), hit_a=0, hit_b=0))
+    assert same["distance"] < 1e-3 < 0.5 * smallest() < other["distance"], (same["distance"], other["distance"])
+    assert other["distance"] == pytest.approx(dist(tom(0.04)[:int(0.5 * SR)], tom(0.10)[:int(0.5 * SR)]), abs=1e-3)
+    assert same["distance"] == pytest.approx(same["distance_terms"]["convergence"] + same["distance_terms"]["log_magnitude"], abs=2e-4)
+    assert set(same) == {"a", "b", "diff", "readings", "distance", "distance_terms"}
+    # the same 100 ms hit at 44.1 kHz: compared at 44.1 kHz, far under a decay difference
+    cross = json.loads(S.sample_compare(str(q), str(r)))
+    assert cross["distance"] < 0.2 * smallest(), cross["distance"]
+    assert cross["readings"] == []
+
+
+def test_distance_through_the_tool_says_why_when_it_has_none(tmp_path):
+    import mcp_server.server as S
+    p = tmp_path / "blip.wav"
+    sf.write(str(p), hit(1000, 0.002, seconds=0.015), SR, subtype="FLOAT")
+    out = json.loads(S.sample_compare(str(p), str(p)))
+    assert out["distance"] is None and "too short" in out["distance_note"]
+    assert "readings" in out and "distance_terms" not in out
