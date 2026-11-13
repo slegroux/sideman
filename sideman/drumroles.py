@@ -141,7 +141,7 @@ OFFBEAT_SHARE = 0.9      # hh offbeat: this share of the group's on-grid hits fa
 OFFBEAT_STEPS = 3        # ...and at least this many of the 4 offbeats are in use
 ODD_STEPS = 6            # hh 16th: at least this many of the 8 odd 16ths (the "e" and "a" of each beat) are in use (4 let a hat
 #                          that plays only the "e" of each beat, Flare hh group 2, take the name)
-ODD_PER_BAR = 4.0        # hh 16th: and the group plays at least this many hits a bar on the odd 16ths, over its own bars (half of the 8: with
+ODD_PER_BAR = 4.0        # hh 16th: and the group plays at least this many hits a bar on the odd 16ths, over the bars they can be seen in (half of the 8: with
 #                          each of 6 odd 16ths in use in a quarter of its bars, 2 hits a bar rotating over them passed; a 16th-note hat plays most)
 OFFBEAT_PER_BAR = 2.0    # hh offbeat: and at least this many hits a bar on the offbeats (half of the 4; one a bar rotating over them is no offbeat
 #                          hat. Flare hh group 0 plays its offbeats in 56-89 % of the bars: 2.2 to 3.6 a bar)
@@ -840,7 +840,9 @@ def _member_readings(g: dict, sr: int, cache: dict) -> list[dict]:
 def _pattern_numbers(use: dict) -> dict:
     """The pattern numbers the hh rules read: "share_off" (share of the on-grid hits on the offbeats), and for the offbeats
     ("off") and the odd 16ths ("odd") (in use, unknown, known, the number of 16ths of that kind), and "off_per_bar" and
-    "odd_per_bar": hits a bar on those 16ths, over the group's own bars."""
+    "odd_per_bar": hits a bar on those 16ths over all the group's own bars, and "off_density" and "odd_density": the density
+    the rules read, the sum over the known 16ths of that kind of each one's share of the bars it could be seen in (an unknown
+    16th adds nothing; the known-16ths floors cover those)."""
     rows = use["steps"]
     kind = lambda pick: [r for r in rows if pick(r["step"])]  # noqa: E731
     off, odd = kind(lambda st: st % 4 == 2), kind(lambda st: st % 2 == 1)
@@ -850,7 +852,9 @@ def _pattern_numbers(use: dict) -> dict:
     return {"share_off": float(sum(use["counts"][r["step"]] for r in off) / use["n"]) if use["n"] else 0.0,
             "off": count(off), "odd": count(odd),
             "off_per_bar": float(sum(use["counts"][r["step"]] for r in off) / bars) if bars else 0.0,
-            "odd_per_bar": float(sum(use["counts"][r["step"]] for r in odd) / bars) if bars else 0.0}
+            "odd_per_bar": float(sum(use["counts"][r["step"]] for r in odd) / bars) if bars else 0.0,
+            "off_density": float(sum(r["played_bars"] / r["observable_bars"] for r in off if r["state"] != "unknown")),
+            "odd_density": float(sum(r["played_bars"] / r["observable_bars"] for r in odd if r["state"] != "unknown"))}
 
 
 def _enough(in_use: int, known: int, total: int, needed: int, known_min: int) -> bool:
@@ -906,12 +910,13 @@ def _apply_rules(kind: str, use: dict, reads: list) -> tuple[str | None, str | N
     if kind == "hh":
         (off_used, off_unk, off_known, _), (odd_used, odd_unk, odd_known, _) = pn["off"], pn["odd"]
         if pn["share_off"] >= OFFBEAT_SHARE and _enough(off_used, off_known, 4, OFFBEAT_STEPS, OFFBEAT_KNOWN) \
-                and pn["off_per_bar"] >= OFFBEAT_PER_BAR:
-            return "hh offbeat", "%.0f %% of its hits on the offbeats, %d of %d known offbeats in use%s, %.1f hits a bar on them" % (
-                100 * pn["share_off"], off_used, off_known, _unknown_text(off_unk, "offbeats"), pn["off_per_bar"])
-        if _enough(odd_used, odd_known, 8, ODD_STEPS, ODD_KNOWN) and pn["odd_per_bar"] >= ODD_PER_BAR:
-            return "hh 16th", "%d of %d known odd 16ths in use%s, %.1f hits a bar on them" % (
-                odd_used, odd_known, _unknown_text(odd_unk, "odd 16ths"), pn["odd_per_bar"])
+                and pn["off_density"] >= OFFBEAT_PER_BAR:
+            return "hh offbeat", ("%.0f %% of its hits on the offbeats, %d of %d known offbeats in use%s, %.1f hits a bar on them over the "
+                                  "bars they could be seen in (%.1f over all its bars)" % (
+                100 * pn["share_off"], off_used, off_known, _unknown_text(off_unk, "offbeats"), pn["off_density"], pn["off_per_bar"]))
+        if _enough(odd_used, odd_known, 8, ODD_STEPS, ODD_KNOWN) and pn["odd_density"] >= ODD_PER_BAR:
+            return "hh 16th", "%d of %d known odd 16ths in use%s, %.1f hits a bar on them over the bars they could be seen in (%.1f over all its bars)" % (
+                odd_used, odd_known, _unknown_text(odd_unk, "odd 16ths"), pn["odd_density"], pn["odd_per_bar"])
     if kind not in ("hh", "snare", "toms", "kick") or not reads:
         return None, None
     votes = _votes(kind, reads)
@@ -950,8 +955,9 @@ def _no_rule(kind: str, use: dict, m: dict | None, why_no_clean: str | None, rea
                      "empty; at least %d and %d known)" % (
                          100 * pn["share_off"], off_used, off_known, _unknown_text(off_unk, "offbeats"), odd_used, odd_known,
                          _unknown_text(odd_unk, "odd 16ths"), 100 * OFFBEAT_SHARE, 4 - OFFBEAT_STEPS, 8 - ODD_STEPS, OFFBEAT_KNOWN, ODD_KNOWN))
-        parts.append("%.1f hits a bar on the offbeats and %.1f on the odd 16ths, over its own bars (a name needs %.0f and %.0f)" % (
-            pn["off_per_bar"], pn["odd_per_bar"], OFFBEAT_PER_BAR, ODD_PER_BAR))
+        parts.append("%.1f hits a bar on the offbeats and %.1f on the odd 16ths over the bars they could be seen in (%.1f and %.1f over all "
+                     "its own bars; a name needs %.0f and %.0f)" % (
+                         pn["off_density"], pn["odd_density"], pn["off_per_bar"], pn["odd_per_bar"], OFFBEAT_PER_BAR, ODD_PER_BAR))
     if m is None:
         parts.append("no clean hit to measure: %s" % why_no_clean)
     else:
@@ -1017,7 +1023,7 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
 
     Returns {"stem", "groups": [{"id", "name", "named", "rule", "reason" (why neutral), "bleed", "role" (index into
     "roles", None for bleed), "measures", "note"}], "roles": [{"name", "named", "rule", "groups", "count", "assigned",
-    "level_db", "pattern", "steps", "note", "variants" (None, or one entry per group), "possibly_also"}], "notes"}.
+    "level_db", "pattern", "steps", "density" ({"off_per_bar", "off_density", "odd_per_bar", "odd_density"}: hits a bar on the offbeats and the odd 16ths over all the group's bars, and the density over the bars each 16th could be seen in, which the hh rules read), "note", "variants" (None, or one entry per group), "possibly_also"}], "notes"}.
     "measures" holds, per 16th, `steps` (see `_use`): the bars the group plays there, the bars it could be seen in, and the
     shares of its own bars and of the observable ones, with "in use", "not in use" or "unknown" (observable in under
     OBSERVE_MIN bars: it counts neither for nor against); the hh pattern rules judge in-use over the known 16ths only
@@ -1041,6 +1047,7 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
              "measures": {"hits": g["count"] + g["assigned"], "measured": g["count"], "assigned": g["assigned"],
                           "offbeat_share": round(_pattern_numbers(u)["share_off"], 3), "steps": u["steps"],
                           "unknown_steps": [r["step"] for r in u["steps"] if r["state"] == "unknown"],
+                          "density": {k: round(_pattern_numbers(u)[k], 3) for k in ("off_per_bar", "off_density", "odd_per_bar", "odd_density")},
                           "members_read": len(reads), "stability_status": g.get("stability_status"), **(m or {"clean_hit": why_clean})}}
         info[gid] = e
         if e["bleed"]:
@@ -1101,7 +1108,7 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
         roles.append({"name": e["name"], "named": e["named"], "rule": e["rule"], "groups": sorted(ids),
                       "count": sum(g["count"] for g in gs), "assigned": sum(g["assigned"] for g in gs),
                       "level_db": big["level_db"], "pattern": [float(min(1.0, v)) for v in total],
-                      "steps": info[big["id"]]["measures"]["steps"], "note": e["note"] if e["named"] else None,
+                      "steps": info[big["id"]]["measures"]["steps"], "density": info[big["id"]]["measures"]["density"], "note": e["note"] if e["named"] else None,
                       "variants": None if len(ids) == 1 else [
                           {"group": g["id"], "count": g["count"], "level_db": g["level_db"],
                            "stability": g["stability"], "separation": g["separation"],

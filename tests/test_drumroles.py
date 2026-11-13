@@ -735,7 +735,7 @@ def test_names_a_hat_that_plays_two_hits_a_bar_over_the_odd_16ths_or_one_over_th
     rows = odd_steps(two)
     assert all(rows[st]["played_bars"] == 2 and rows[st]["state"] == "in use" for st in ODDS)
     got, out = names(two, "hh")
-    assert got == ["hh 1"]
+    assert got == ["hh 1"] and out["groups"][0]["measures"]["density"]["odd_density"] == 2.0     # every step observable: 2 either way
     assert "0.0 hits a bar on the offbeats and 2.0 on the odd 16ths" in out["groups"][0]["reason"]
     one = fake_result([{"cells": [(b, OFFBEATS[b % 4]) for b in range(8)], "audio": noise_hit(1, 0.005)}])
     got, out = names(one, "hh")
@@ -744,10 +744,35 @@ def test_names_a_hat_that_plays_two_hits_a_bar_over_the_odd_16ths_or_one_over_th
     # exactly at the limit (4 odd 16ths a bar, 2 offbeats a bar, each step in 4 of 8 bars) they are named
     four = fake_result([{"cells": [(b, ODDS[(4 * b + k) % 8]) for b in range(8) for k in range(4)], "audio": noise_hit(1, 0.005)}])
     got, out = names(four, "hh")
-    assert got == ["hh 16th"] and "4.0 hits a bar" in out["groups"][0]["rule"]
+    assert got == ["hh 16th"] and "4.0 hits a bar" in out["groups"][0]["rule"] and out["roles"][0]["density"]["odd_density"] == 4.0
+    # 3.5 a bar (4 hits in the even bars, 3 in the odd ones, every 16th observable in all 8 bars) is under the limit
+    under = fake_result([{"cells": [(b, ODDS[(4 * b + k) % 8]) for b in range(8) for k in range(4 if b % 2 == 0 else 3)],
+                          "audio": noise_hit(1, 0.005)}])
+    got, out = names(under, "hh")
+    assert got == ["hh 1"] and out["groups"][0]["measures"]["density"]["odd_density"] == 3.5
     off2 = fake_result([{"cells": [(b, OFFBEATS[(2 * b + k) % 4]) for b in range(8) for k in (0, 1)], "audio": noise_hit(1, 0.025)}])
     got, out = names(off2, "hh")
     assert got == ["hh offbeat"] and "2.0 hits a bar" in out["groups"][0]["rule"]
+
+
+def test_the_density_is_read_over_the_bars_a_16th_could_be_seen_in_not_over_all_the_groups_bars():
+    # 40 bars of closed hats on every odd 16th. An open hat's tail hides 6 of the 8 odd 16ths (1, 3, 5, 7, 9, 13) in 36 of the 40
+    # bars, where no hat could be seen; they are seen in 4 bars (every one played). Hits a bar over all 40 bars: 2 (steps 11 and 15)
+    # + 6 x 4/40 = 2.6, under 4. Over the bars each could be seen in: 8 steps at 100 % = 8.0
+    hide = [(b, st) for b in range(4, 40) for st in (1, 3, 5, 7, 9, 13)]
+    r = fake_result([{"steps": ODDS, "audio": noise_hit(1, 0.005), "hidden": hide}], n_bars=40)
+    got, out = names(r, "hh")
+    d = out["groups"][0]["measures"]["density"]
+    assert d["odd_per_bar"] == pytest.approx(2.6) and d["odd_density"] == pytest.approx(8.0) and d["off_density"] == 0.0
+    assert got == ["hh 16th"] and out["roles"][0]["density"] == d and "8.0 hits a bar on them over the bars they could be seen in (2.6 over all its bars)" in out["groups"][0]["rule"]
+    # a step observable in under 4 bars is unknown and adds nothing: hide 3 and 7 in 38 bars (seen in 2): 6 known at 100 % = 6.0
+    few = [(b, st) for b in range(2, 40) for st in (3, 7)]
+    out = drumroles.name_roles(fake_result([{"steps": ODDS, "audio": noise_hit(1, 0.005), "hidden": few}], n_bars=40), "hh")
+    assert out["groups"][0]["measures"]["density"]["odd_density"] == pytest.approx(6.0) and out["groups"][0]["named"]
+    # the same hits with nothing hidden over a group that plays at 2.6 a bar everywhere is not named
+    flat = fake_result([{"cells": [(b, ODDS[(k + 3 * b) % 8]) for b in range(40) for k in range(2)] + [(b, 11) for b in range(40)],
+                         "audio": noise_hit(1, 0.005)}], n_bars=40)
+    assert names(flat, "hh")[0] == ["hh 1"]
 
 
 def test_names_judge_a_step_over_the_bars_it_could_be_seen_in_closed_hats_under_an_open_hats_tail():
