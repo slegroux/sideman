@@ -387,6 +387,16 @@ restore both afterwards.
 - The drum layer needs one isolated hit. A hat or tom roll has no clean hit, and
   the report says so instead of reading one.
 - A capture shorter than the section is refused; compare whole bars.
+- A hit that cannot fall 40 dB before the next one is never compared: a long
+  kick at 124 BPM, or closed hats on 16ths, reads "no clean hit".
+- The drum layer compares both hits over the shorter of the two cuts. When one
+  side's hit is the last in its slice, a longer tail on the other is not read.
+- With grace notes or a swell a few ms before a hit, the onset found can be any
+  of the rises, and the two sides can start up to about 16 ms apart.
+- Claps and other layered hits can split differently on the two sides. The
+  note "measured at the reference's place" then appears, without readings,
+  even on identical audio.
+- A section line closer than 40 ms to the start of a file gets no early start.
 - The numbers describe the difference. Which gaps are real is the user's ear's
   call: on one replica two stem reads were wrong, and the ear won.
 

@@ -585,10 +585,10 @@ def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray
 def hit_cut(x: np.ndarray, sr: int, at: float, length: float | None = None) -> tuple[np.ndarray, float | None]:
     """(cut, onset s) for the hit near `at` (seconds) in x [n, channels]. The onset is found here from the
     audio alone, not from where an earlier slice began: the first rise out of the tail within 100 ms after
-    `at`, the tail's level read as its loudest 1 ms over HIT_TAIL_S from `at` - 30 ms, so the onset is never
-    earlier than `at` - 10 ms. The search is then made again from the onset it found, until it finds the same
-    one (at most four times), so where `at` fell does not decide which of two rises a few ms apart is the
-    onset. The cut runs from HIT_LEAD_S before the onset to `length` seconds after it (the end of x if None).
+    `at`, the tail's level read as its loudest 1 ms over HIT_TAIL_S from `at` - 30 ms, so one search never
+    goes earlier than `at` - 10 ms. The search is then made again from the onset it found, until it finds the same
+    one (at most four times, so up to about 40 ms earlier in all). That makes the onset of one rise out of a tail
+    independent of where `at` fell; with grace notes or a swell a few ms apart it can still be any of the rises. The cut runs from HIT_LEAD_S before the onset to `length` seconds after it (the end of x if None).
     Two cuts of the same audio with the same `length` are the same samples whatever the offset they were read
     at. When nothing rises there the onset is None and the cut starts HIT_LEAD_S before `at`. Profile a cut
     with profile_array(cut, hit=0, single=True): the whole cut is the one hit."""

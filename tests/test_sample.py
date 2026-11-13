@@ -1024,6 +1024,7 @@ def test_hit_cut_is_the_same_whatever_the_offset_it_was_read_at():
     n = min(len(a), len(b))
     assert abs(len(a) - len(b)) <= 2 and np.allclose(a[:n], b[:n], atol=1e-9)
     assert abs(len(a) / SR - (0.55 + 0.002)) < 0.002          # the lead before the onset, then the length asked for
+    assert abs((at_b - at_a) - 0.0123) < 1.5 / SR             # and the onset moved by exactly the 12.3 ms
     ra = oneshot.profile_array(a, SR, hit=0, single=True)
     rb = oneshot.profile_array(b, SR, hit=0, single=True)
     assert oneshot.compare(ra, rb)["readings"] == []
