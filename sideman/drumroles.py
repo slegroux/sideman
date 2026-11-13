@@ -158,6 +158,7 @@ SNARE_NOISE_MIN_DB = -12.0  # ...this (a body that is nearly all tone is a tom o
 #                             hats (3 closed, 4 open, -3.3 to -1.7: nothing here reads a hat's noise as noise), and the 14 claps stay neutral
 KICK_MAX_HZ = 70.0       # kick: pitched, body pitch at most this (library: 33 kicks at 28-56 Hz)
 AGREE_MEMBERS = 8        # the rules that read a clean hit's measurements read this many members nearest the medoid instead...
+AGREE_MIN = 3            # ...from at least this many complete members read (fewer: neutral, "too few complete members")
 AGREE_SHARE = 2 / 3      # ...and name only when at least this share of them read the same (Flare snare group 2: 6 snare, 5 rim, 3 neither)
 NEAR_SEPARATION = 1.15   # two groups whose separation is at most this times the threshold may be one sound...
 SAME_PATTERN = 0.8       # ...when the cosine of the sets of 16ths they play at (one hit is enough) is at least this
@@ -924,11 +925,11 @@ def _vote_text(votes: dict, n: int) -> str:
                      for k, (lab, v) in enumerate(ranked))
 
 
-def _apply_rules(kind: str, use: dict, reads: list) -> tuple[str | None, str | None]:
+def _apply_rules(kind: str, use: dict, reads: list, need: int = 1) -> tuple[str | None, str | None]:
     """(name, the rule that gave it) from the first rule of stem `kind` that fits, else (None, None). The pattern rules read
     the group's pattern. The measurement rules (`hh open`, `rim`, `snare`, `tom`, `kick`) read `reads`, the readings of up to
-    AGREE_MEMBERS members (see `_member_readings`), and name only when at least AGREE_SHARE of them read the same; with none
-    they do not fire. "tom" is ranked low / mid / high by name_roles."""
+    AGREE_MEMBERS members (see `_member_readings`), and name only when at least AGREE_SHARE of them read the same and at least
+    `need` were read (name_roles passes AGREE_MIN for a result that has `read_members`); with none they do not fire. "tom" is ranked low / mid / high by name_roles."""
     pn = _pattern_numbers(use)
     if kind == "hh":
         (off_used, off_unk, off_known, _), (odd_used, odd_unk, odd_known, _) = pn["off"], pn["odd"]
@@ -940,7 +941,7 @@ def _apply_rules(kind: str, use: dict, reads: list) -> tuple[str | None, str | N
         if _enough(odd_used, odd_known, 8, ODD_STEPS, ODD_KNOWN) and pn["odd_density"] >= ODD_PER_BAR:
             return "hh 16th", "%d of %d known odd 16ths in use%s, %.1f hits a bar on them over the bars they could be seen in (%.1f over all its bars)" % (
                 odd_used, odd_known, _unknown_text(odd_unk, "odd 16ths"), pn["odd_density"], pn["odd_per_bar"])
-    if kind not in ("hh", "snare", "toms", "kick") or not reads:
+    if kind not in ("hh", "snare", "toms", "kick") or not reads or len(reads) < need:
         return None, None
     votes = _votes(kind, reads)
     agreed = [lab for lab, v in votes.items() if lab is not None and v >= AGREE_SHARE * len(reads) - 1e-9]
@@ -961,7 +962,7 @@ def _apply_rules(kind: str, use: dict, reads: list) -> tuple[str | None, str | N
     return name, pre + "pitched, body at %.0f Hz (at most %.0f)" % (med("pitch_hz"), KICK_MAX_HZ)
 
 
-def _no_rule(kind: str, use: dict, m: dict | None, why_no_clean: str | None, reads: list) -> str:
+def _no_rule(kind: str, use: dict, m: dict | None, why_no_clean: str | None, reads: list, need: int = 1) -> str:
     """Why no rule of stem `kind` fits, with the numbers the rules read."""
     if kind not in ("hh", "snare", "toms", "kick"):
         return "the stem kind %r has no rules" % (kind,)
@@ -986,7 +987,9 @@ def _no_rule(kind: str, use: dict, m: dict | None, why_no_clean: str | None, rea
     else:
         parts.append("clean hit: falls 20 dB in %s ms, %s, noise share of the body %s dB" % (
             m["fall_20_ms"], "pitched at %.0f Hz" % m["pitch_hz"] if m["pitched"] else "unpitched", m["noise_body_db"]))
-    if reads:
+    if reads and len(reads) < need:
+        parts.append("too few complete members: %d read, nearest the medoid (a name needs at least %d)" % (len(reads), need))
+    elif reads:
         parts.append("the %d member%s read, nearest the medoid, do not agree (a name needs %.0f %% to read the same): %s" % (
             len(reads), "" if len(reads) == 1 else "s", 100 * AGREE_SHARE, _vote_text(_votes(kind, reads), len(reads))))
     return "no rule of the %s stem fits: %s" % (kind, "; ".join(parts))
@@ -1065,6 +1068,7 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
         u = uses[gid]
         m, why_clean = _clean_measures(g, sr, cache)
         reads = _member_readings(g, sr, cache) if kind else []
+        need = AGREE_MIN if "read_members" in g else 1        # a result without the members has only the clean hit to read
         e = {"id": gid, "name": "%s %d" % (label, gid + 1), "named": False, "rule": None, "reason": None,
              "bleed": bool(bleed.get(gid, {}).get("bleed")), "role": None, "note": None,
              "measures": {"hits": g["count"] + g["assigned"], "measured": g["count"], "assigned": g["assigned"],
@@ -1080,9 +1084,9 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
         if why:
             e["reason"] = "not named: " + "; ".join(why)
             continue
-        name, rule = _apply_rules(kind, u, reads) if kind else (None, None)
+        name, rule = _apply_rules(kind, u, reads, need) if kind else (None, None)
         if name is None:
-            e["reason"] = _no_rule(stem_kind, u, m, why_clean, reads)
+            e["reason"] = _no_rule(stem_kind, u, m, why_clean, reads, need)
         else:
             e["name"], e["named"], e["rule"] = name, True, rule
             if g.get("stability_status") == "stable by construction":

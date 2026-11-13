@@ -169,6 +169,22 @@ def test_one_repeated_tom_is_one_group():
     assert r["groups"][0]["clean_hit"] is not None       # a tom falls 40 dB (tau 150 ms) inside its 484 ms to the next
 
 
+def test_the_measurement_rules_need_at_least_three_complete_members_read():
+    # a group with 1 or 2 complete members is not named from them, however well they agree; with 3 it is. (A result with no
+    # `read_members` at all has only the clean hit to read, and the other tests name from that.)
+    for n, want in ((1, "snare 1"), (2, "snare 1"), (3, "snare")):
+        r = fake_result([{"steps": [4, 12], "audio": snare_hit(1), "read": [snare_hit(i) for i in range(n)]}])
+        got, out = names(r, "snare")
+        assert got == [want], (n, got)
+        if n < 3:
+            assert "too few complete members: %d read" % n in out["groups"][0]["reason"] and "at least 3" in out["groups"][0]["reason"]
+    # the other kinds: 2 pitched members in a toms stem, 2 open hats in an hh stem that no pattern rule fits
+    assert names(fake_result([{"steps": [4], "audio": tom_hit(f=150.0), "read": [tom_hit(f=150.0)] * 2}]), "toms")[0] == ["toms 1"]
+    assert names(fake_result([{"steps": [4], "audio": tom_hit(f=150.0), "read": [tom_hit(f=150.0)] * 3}]), "toms")[0] == ["tom"]
+    assert names(fake_result([{"steps": [0, 8], "audio": noise_hit(1, 0.1), "read": [noise_hit(1, 0.1)] * 2}]), "hh")[0] == ["hh 1"]
+    assert names(fake_result([{"steps": [0, 8], "audio": noise_hit(1, 0.1), "read": [noise_hit(1, 0.1)] * 3}]), "hh")[0] == ["hh open"]
+
+
 def test_each_group_keeps_up_to_eight_complete_members_nearest_the_medoid_for_the_role_rules(hats):
     # 16 offbeat hats and 48 closed ones, every one complete (each falls 40 dB well before the next 16th): 8 of each are kept,
     # members of the group, nearest its medoid first, the clean hit one of them

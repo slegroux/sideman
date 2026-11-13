@@ -561,7 +561,9 @@ is judged over that section, not over the stem.
 **The measurement rules read members, not one hit.** `hh open`, `rim`,
 `snare`, `tom` and `kick` read the readings of up to 8 complete members of the
 group nearest its medoid (`read_members`, the clean hit usually among them) and
-name only when **at least two thirds of the members read agree**; otherwise the
+name only when **at least two thirds of the members read agree, from at least 3
+complete members** (with fewer the group stays neutral: "too few complete
+members"); otherwise the
 group stays neutral and the reason has the counts ("3 of 8 rim, 3 snare, 2
 neither"). The pattern rules do not read them. One hit is a poor witness: on
 Flare the snare group 2's clean hit fell 20 dB in 30.0 ms, exactly the rim
