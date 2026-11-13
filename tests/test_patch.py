@@ -164,6 +164,7 @@ def test_search_reaches_the_score_of_the_truth(kind, fresh):
         if kind != "hat":
             falls = [t for t in oneshot.compare(prof, tprof)["readings"] if t.startswith(("falls 10 dB", "falls 20 dB"))]
             assert not falls, "%s: %s" % (kind, falls)
+    # the 0.6 bar and the spread it rests on are to be re-baselined when real takes are measured
     assert min(closed) >= 0.6 and np.median(closed) >= 0.7, "%s: share of the gap closed per seed %s" % (kind, np.round(closed, 2))
     if fresh and kind == "hat":
         assert all(within), "%s: within truth + 2 spreads: %s" % (kind, within)
@@ -294,3 +295,138 @@ def test_search_refuses_a_start_outside_its_bounds_and_a_wrong_batch():
         patch.search(start, bounds_for(true), Renderer(), standin(true, TARGET_SEED), SR)
     with pytest.raises(ValueError, match="hits for"):
         patch.search(start_for(true), bounds_for(true), lambda ps: [], standin(true, TARGET_SEED), SR)
+
+
+# ---- from construction: step adaptation, the margin, a raising renderer, bad shapes, `step` overrides ----
+
+def one_parameter_bounds():
+    return {"decay": (0.005, 0.5, "log")}
+
+
+def spreads_of(batches: list) -> list:
+    """The spread (std of ln decay) of the candidates of each batch: what the search's step was in that round
+    (mirrored samples, so the batch's std is the step, up to reflection at a bound)."""
+    return [float(np.std([math.log(p["decay"]) for p in b[1:]])) for b in batches]
+
+
+class Capture(Renderer):
+    def __call__(self, patches):
+        self.seen = getattr(self, "seen", []) + [patches]
+        return super().__call__(patches)
+
+
+def one_parameter_search(decay_start: float, **kw):
+    true = dict(TRUE["tom"])
+    start = dict(true, decay=decay_start)
+    render = Capture()
+    bounds = {"decay": (0.002, 2.0, "log")}
+    start["pitch_hz"] = true["pitch_hz"]
+    res = patch.search(start, bounds, render, standin(true, TARGET_SEED), SR, patience=99, **kw)
+    return res, spreads_of(render.seen)
+
+
+def test_search_grows_its_step_far_from_the_truth_and_shrinks_it_at_the_truth():
+    far, far_spreads = one_parameter_search(0.4)                 # 8 times the true decay, in a wide bound
+    assert max(far_spreads) > 3 * far_spreads[0], far_spreads    # the step grew on the way (measured: 13 times)
+    assert abs(math.log(far.best["decay"] / TRUE["tom"]["decay"])) < abs(math.log(0.4 / TRUE["tom"]["decay"]))
+    at, at_spreads = one_parameter_search(TRUE["tom"]["decay"])
+    assert at_spreads[-1] < 0.5 * at_spreads[0], at_spreads      # and shrank where there was nothing to find
+
+
+def scripted(monkeypatch, script):
+    """A renderer whose hits are constant arrays that carry the score the script gives for (round, index); the
+    distance is the array's value. Returns the renderer, which counts its batches."""
+    monkeypatch.setattr(patch, "spectral_distance", lambda x, t, sr, **kw: float(x[0]))
+    calls = []
+
+    def render(patches):
+        r = len(calls)
+        calls.append(patches)
+        return [script(r, i) for i in range(len(patches))]
+    render.calls = calls
+    return render
+
+
+def hit_scoring(d):
+    return np.full(2000, d)
+
+
+def test_search_keeps_the_incumbent_against_a_gain_within_one_spread(monkeypatch):
+    """The incumbent scores 0.50, 0.51, 0.49 (mean 0.50, spread 0.01); a candidate shows a single 0.495 in
+    round 2. It is not 0.01 better, so the incumbent keeps its place. (With MARGIN = 0 it would take over.)"""
+    incumbent = {0: 0.50, 1: 0.51, 2: 0.49}
+    render = scripted(monkeypatch, lambda r, i: hit_scoring(incumbent[r] if i == 0 else 0.495 if (r, i) == (2, 4) else 0.9))
+    start = {"decay": 0.05}
+    res = patch.search(start, one_parameter_bounds(), render, np.ones(2000), SR, rounds=3)
+    assert res.best == start and res.distance == pytest.approx(0.50)
+    assert res.repeat_spread == pytest.approx(0.01)
+    assert res.rounds == 3 and not res.failures
+
+
+def test_search_failed_incumbent_render_is_left_out_of_its_mean(monkeypatch):
+    incumbent = {0: hit_scoring(0.5), 1: np.zeros(2000), 2: hit_scoring(0.6)}
+    render = scripted(monkeypatch, lambda r, i: incumbent[r] if i == 0 else hit_scoring(0.9))
+    start = {"decay": 0.05}
+    res = patch.search(start, one_parameter_bounds(), render, np.ones(2000), SR, rounds=3)
+    assert res.best == start and res.distance == pytest.approx(0.55)          # (0.5 + 0.6) / 2, no inf, no zero
+    assert {"round": 1, "index": 0, "reason": "silent"} in res.failures
+
+
+def test_search_returns_the_rounds_so_far_when_the_renderer_raises():
+    true = TRUE["kick"]
+    calls = []
+
+    class Boom(Renderer):
+        def __call__(self, patches):
+            calls.append(1)
+            if len(calls) == 4:                    # round 3
+                raise RuntimeError("Live went away")
+            return super().__call__(patches)
+
+    res = patch.search(start_for(true), bounds_for(true), Boom(), standin(true, TARGET_SEED), SR, rounds=6)
+    assert len(calls) == 4                         # not called again
+    ref = patch.search(start_for(true), bounds_for(true), Renderer(), standin(true, TARGET_SEED), SR, rounds=3)
+    assert res.rounds == 3 and res.best == ref.best and res.distance == ref.distance
+    assert res.error == "RuntimeError: Live went away" and res.renders == 48
+    assert res.failures[-1] == {"round": 3, "index": None, "reason": "render raised RuntimeError: Live went away"}
+    assert ref.error is None
+
+
+def test_search_raises_when_the_renderer_raises_before_anything_scored():
+    true = TRUE["kick"]
+
+    def boom(patches):
+        raise RuntimeError("no Live")
+    with pytest.raises(RuntimeError, match="no Live"):
+        patch.search(start_for(true), bounds_for(true), boom, standin(true, TARGET_SEED), SR)
+
+
+def test_search_names_wrong_shapes_apart_from_empty_renders():
+    true = TRUE["kick"]
+    good = lambda p: standin(p, 1)                                          # noqa: E731
+    shapes = {2: np.float64(1.0), 3: np.zeros((2, 3, 4)), 4: np.zeros(0), 5: np.zeros((0, 2))}
+
+    def bad(b, i, p):
+        return shapes.get(i)
+
+    res = patch.search(start_for(true), bounds_for(true), Renderer(bad=bad), standin(true, TARGET_SEED), SR, rounds=2)
+    reasons = {f["index"]: f["reason"] for f in res.failures if f["round"] == 0}
+    assert reasons[2].startswith("wrong shape (0 dimensions") and reasons[3].startswith("wrong shape (3 dimensions")
+    assert reasons[4] == "empty" and reasons[5] == "empty"
+    assert math.isfinite(res.distance) and good
+
+
+@pytest.mark.parametrize("step", [{"decay": 0.0}, {"decay": -1.0}, {"decay": float("nan")}, {"decay": float("inf")},
+                                  {"decay": "big"}, {"nope": 0.1}, {"noise_decay": 0.1}])
+def test_search_refuses_a_bad_step_override(step):
+    true = TRUE["kick"]
+    bounds = bounds_for(true)
+    bounds.pop("noise_decay")                                              # pinned: not a searched name
+    with pytest.raises(ValueError, match="step"):
+        patch.search(start_for(true), bounds, Renderer(), standin(true, TARGET_SEED), SR, step=step)
+
+
+def test_search_takes_a_step_override():
+    _, default = one_parameter_search(0.1)
+    _, wide = one_parameter_search(0.1, step={"decay": 0.5})               # same draws, a step 0.5 / 0.15 times larger
+    assert wide[0] / default[0] == pytest.approx(0.5 / patch.STEP_LOG, rel=0.1)
