@@ -60,6 +60,9 @@ Choices that are not obvious from the code:
   attack most; the click right at the onset is click_db's job.
   A glide smears its fundamental, so a sweeping attack reads noisier than
   the same tone held still.
+- distance_terms / spectral_distance are the one number an optimiser can
+  minimise: the multi-resolution STFT loss (Yamamoto et al. 2019) in numpy, with the default settings of its PyTorch reference (see
+  distance_terms for what is equalised first and where it differs).
 """
 from __future__ import annotations
 
@@ -475,6 +478,16 @@ def _dc(x: np.ndarray, sr: int) -> np.ndarray:
     return np.where(real, dc, 0.0)
 
 
+def _undc(x: np.ndarray, sr: int) -> np.ndarray:
+    """x without its DC offset when it has one (see _dc): a DC offset would read as level that never decays."""
+    dc = _dc(x, sr)
+    if len(x) and np.abs(dc).max() > DC_REL * np.abs(x).max():
+        nz = np.nonzero(np.abs(x).max(axis=1) > 0)[0]        # digital zeros around the take keep their 0
+        x = x.copy()
+        x[nz[0]:nz[-1] + 1] -= dc
+    return x
+
+
 def _onset(x: np.ndarray, mag: np.ndarray, sr: int, after_hit: bool, tail_s: float = 0.0) -> int:
     """Index of a hit's onset in x: the first 1 ms frame whose mean power is
     within ONSET_DB of the hit's loudest 1 ms, and in that frame the first
@@ -627,11 +640,7 @@ def profile_array(x: np.ndarray, sr: int, hit: int | str | None = None, within: 
     x = np.asarray(x, dtype=np.float64)
     if not np.isfinite(x).all():
         raise ValueError("the file holds NaN or infinite samples")
-    dc = _dc(x, sr)            # a DC offset would read as level that never decays
-    if len(x) and np.abs(dc).max() > DC_REL * np.abs(x).max():
-        nz = np.nonzero(np.abs(x).max(axis=1) > 0)[0]        # digital zeros around the take keep their 0
-        x = x.copy()
-        x[nz[0]:nz[-1] + 1] -= dc
+    x = _undc(x, sr)
     mag = np.abs(x).max(axis=1)
     if not len(mag) or mag.max() <= 0:
         raise ValueError("the file is silent")
@@ -1171,3 +1180,157 @@ def compare(a: dict, b: dict) -> dict:
                     % (BAND_NAMES.get(k, k), abs(d), "high" if d > 0 else "low"))
     diff["peak_db"] = sub("peak_db", 2)[0]
     return {"a": a, "b": b, "diff": diff, "readings": [t for _, t in sorted(found, key=lambda f: -f[0])]}
+
+
+# ---------------------------------------------------------------- spectral distance
+
+MRSTFT = ((1024, 120, 600), (2048, 240, 1200), (512, 50, 240))   # (FFT size, hop, window) in samples: the reference's defaults
+STFT_EPS = 1e-8          # the reference clamps the power |STFT|^2 here (a magnitude floor of 1e-4) before every log
+DIST_MAX_S = 2.0         # the distance reads at most this long from the onset
+DIST_RMS = 0.1           # level-matched hits are scaled to this loudest-1-ms RMS (-20 dBFS, programme level)
+
+
+def _stft_mag(x: np.ndarray, fft: int, hop: int, win: int) -> np.ndarray:
+    """|STFT| of x [batch, n] as torch.stft(x, fft, hop, win, hann_window(win)) gives it: centred (reflect padding
+    of fft // 2 each side), periodic Hann window centred in the FFT, power clamped at STFT_EPS before the root."""
+    n = x.shape[-1]
+    padded = np.pad(x, ((0, 0), (fft // 2, fft // 2)), mode="reflect")
+    window = np.zeros(fft)
+    left = (fft - win) // 2
+    window[left:left + win] = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(win) / win)
+    frames = sliding_window_view(padded, fft, axis=-1)[:, ::hop][:, :1 + n // hop]
+    spec = np.fft.rfft(frames * window, axis=-1)
+    return np.sqrt(np.maximum(spec.real ** 2 + spec.imag ** 2, STFT_EPS))
+
+
+def _mrstft(x: np.ndarray, y: np.ndarray) -> list[tuple[float, float, float]]:
+    """Per resolution of MRSTFT, the reference's two terms for x [batch, n] against y: (spectral convergence
+    ||X - Y||_F / ||Y||_F, the same over ||X||_F (the reference's is not symmetric: it divides by the target), mean
+    |log X - log Y|). Both are over every frame and bin together, as its torch.norm and L1Loss are."""
+    out = []
+    for fft, hop, win in MRSTFT:
+        mx, my = _stft_mag(x, fft, hop, win), _stft_mag(y, fft, hop, win)
+        gap = float(np.linalg.norm(mx - my))
+        out.append((gap / float(np.linalg.norm(my)), gap / float(np.linalg.norm(mx)),
+                    float(np.mean(np.abs(np.log(mx) - np.log(my))))))
+    return out
+
+
+def _loudest_ms(x: np.ndarray, sr: int) -> float:
+    """RMS of x's loudest 1 ms frame (the frame _onset measures against)."""
+    frame = max(1, int(round(0.001 * sr)))
+    c = np.concatenate([[0.0], np.cumsum((x ** 2).mean(axis=1))])
+    fwd = (c[frame:] - c[:-frame]) / frame if len(x) > frame else c[-1:] / max(1, len(x))
+    return math.sqrt(float(fwd.max()))
+
+
+def distance_terms(a: np.ndarray, b: np.ndarray, sr: int, match_level: bool = True,
+                   max_s: float = DIST_MAX_S) -> dict:
+    """The multi-resolution STFT distance between two hits a and b ([n] or [n, channels], one sample rate), and
+    its parts. It is the MultiResolutionSTFTLoss of the PyTorch reference implementation with its default
+    settings (MRSTFT, in samples; a hit is read from its start, so a take with several hits must be cut to one
+    first: see hit_audio): per resolution
+    the spectral convergence plus the mean absolute log-magnitude difference, averaged over the resolutions.
+    One difference: the reference divides the convergence by the norm of the target only, so d(a, b) != d(b, a); here
+    it is the mean of the two divisions, so the distance is symmetric.
+
+    The hits are put on equal terms first, so that only timbre is left:
+      - DC offsets are removed (as sample_analyze does);
+      - onset-aligned: each starts HIT_LEAD_S before its onset (the first 1 ms within 40 dB of its loudest,
+        see _onset; silence is added if the file has less lead), so one hit read late differs by a sample or two;
+      - level-matched (`match_level`, default on): each is scaled so its loudest 1 ms has RMS DIST_RMS, not
+        its sample peak (a lone click would set that) and not its whole RMS (a longer tail would then lower
+        the level of the body and read as a level difference). match_level=False keeps the raw level
+        difference, which the distance then counts;
+      - the same length: the longer of the two, at most `max_s` seconds, the shorter padded with digital
+        silence. A longer tail on one side therefore costs: the log-magnitude of a tail against silence
+        (the reference's floor, magnitude 1e-4) is large, in proportion to how much of the window it fills.
+        A file that was merely cut short counts as a hit that ended there; cut both to the same length first
+        when the cut is not what is compared.
+    Hits of different channel counts are both averaged to mono; with equal counts the channels are batch
+    entries, as in the reference. Raises ValueError for a silent hit, non-finite samples, or under 1025 samples
+    after the cut (reflect padding needs more samples than half the largest FFT).
+
+    Returns {"distance", "convergence", "log_magnitude" (the two parts, averaged over resolutions, adding to
+    the distance), "resolutions" ([{"fft", "convergence", "log_magnitude"}]), "length_ms"}."""
+    xs = []
+    for x in (a, b):
+        x = np.asarray(x, dtype=np.float64)
+        x = x[:, None] if x.ndim == 1 else x
+        _check_channels(x)
+        if not np.isfinite(x).all():
+            raise ValueError("the hit holds NaN or infinite samples")
+        if not len(x) or np.abs(x).max() <= 0:
+            raise ValueError("the hit is silent")
+        xs.append(x)
+    if xs[0].shape[1] != xs[1].shape[1]:
+        xs = [x.mean(axis=1, keepdims=True) for x in xs]
+    cut = []
+    for x in xs:
+        x = _undc(x, sr)
+        lead = int(round(HIT_LEAD_S * sr))
+        start = _onset(x, np.abs(x).max(axis=1), sr, False) - lead
+        x = np.concatenate([np.zeros((max(0, -start), x.shape[1])), x[max(0, start):]])   # the onset at index `lead`
+        if match_level:
+            x = x * (DIST_RMS / _loudest_ms(x, sr))
+        cut.append(x)
+    n = min(max(len(x) for x in cut), int(round(max_s * sr)))
+    if n <= max(f // 2 for f, _, _ in MRSTFT):
+        raise ValueError("the hits are too short for the distance (%d samples after the onset; it needs more than %d)"
+                         % (n, max(f // 2 for f, _, _ in MRSTFT)))
+    xa, xb = (np.concatenate([x[:n], np.zeros((max(0, n - len(x)), x.shape[1]))]).T for x in cut)
+    rows = _mrstft(xa, xb)
+    parts = [{"fft": f, "convergence": 0.5 * (sc_ab + sc_ba), "log_magnitude": lg}
+             for (f, _, _), (sc_ab, sc_ba, lg) in zip(MRSTFT, rows)]
+    conv = sum(p["convergence"] for p in parts) / len(parts)
+    log = sum(p["log_magnitude"] for p in parts) / len(parts)
+    return {"distance": conv + log, "convergence": conv, "log_magnitude": log, "resolutions": parts,
+            "length_ms": _ms(n, sr)}
+
+
+def spectral_distance(a: np.ndarray, b: np.ndarray, sr: int, match_level: bool = True,
+                      max_s: float = DIST_MAX_S) -> float:
+    """distance_terms(...)["distance"]: 0 for the same hit, larger as the timbre moves away."""
+    return distance_terms(a, b, sr, match_level, max_s)["distance"]
+
+
+def hit_audio(x: np.ndarray, sr: int, hit: int) -> np.ndarray:
+    """The samples of hit number `hit` (from 0, as profile_array numbers them) in x [n, channels]: from its onset
+    to the start of the next hit, or the end of x."""
+    _check_channels(x)
+    x = np.asarray(x, dtype=np.float64)
+    if not np.isfinite(x).all():
+        raise ValueError("the file holds NaN or infinite samples")
+    x = _undc(x, sr)
+    mag = np.abs(x).max(axis=1)
+    if not len(mag) or mag.max() <= 0:
+        raise ValueError("the file is silent")
+    segs = _segments(x, sr)
+    if not 0 <= hit < len(segs):
+        raise ValueError("hit %r is out of range: the take has %d hit%s" % (hit, len(segs), "" if len(segs) == 1 else "s"))
+    s, e = segs[hit]
+    return x[_onset(x[s:e], mag[s:e], sr, s > 0) + s:e]
+
+
+def _resample(x: np.ndarray, sr0: int, sr1: int) -> np.ndarray:
+    """x [n, channels] band-limited to sr1 <= sr0 by cutting its spectrum (zero-padded first so the length scales exactly)."""
+    g = math.gcd(sr0, sr1)
+    step = sr0 // g
+    n = len(x)
+    padded = np.concatenate([x, np.zeros((-n % step, x.shape[1]))])
+    n1 = len(padded) // step * (sr1 // g)
+    spec = np.fft.rfft(padded, axis=0)[:n1 // 2 + 1]
+    return np.fft.irfft(spec, n1, axis=0)[:int(round(n * sr1 / sr0))] * n1 / len(padded)
+
+
+def profile_distance(a: dict, b: dict, match_level: bool = True, max_s: float = DIST_MAX_S) -> dict:
+    """distance_terms of the two hits that profiles `a` and `b` (from profile(): they name their file and hit)
+    describe. Hits at different sample rates are compared at the lower one, the other cut to it
+    (band-limited), so the highs the lower rate cannot hold are not counted against the other."""
+    xs = []
+    for p in (a, b):
+        x, sr = load(p["file"])
+        xs.append((hit_audio(x, sr, p["hit"]), sr))
+    sr = min(sr for _, sr in xs)
+    xa, xb = (x if r == sr else _resample(x, r, sr) for x, r in xs)
+    return distance_terms(xa, xb, sr, match_level, max_s)
