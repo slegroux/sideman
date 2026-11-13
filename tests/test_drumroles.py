@@ -980,6 +980,28 @@ def test_names_toms_by_pitch_low_mid_high_when_several_and_kick_by_a_low_body():
     assert got == ["kick", "kick 2"] and "81 Hz" in out["groups"][1]["reason"]                # 81 Hz is over the 70 Hz the rule allows
 
 
+@pytest.mark.slow
+def test_a_stem_with_no_more_hits_than_the_sample_is_stable_by_construction_and_named_not_asking_for_stability_is_not():
+    # 8 bars of a 45 Hz kick on every beat: 32 hits, the size of the sample, so the first round's sample takes every hit and no
+    # regrouping can differ. With the regroupings asked for (the default 2) that is "stable by construction" and the group is
+    # named, with a note; with stability_runs=0 it was not asked for, and the group stays neutral and says so
+    x = stem([(at(16 * b + s), tom_hit(f=45.0, tau=0.07)) for b in range(8) for s in (0, 4, 8, 12)], 8)
+    r = run(x, stability_runs=2)
+    g, = r["groups"]
+    assert g["count"] == drumroles.SAMPLE_HITS == 32 and g["stability"] is None and g["stability_status"] == "stable by construction"
+    assert any("stable by construction" in n for n in r["notes"])
+    got, out = names(r, "kick")
+    assert got == ["kick"] and out["groups"][0]["named"] and "stable by construction" in out["groups"][0]["note"]
+    assert out["roles"][0]["note"] == out["groups"][0]["note"] and out["groups"][0]["measures"]["stability_status"] == "stable by construction"
+    quiet = run(x, stability_runs=0)
+    assert quiet["groups"][0]["stability"] is None and quiet["groups"][0]["stability_status"] == "not asked for"
+    got, out = names(quiet, "kick")
+    assert got == ["kick 1"] and "stability is not measured: it was not asked for" in out["groups"][0]["reason"]
+    # one hit more than the sample and the sample can move: the stability is measured
+    more = run(stem([(at(16 * b + s), tom_hit(f=45.0, tau=0.07)) for b in range(9) for s in (0, 4, 8, 12)], 9), stability_runs=2)
+    assert more["groups"][0]["stability_status"] == "measured" and more["groups"][0]["stability"] == 1.0
+
+
 def test_names_stay_neutral_for_a_stem_of_unknown_kind_and_a_group_without_a_clean_hit():
     r = fake_result([{"steps": OFFBEATS, "audio": noise_hit(1, 0.025)}, {"steps": [4], "audio": tom_hit()}])
     got, out = names(r, "perc")

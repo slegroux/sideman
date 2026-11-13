@@ -503,9 +503,13 @@ name (`hh 2`: the stem and the group's number) with the reason. A name says
 hit before trusting one.
 
 A group is **named only when it is eligible**: at least 4 measured hits,
-`stability` measured (it is not on a stem with no more measured hits than the
-sample of 32, nor for a tentative group) and at least 0.75, and `separation`
-over the grouping threshold (1.5). `separation` is measured against the nearest group
+`stability` at least 0.75 (or **stable by construction**), and `separation`
+over the grouping threshold (1.5). `stability` is None in three cases, and
+`stability_status` says which: "stable by construction" (a stem with no more
+measured hits than the sample of 32: the first round's sample took every hit, the
+grouping is exact average linkage and no regrouping can differ; the group passes
+the test, with a note on the role), "not asked for" (`stability_runs=0`: the group
+stays neutral) and "not measured" (a tentative group). `separation` is measured against the nearest group
 of at least 4 measured hits (`hit_groups` also keeps `separation_any` and
 `nearest_any`, against any group): a one-to-three hit satellite beside a big group
 says nothing about whether two sounds are apart (on Flare a 3-hit group at 1.21

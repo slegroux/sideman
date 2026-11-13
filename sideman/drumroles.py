@@ -492,8 +492,8 @@ def _scope(x: np.ndarray, sr: int, hits: list, found: list, hidden: set, ids: se
         dists = [g["distance"][i] for i in mine]
         groups.append({
             "id": gid, "count": len(mine), "assigned": len(extra), "tentative": len(mine) < TENTATIVE_N,
-            "stability": g["stability"], "separation": g["separation"], "nearest_group": g["nearest_group"],
-            "separation_any": g["separation_any"], "nearest_any": g["nearest_any"], "bars_with": len({hits[i]["bar"] for i in mine + extra}),
+            "stability": g["stability"], "stability_status": g["stability_status"], "separation": g["separation"],
+            "nearest_group": g["nearest_group"], "separation_any": g["separation_any"], "nearest_any": g["nearest_any"], "bars_with": len({hits[i]["bar"] for i in mine + extra}),
             "pattern": [len({h["bar"] for h in on if h["step"] == s}) / bars if bars else 0.0 for s in range(steps)],
             "assigned_pattern": [len({h["bar"] for h in on_assigned if h["step"] == s}) / bars if bars else 0.0
                                  for s in range(steps)],
@@ -580,7 +580,7 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     "faint", "overlapped", "silent" or "ungrouped"), "reason" (why not grouped), "group", "distance" (to its group's
     medoid, over the window that was compared)}.
     A group is {"id", "count" (measured members), "assigned" (overlapped hits placed in it), "tentative" (under 4 measured
-    members), "stability", "separation", "nearest_group", "separation_any", "nearest_any" (see below), "bars_with" (bars it plays in), "pattern" (per 16th, the share of the scope's
+    members), "stability", "stability_status", "separation", "nearest_group", "separation_any", "nearest_any" (see below), "bars_with" (bars it plays in), "pattern" (per 16th, the share of the scope's
     bars it plays at, on-grid hits, assigned ones included), "assigned_pattern" (the same for the assigned hits alone),
     "level_db" (median), "spread" ({"median", "max"} of the members' distances to the medoid), "off_grid", "members"
     (hit ids), "assigned_members", "clean_hit" ({"hit", "start", "end", "onset_s", "level_db", "audio"} or None; never
@@ -594,8 +594,10 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     figure is the mean over the runs. 1.0: the same members every time; a group that a run splits or merges with another
     reads lower. Material whose distances lie around the threshold (a continuum of decays, a velocity gradient) is cut
     where the sample puts the cut, and reads well under 1; the figure is for the stem as a whole, section groups carry it
-    unchanged. It is None, with a note, when the sample cannot move (no more measured hits than `sample`: every regrouping
-    is then identical, and none is run), for a tentative group, and with `stability_runs=0`.
+    unchanged. It is None, and `stability_status` says why, when the sample cannot move ("stable by construction": no more
+    measured hits than `sample`, so the first round's sample took every hit, the grouping is exact average linkage and no
+    regrouping can differ; none is run, and a note says so), with `stability_runs=0` ("not asked for"), and for a tentative
+    group ("not measured"); "measured" otherwise.
     `separation` is how far the group lies from its neighbour: the nearest other group that is not tentative (at least 4
     measured hits) is the one whose medoid is nearest this group's medoid (ties to the lower id), its id is `nearest_group`,
     and `separation` is the mean spectral distance from 16 of this group's measured members to 12 of that group's, each set
@@ -724,7 +726,8 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     runs = [cluster((r + 1) / (stability_runs + 1))[0] for r in range(stability_runs)] if cuts and movable else []
     if stability_runs and cuts and not movable:
         out["notes"].append("stability is not measured: %d measured hits are no more than the sample (%d), so the sample "
-                            "cannot move" % (len(cuts), sample))
+                            "cannot move: every group is stable by construction (the grouping is exact average linkage and "
+                            "no regrouping can differ)" % (len(cuts), sample))
     groups.sort(key=lambda g: (-len(g["members"]), g["members"][0]))
     found = list(enumerate(groups))
     for gid, g in found:
@@ -735,6 +738,8 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
             both = len(set(best["members"]) & set(g["members"]))
             shares.append(both / (len(g["members"]) + len(best["members"]) - both))
         g["stability"] = round(float(np.mean(shares)), 3) if shares and len(g["members"]) >= TENTATIVE_N else None
+        g["stability_status"] = ("measured" if g["stability"] is not None else "not asked for" if not stability_runs
+                                 else "stable by construction" if not movable else "not measured")
         for i, d in g["distance"].items():
             hits[i]["group"], hits[i]["distance"] = gid, d
     for i in rest:
@@ -956,15 +961,17 @@ def _no_rule(kind: str, use: dict, m: dict | None, why_no_clean: str | None, rea
 
 def _eligibility(g: dict, threshold: float) -> list[str]:
     """Why the group may not be named (an empty list when it may): fewer than NAME_MIN_HITS measured hits, stability not
-    measured or under NAME_STABILITY, separation not over the grouping threshold. `separation` is measured against the
+    measured (except "stable by construction": the sample took every hit, so no regrouping can differ) or under NAME_STABILITY, separation not over the grouping threshold. `separation` is measured against the
     nearest group of at least TENTATIVE_N measured hits; a group with none (separation None: a lone group, or only
     tentative others) has no rival to be taken for and passes that test."""
     why = []
     if g["count"] < NAME_MIN_HITS:
         why.append("only %d measured hit%s (a name needs %d)" % (g["count"], "" if g["count"] == 1 else "s", NAME_MIN_HITS))
+    status = g.get("stability_status")
     if g["stability"] is None:
-        if g["count"] >= NAME_MIN_HITS:
-            why.append("stability is not measured (the stem has no more measured hits than the sample, or it was not asked for)")
+        if g["count"] >= NAME_MIN_HITS and status != "stable by construction":
+            why.append("stability is not measured: " + (
+                "it was not asked for (stability_runs=0)" if status == "not asked for" else "the result does not say why"))
     elif g["stability"] < NAME_STABILITY:
         why.append("stability %.2f is under %.2f" % (g["stability"], NAME_STABILITY))
     if g["separation"] is not None and g["separation"] <= threshold:
@@ -1030,7 +1037,7 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
              "measures": {"hits": g["count"] + g["assigned"], "measured": g["count"], "assigned": g["assigned"],
                           "offbeat_share": round(_pattern_numbers(u)["share_off"], 3), "steps": u["steps"],
                           "unknown_steps": [r["step"] for r in u["steps"] if r["state"] == "unknown"],
-                          "members_read": len(reads), **(m or {"clean_hit": why_clean})}}
+                          "members_read": len(reads), "stability_status": g.get("stability_status"), **(m or {"clean_hit": why_clean})}}
         info[gid] = e
         if e["bleed"]:
             e["reason"] = "marked as bleed: %s" % bleed[gid]["why"]
@@ -1044,12 +1051,15 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
             e["reason"] = _no_rule(stem_kind, u, m, why_clean, reads)
         else:
             e["name"], e["named"], e["rule"] = name, True, rule
+            if g.get("stability_status") == "stable by construction":
+                e["note"] = ("stability not measured: no more measured hits than the sample, so every hit was in the first "
+                             "sample, the grouping is exact average linkage and no regrouping can differ (stable by construction)")
             if name == "tom":                      # ranked by the median of the pitched members, not by the clean hit alone
                 e["measures"]["role_pitch_hz"] = float(np.median([r["pitch_hz"] for r in reads if r["pitched"]]))
             pn = _pattern_numbers(u)
             unk = {"hh offbeat": ("off", "offbeats"), "hh 16th": ("odd", "odd 16ths")}.get(name)
             if unk and pn[unk[0]][1]:
-                e["note"] = "named without %d of the %d %s: %s, each observable in under %d bars (hidden under a tail or held an " \
+                e["note"] = (e["note"] + "; " if e["note"] else "") + "named without %d of the %d %s: %s, each observable in under %d bars (hidden under a tail or held an " \
                             "unmeasured hit), so they counted neither for nor against" % (
                                 pn[unk[0]][1], pn[unk[0]][3], unk[1], [r["step"] for r in u["steps"] if r["state"] == "unknown"
                                                                        and (r["step"] % 4 == 2 if unk[0] == "off" else r["step"] % 2 == 1)], OBSERVE_MIN)
