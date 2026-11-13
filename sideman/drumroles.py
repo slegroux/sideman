@@ -87,6 +87,12 @@ Choices that are not obvious from the code:
 - Sections do not regroup: a section's groups are the stem's groups restricted to the hits whose bar lies in the section
   (the same ids in every section; the count, pattern, level, spread and clean hit are the section's own, `stability`
   is the stem's).
+- Role names are rules over a group's stem, pattern and clean-hit measurements, never recognition (`name_roles`; the
+  rules and where each number comes from are in docs/CONVENTIONS.md, "Drum roles"). A group is named only when it
+  passes the eligibility rule (NAME_MIN_HITS measured hits, a measured stability of at least NAME_STABILITY, a
+  separation over the grouping threshold); a group no rule fits keeps `<stem> N`, with the reason. Bleed (`mark_bleed`)
+  needs three things at once: hits that coincide with a group of another stem far more often than the two patterns
+  would give by chance, the other group louder at those moments, and a clean hit that sounds like its clean hit.
 """
 from __future__ import annotations
 
@@ -126,6 +132,31 @@ TENTATIVE_N = 4          # a group under this many hits is tentative
 CLEAN_START_DB = -40.0   # a tentative group takes assigned hits only when its medoid rose out of a lead this far under it
 SEP_MEMBERS = 16         # `separation`: members of a group read...
 SEP_OTHERS = 12          # ...against this many of the nearest other group's
+
+# Role names (name_roles). The reasons for each number are in docs/CONVENTIONS.md, "Drum roles".
+NAME_MIN_HITS = TENTATIVE_N   # a group is named from at least this many measured hits (the reviewer's rule, round 2)
+NAME_STABILITY = 0.75    # ...a measured stability of at least this (Flare hh: 0.79-0.91 named, 0.13-0.69 not)
+STEP_MIN = 0.25          # a 16th is "in use" when the group plays there in this share of its own bars (chosen: one bar in four)
+OFFBEAT_SHARE = 0.9      # hh offbeat: this share of the group's on-grid hits fall on the offbeats (steps 2, 6, 10, 14)...
+OFFBEAT_STEPS = 3        # ...and at least this many of the 4 offbeats are in use
+ODD_STEPS = 6            # hh 16th: at least this many of the 8 odd 16ths (the "e" and "a" of each beat) are in use (4 let a hat
+#                          that plays only the "e" of each beat, Flare hh group 2, take the name)
+OPEN_FALL_20_MS = 140.0  # hh open: the clean hit takes this long to fall 20 dB (library: closed hats 18-130 ms, open 15-269)
+RIM_FALL_20_MS = 30.0    # rim: it falls 20 dB in under this (library: 3 rims 5-28 ms, the other 28 snares and claps 35-167)
+SNARE_NOISE_DB = -1.0    # snare: the noise share of the body is at most this (a tone under the noise; library: 9 snares, 0 claps)
+KICK_MAX_HZ = 70.0       # kick: pitched, body pitch at most this (library: 33 kicks at 28-56 Hz)
+NEAR_SEPARATION = 1.15   # two groups whose separation is at most this times the threshold may be one sound...
+SAME_PATTERN = 0.8       # ...when the cosine of their hits per 16th is at least this
+
+# Bleed (mark_bleed). Reasons in docs/CONVENTIONS.md, "Drum roles".
+COINCIDE_S = 0.025       # two hits of different stems are one event when their onsets are this close (the reviews' reading)
+BLEED_RATE = 0.7         # a group is bleed only when at least this share of its hits coincide with the other group's...
+BLEED_MARGIN = 0.25      # ...by this much more than the two patterns give by chance...
+BLEED_P = 0.01           # ...and the chance of that many coincidences from the patterns alone is at most this
+CHANCE_FLOOR = 0.02      # a 16th the other group never plays in the track still gets this chance of a coincidence
+BLEED_LOUDER_DB = 6.0    # the other group is louder by at least this at the coincident hits...
+BLEED_LOUDER_SHARE = 0.75  # ...in at least this share of them
+BLEED_DISTANCE = 2.0     # the two clean hits sound alike: spectral distance at most this
 
 
 def _fade(x: np.ndarray, sr: int) -> np.ndarray:
@@ -677,4 +708,361 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
         out["notes"].append("a hit played inside another hit's tail, without rising 15 dB out of it, is not found "
                             "(grid_onsets=True looks for it at the 16th lines): `through` lists the 16th lines each "
                             "tail still sounds through, `hidden_pattern` where they fall")
+    return out
+
+
+# ---------------------------------------------------------------- role names
+
+def _use(result: dict, g: dict) -> dict:
+    """How a group plays on the grid, from its measured and assigned hits that sit on it: "counts" (hits per 16th),
+    "share" (per 16th, the share of the group's own bars `bars_with` that have a hit there) and "n" (their number)."""
+    steps = max(len(g["pattern"]), 1)
+    on = [h for h in (result["hits"][i] for i in g["members"] + g["assigned_members"]) if h["on_grid"]]
+    bars = max(g["bars_with"], 1)
+    counts, share = np.zeros(steps), np.zeros(steps)
+    for s in range(steps):
+        at = [h for h in on if h["step"] == s]
+        counts[s], share[s] = len(at), len({h["bar"] for h in at}) / bars
+    return {"counts": counts, "share": share, "n": int(counts.sum())}
+
+
+def _clean_measures(g: dict, sr: int) -> tuple[dict | None, str | None]:
+    """(oneshot's readings of the group's clean hit that the rules use, or None and why)."""
+    c = g["clean_hit"]
+    if c is None:
+        return None, g["clean_note"] or "no clean hit"
+    try:
+        p = oneshot.profile_array(c["audio"], sr, hit=0, single=True)
+    except ValueError as e:
+        return None, "the clean hit cannot be measured: %s" % e
+    return {"fall_20_ms": p["fall_20_ms"], "fall_40_ms": p["fall_40_ms"], "pitched": p["pitched"],
+            "pitch_hz": p["pitch_body_hz"], "noise_body_db": (p["noise_db"] or {}).get("body")}, None
+
+
+def _pattern_numbers(use: dict) -> tuple[float, int, int]:
+    """(share of the on-grid hits on the offbeats, offbeats in use, odd 16ths in use)."""
+    steps = range(len(use["counts"]))
+    off = [s for s in steps if s % 4 == 2]
+    share_off = float(use["counts"][off].sum() / use["n"]) if use["n"] else 0.0
+    return (share_off, sum(use["share"][s] >= STEP_MIN for s in off),
+            sum(use["share"][s] >= STEP_MIN for s in steps if s % 2 == 1))
+
+
+def _apply_rules(kind: str, use: dict, m: dict | None) -> tuple[str | None, str | None]:
+    """(name, the rule that gave it) from the first rule of stem `kind` that fits, else (None, None). A rule that needs
+    the clean hit's readings does not fire without them. "tom" is ranked low / mid / high by name_roles."""
+    share_off, off_used, odd_used = _pattern_numbers(use)
+    fall = None if m is None else m["fall_20_ms"]
+    if kind == "hh":
+        if share_off >= OFFBEAT_SHARE and off_used >= OFFBEAT_STEPS:
+            return "hh offbeat", "%.0f %% of its hits on the offbeats, %d of 4 offbeats in use" % (100 * share_off, off_used)
+        if odd_used >= ODD_STEPS:
+            return "hh 16th", "%d of 8 odd 16ths in use" % odd_used
+        if fall is not None and fall >= OPEN_FALL_20_MS:
+            return "hh open", "falls 20 dB in %.0f ms (at least %.0f)" % (fall, OPEN_FALL_20_MS)
+    elif kind == "snare" and m is not None:
+        if fall is not None and fall < RIM_FALL_20_MS:
+            return "rim", "falls 20 dB in %.0f ms (under %.0f)" % (fall, RIM_FALL_20_MS)
+        if m["noise_body_db"] is not None and m["noise_body_db"] <= SNARE_NOISE_DB:
+            return "snare", "a tone under the noise: the body's noise share is %.1f dB (at most %.1f)" % (
+                m["noise_body_db"], SNARE_NOISE_DB)
+    elif kind == "toms" and m is not None and m["pitched"]:
+        return "tom", "pitched, body at %.0f Hz" % m["pitch_hz"]
+    elif kind == "kick" and m is not None and m["pitched"] and m["pitch_hz"] <= KICK_MAX_HZ:
+        return "kick", "pitched, body at %.0f Hz (at most %.0f)" % (m["pitch_hz"], KICK_MAX_HZ)
+    return None, None
+
+
+def _no_rule(kind: str, use: dict, m: dict | None, why_no_clean: str | None) -> str:
+    """Why no rule of stem `kind` fits, with the numbers the rules read."""
+    if kind not in ("hh", "snare", "toms", "kick"):
+        return "the stem kind %r has no rules" % (kind,)
+    parts = []
+    if kind == "hh":
+        share_off, off_used, odd_used = _pattern_numbers(use)
+        parts.append("%.0f %% of its hits on the offbeats, %d of 4 offbeats and %d of 8 odd 16ths in use (a name needs %.0f %% "
+                     "and %d, or %d)" % (100 * share_off, off_used, odd_used, 100 * OFFBEAT_SHARE, OFFBEAT_STEPS, ODD_STEPS))
+    if m is None:
+        parts.append("no clean hit to measure: %s" % why_no_clean)
+    else:
+        parts.append("clean hit: falls 20 dB in %s ms, %s, noise share of the body %s dB" % (
+            m["fall_20_ms"], "pitched at %.0f Hz" % m["pitch_hz"] if m["pitched"] else "unpitched", m["noise_body_db"]))
+    return "no rule of the %s stem fits: %s" % (kind, "; ".join(parts))
+
+
+def _eligibility(g: dict, threshold: float, by_id: dict) -> list[str]:
+    """Why the group may not be named (an empty list when it may): fewer than NAME_MIN_HITS measured hits, stability not
+    measured or under NAME_STABILITY, separation not over the grouping threshold. A lone group (separation None) has no
+    neighbour to be taken for."""
+    why = []
+    if g["count"] < NAME_MIN_HITS:
+        why.append("only %d measured hit%s (a name needs %d)" % (g["count"], "" if g["count"] == 1 else "s", NAME_MIN_HITS))
+    if g["stability"] is None:
+        if g["count"] >= NAME_MIN_HITS:
+            why.append("stability is not measured (the stem has no more measured hits than the sample, or it was not asked for)")
+    elif g["stability"] < NAME_STABILITY:
+        why.append("stability %.2f is under %.2f" % (g["stability"], NAME_STABILITY))
+    if g["separation"] is not None and g["separation"] <= threshold:
+        near = by_id.get(g["nearest_group"])
+        why.append("separation %.2f is not over the grouping threshold %.2f (nearest group %s%s)" % (
+            g["separation"], threshold, g["nearest_group"],
+            ", which has %d measured hit%s" % (near["count"], "" if near["count"] == 1 else "s")
+            if near is not None and near["count"] < NAME_MIN_HITS else ""))
+    return why
+
+
+def _cosine(a: np.ndarray, b: np.ndarray) -> float:
+    na, nb = float(np.linalg.norm(a)), float(np.linalg.norm(b))
+    return float(a @ b / (na * nb)) if na > 0 and nb > 0 else 0.0
+
+
+def _close_alike(a: dict, b: dict, ua: dict, ub: dict, threshold: float) -> bool:
+    """Two groups that may be one sound: one is the other's nearest group within NEAR_SEPARATION times the threshold,
+    and they play the same 16ths (cosine of the hits per 16th at least SAME_PATTERN)."""
+    near = any(x["nearest_group"] == y["id"] and x["separation"] is not None and x["separation"] <= NEAR_SEPARATION * threshold
+               for x, y in ((a, b), (b, a)))
+    return near and _cosine(ua["counts"], ub["counts"]) >= SAME_PATTERN
+
+
+def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -> dict:
+    """A role name for each group of one stem's `hit_groups` result, by rule (never recognition; the rules and the source
+    of each number are in docs/CONVENTIONS.md, "Drum roles"). `stem_kind` is "hh", "snare", "toms", "kick" or anything
+    else (every group then stays neutral). `bleed` is that stem's entry of `mark_bleed`'s answer: a group marked bleed has
+    no role. `result` is not changed; sections are not named (they carry the stem's group ids).
+
+    A group is NAMED only when it is eligible: at least NAME_MIN_HITS measured hits, `stability` measured and at least
+    NAME_STABILITY, `separation` over the result's grouping threshold. Then the first rule of its stem that fits gives
+    the name: hh: "hh offbeat", "hh 16th", "hh open"; snare: "rim", "snare"; toms: "tom" ("tom low" / "tom mid" /
+    "tom high" by body pitch, when several roles are toms); kick: "kick". The pattern counts the measured hits and the
+    ones assigned to the group under another hit's tail (`assigned` says how many). A group that is not eligible, or that
+    no rule fits, keeps "<stem> <id + 1>" with the reason. Two roles with one name get " 2", " 3".
+    Groups of one name that are within NEAR_SEPARATION times the threshold of each other and play the same 16ths are one
+    role with `variants` ("possibly one sound": the cut between them depends on the sample); a group that is not
+    eligible but is that near and alike a named group is listed in that role's `possibly_also`.
+
+    Returns {"stem", "groups": [{"id", "name", "named", "rule", "reason" (why neutral), "bleed", "role" (index into
+    "roles", None for bleed), "measures", "note"}], "roles": [{"name", "named", "rule", "groups", "count", "assigned",
+    "level_db", "pattern", "variants" (None, or one entry per group), "possibly_also"}], "notes"}."""
+    thr, sr = result["threshold"], result["sample_rate"]
+    kind = stem_kind if stem_kind in ("hh", "snare", "toms", "kick") else None
+    label = stem_kind if isinstance(stem_kind, str) and stem_kind else "group"
+    bleed = bleed or {}
+    by_id = {g["id"]: g for g in result["groups"]}
+    uses = {g["id"]: _use(result, g) for g in result["groups"]}
+    info, notes = {}, []
+    for g in result["groups"]:
+        gid = g["id"]
+        u = uses[gid]
+        m, why_clean = _clean_measures(g, sr)
+        e = {"id": gid, "name": "%s %d" % (label, gid + 1), "named": False, "rule": None, "reason": None,
+             "bleed": bool(bleed.get(gid, {}).get("bleed")), "role": None, "note": None,
+             "measures": {"hits": g["count"] + g["assigned"], "measured": g["count"], "assigned": g["assigned"],
+                          "offbeat_share": round(_pattern_numbers(u)[0], 3), **(m or {"clean_hit": why_clean})}}
+        info[gid] = e
+        if e["bleed"]:
+            e["reason"] = "marked as bleed: %s" % bleed[gid]["why"]
+            continue
+        why = _eligibility(g, thr, by_id)
+        if why:
+            e["reason"] = "not named: " + "; ".join(why)
+            continue
+        name, rule = _apply_rules(kind, u, m) if kind else (None, None)
+        if name is None:
+            e["reason"] = _no_rule(stem_kind, u, m, why_clean)
+        else:
+            e["name"], e["named"], e["rule"] = name, True, rule
+    live = [g for g in result["groups"] if not info[g["id"]]["bleed"]]
+    parent = {g["id"]: g["id"] for g in live}
+
+    def find(i):
+        while parent[i] != i:
+            i = parent[i]
+        return i
+    named = [g for g in live if info[g["id"]]["named"]]
+    for k, a in enumerate(named):
+        for b in named[k + 1:]:
+            if info[a["id"]]["name"] == info[b["id"]]["name"] and _close_alike(a, b, uses[a["id"]], uses[b["id"]], thr):
+                parent[find(b["id"])] = find(a["id"])
+    clusters = {}
+    for g in live:
+        clusters.setdefault(find(g["id"]), []).append(g["id"])
+    roles = []
+    for ids in clusters.values():
+        gs = [by_id[i] for i in ids]
+        big = max(gs, key=lambda g: g["count"])
+        e = info[big["id"]]
+        also = []
+        if e["named"]:
+            for g in live:
+                if g["id"] not in ids and not info[g["id"]]["named"] and any(
+                        _close_alike(g, h, uses[g["id"]], uses[h["id"]], thr) for h in gs):
+                    also.append(g["id"])
+                    info[g["id"]]["note"] = ("possibly the same sound as group %d (%s): they are within %.2f of each other "
+                                             "and play the same 16ths" % (big["id"], e["name"], NEAR_SEPARATION * thr))
+        total = np.zeros(len(big["pattern"]))
+        for g in gs:
+            total = total + np.array(g["pattern"])
+        roles.append({"name": e["name"], "named": e["named"], "rule": e["rule"], "groups": sorted(ids),
+                      "count": sum(g["count"] for g in gs), "assigned": sum(g["assigned"] for g in gs),
+                      "level_db": big["level_db"], "pattern": [float(min(1.0, v)) for v in total],
+                      "variants": None if len(ids) == 1 else [
+                          {"group": g["id"], "count": g["count"], "level_db": g["level_db"],
+                           "stability": g["stability"], "separation": g["separation"],
+                           "fall_20_ms": info[g["id"]]["measures"].get("fall_20_ms")} for g in gs],
+                      "possibly_also": also})
+        if len(ids) > 1:
+            notes.append("groups %s are one role (%s) with variants: each is within %.2f of the other and they play the same "
+                         "16ths, so they may be one sound" % (sorted(ids), e["name"], NEAR_SEPARATION * thr))
+    roles.sort(key=lambda r: (-r["count"], r["groups"][0]))
+    toms = [r for r in roles if r["name"] == "tom" and r["named"]]
+    pitch = lambda r: info[max(r["groups"], key=lambda i: by_id[i]["count"])]["measures"]["pitch_hz"]  # noqa: E731
+    if len(toms) > 1:
+        toms.sort(key=pitch)
+        for k, r in enumerate(toms):
+            r["name"] = "tom low" if k == 0 else "tom high" if k == len(toms) - 1 else "tom mid"
+        notes.append("toms are ranked by body pitch among this stem's tom roles (%s): low, mid and high are relative to each "
+                     "other, not to a scale" % ", ".join("%s %.0f Hz" % (r["name"], pitch(r)) for r in toms))
+    seen = {}
+    for r in roles:
+        seen[r["name"]] = seen.get(r["name"], 0) + 1
+        if seen[r["name"]] > 1 and r["named"]:
+            r["name"] += " %d" % seen[r["name"]]
+    for k, r in enumerate(roles):
+        for i in r["groups"]:
+            info[i]["name"] = r["name"] if r["named"] else info[i]["name"]
+            info[i]["role"] = k
+    return {"stem": stem_kind, "groups": [info[g["id"]] for g in result["groups"]], "roles": roles, "notes": notes}
+
+
+# ---------------------------------------------------------------- bleed
+
+def _tail(probs: list, k: int) -> float:
+    """P(at least k successes) of independent trials with the success probabilities `probs`."""
+    pmf = np.zeros(len(probs) + 1)
+    pmf[0] = 1.0
+    for p in probs:
+        nxt = pmf * (1.0 - p)
+        nxt[1:] += pmf[:-1] * p
+        pmf = nxt
+    return float(pmf[k:].sum())
+
+
+def _bleed_pair(res_a: dict, ga: dict, res_b: dict, gb: dict, span: int, sr: int) -> dict:
+    """The evidence that group `ga` (stem a) is bleed of group `gb` (stem b), and the first of the three conditions it fails
+    ("coincidence", "level", "likeness", or None when it passes all). See mark_bleed."""
+    hits_a = [res_a["hits"][i] for i in ga["members"] + ga["assigned_members"] if res_a["hits"][i]["level_db"] is not None]
+    hits_b = [res_b["hits"][i] for i in gb["members"] + gb["assigned_members"] if res_b["hits"][i]["level_db"] is not None]
+    n = len(hits_a)
+    ev = {"source_stem": None, "source_group": gb["id"], "hits": n, "coincide": 0, "rate": 0.0, "expected": None, "p": None,
+          "louder_db": None, "louder_share": None, "distance": None, "failed": "coincidence"}
+    if not n or not hits_b:
+        return ev
+    tb = np.array([h["onset_s"] for h in hits_b])
+    order = np.argsort(tb)
+    tb = tb[order]
+    pairs = []
+    for h in hits_a:
+        k = int(np.searchsorted(tb, h["onset_s"]))
+        near = [j for j in (k - 1, k) if 0 <= j < len(tb) and abs(tb[j] - h["onset_s"]) <= COINCIDE_S]
+        if near:
+            j = min(near, key=lambda j: abs(tb[j] - h["onset_s"]))
+            pairs.append((h, hits_b[int(order[j])]))
+    cells = {}
+    for h in hits_b:
+        if h["on_grid"]:
+            cells.setdefault(h["step"], set()).add(h["bar"])
+    chance = [max(CHANCE_FLOOR, len(cells.get(h["step"], ())) / span) for h in hits_a]
+    ev.update(coincide=len(pairs), rate=len(pairs) / n, expected=float(np.mean(chance)),
+              p=_tail(chance, len(pairs)) if pairs else 1.0)
+    if pairs:                                   # measured even when the coincidence fails, so the report can say it
+        diff = [b["level_db"] - a["level_db"] for a, b in pairs]
+        ev.update(louder_db=float(np.median(diff)), louder_share=float(np.mean([d >= BLEED_LOUDER_DB for d in diff])))
+    if not (ev["rate"] >= BLEED_RATE and ev["rate"] - ev["expected"] >= BLEED_MARGIN and ev["p"] <= BLEED_P):
+        return ev
+    ev["failed"] = "level"
+    if not (ev["louder_db"] >= BLEED_LOUDER_DB and ev["louder_share"] >= BLEED_LOUDER_SHARE):
+        return ev
+    ev["failed"] = "likeness"
+    if ga["clean_hit"] is None or gb["clean_hit"] is None:
+        ev["distance_note"] = "no clean hit to compare (%s)" % (
+            "this group: " + str(ga["clean_note"]) if ga["clean_hit"] is None else "the other group: " + str(gb["clean_note"]))
+        return ev
+    ev["distance"] = float(_pair_distance(ga["clean_hit"]["audio"], gb["clean_hit"]["audio"], sr))
+    ev["failed"] = None if ev["distance"] <= BLEED_DISTANCE else "likeness"
+    return ev
+
+
+def _bleed_why(ev: dict) -> str:
+    """One line for the evidence of one pair (the reason it was not marked, or the proof that it was)."""
+    src = "group %d of `%s`" % (ev["source_group"], ev["source_stem"])
+    co = "%d of %d hits coincide with %s (%.0f %%; the two patterns give %s by chance, p %s)" % (
+        ev["coincide"], ev["hits"], src, 100 * ev["rate"],
+        "-" if ev["expected"] is None else "%.0f %%" % (100 * ev["expected"]), "-" if ev["p"] is None else "%.3g" % ev["p"])
+    lv = ("the level of that group against this group's hits is %+.1f dB (median; %.0f %% of the pairs at %+.0f dB or more)"
+          % (ev["louder_db"], 100 * ev["louder_share"], BLEED_LOUDER_DB)) if ev["louder_db"] is not None else ""
+    if ev["failed"] == "coincidence":
+        if not ev["coincide"]:
+            return "no hit coincides with %s within %.0f ms" % (src, 1000 * COINCIDE_S)
+        return "%s: not well above chance (it needs %.0f %% of the hits, %.0f points over chance, p at most %g); %s" % (
+            co, 100 * BLEED_RATE, 100 * BLEED_MARGIN, BLEED_P, lv)
+    if ev["failed"] == "level":
+        return "%s; %s: it is not under that group (it needs +%.0f dB in %.0f %% of the pairs)" % (
+            co, lv, BLEED_LOUDER_DB, 100 * BLEED_LOUDER_SHARE)
+    if ev["distance"] is None:
+        return "%s; %s; likeness not tested: %s" % (co, lv, ev.get("distance_note"))
+    sounds = "the clean hits are %.2f apart (at most %.2f)" % (ev["distance"], BLEED_DISTANCE)
+    return "%s; %s; %s%s" % (co, lv, sounds, "" if ev["failed"] is None else ": they do not sound alike")
+
+
+def mark_bleed(results_by_stem: dict) -> dict:
+    """Mark the groups that are one stem's bleed of another stem's sound. `results_by_stem` is {stem name: hit_groups result}
+    for stems of one track (same tempo, t0 and sample rate). A group is bleed of a group in ANOTHER stem when all three hold:
+    (a) its hits coincide (onsets within COINCIDE_S) with that group's hits at least BLEED_RATE of the time, at least
+    BLEED_MARGIN more than the two patterns give by chance, and with a chance of at most BLEED_P of so many from the patterns
+    alone; (b) that group is louder at the coincident hits by at least BLEED_LOUDER_DB in at least BLEED_LOUDER_SHARE of the
+    pairs (`level_db`: loudest ms of each hit's cut); (c) the two clean hits are at most BLEED_DISTANCE apart (spectral
+    distance; no clean hit on either side: not tested, not marked). Coincidence alone is never enough.
+    The chance rate: for each hit of the group at 16th s, the share of the track's bars in which the other group plays at
+    s (at least CHANCE_FLOOR), the hits taken as independent: `expected` is the mean of those shares and `p` the chance of
+    at least as many coincidences (Poisson-binomial). If the other group plays every beat, a group that sits on the beats
+    coincides with it every time and the chance rate is 100 %: that is not evidence. The track's bars run from the first to
+    the last hit of any stem. Hits that are not on the grid count in the observed rate and get the chance of their nearest 16th.
+    Returns {stem: {group id: {"bleed": bool, "why": str, "evidence": dict or None}}} for every group of every stem. A marked
+    group's `evidence` is the pair that proves it ({"source_stem", "source_group", "hits", "coincide", "rate", "expected",
+    "p", "louder_db", "louder_share", "distance"}); an unmarked group's is the pair that came closest and `why` says which
+    condition it failed. Pass each stem's entry to `name_roles(..., bleed=)`."""
+    stems = list(results_by_stem)
+    if not stems:
+        raise ValueError("no stems")
+    first = results_by_stem[stems[0]]
+    for s in stems[1:]:
+        r = results_by_stem[s]
+        if (r["tempo"], r["t0"], r["sample_rate"]) != (first["tempo"], first["t0"], first["sample_rate"]):
+            raise ValueError("stems %r and %r do not share a tempo, t0 and sample rate: %r against %r" % (
+                stems[0], s, (first["tempo"], first["t0"], first["sample_rate"]), (r["tempo"], r["t0"], r["sample_rate"])))
+    sr = first["sample_rate"]
+    bars = [h["bar"] for r in results_by_stem.values() for h in r["hits"]]
+    span = max(bars) - min(bars) + 1 if bars else 1
+    out = {s: {} for s in stems}
+    for sa in stems:
+        for ga in results_by_stem[sa]["groups"]:
+            ok, best = [], None
+            for sb in stems:
+                if sb == sa:
+                    continue
+                for gb in results_by_stem[sb]["groups"]:
+                    ev = _bleed_pair(results_by_stem[sa], ga, results_by_stem[sb], gb, span, sr)
+                    ev["source_stem"] = sb
+                    if ev["failed"] is None:
+                        ok.append(ev)
+                    rank = (["coincidence", "level", "likeness", None].index(ev["failed"]), ev["rate"])
+                    if best is None or rank > best[0]:
+                        best = (rank, ev)
+            if ok:
+                ev = min(ok, key=lambda e: e["distance"])
+                out[sa][ga["id"]] = {"bleed": True, "why": _bleed_why(ev), "evidence": ev}
+            elif best is None:
+                out[sa][ga["id"]] = {"bleed": False, "why": "there is no other stem to compare with", "evidence": None}
+            else:
+                out[sa][ga["id"]] = {"bleed": False, "why": _bleed_why(best[1]), "evidence": best[1]}
     return out

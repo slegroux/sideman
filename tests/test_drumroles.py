@@ -609,3 +609,302 @@ def test_a_hat_of_tau_60_ms_with_a_rest_sounds_through_two_lines():
     assert [h["through"] for h in r["hits"]] == [2] * 8
     r = run(stem([(at(i), noise_hit(i, 0.03)) for i in range(2, 32, 4)], 2))
     assert [h["through"] for h in r["hits"]] == [1] * 8
+
+
+# ---------------------------------------------------------------- role names: groups built by hand, to each rule
+
+def click_hit(f=400.0, tau=0.003, seconds=0.3):
+    """A rim-like click: a short ringing tone and an upper partial."""
+    t = np.arange(int(seconds * SR)) / SR
+    return np.sin(2 * np.pi * f * t) * np.exp(-t / tau) + 0.3 * np.sin(2 * np.pi * 2.75 * f * t) * np.exp(-t / (0.7 * tau))
+
+
+def fake_result(specs, n_bars=8, threshold=drumroles.THRESHOLD):
+    """A hit_groups-shaped result built by hand: each spec is {steps, bars, audio (the clean hit, [n] or None), level (dB),
+    stability, separation, nearest, assigned (steps whose hits count as assigned, not measured)}. Group i has id i; its
+    hits sit exactly on the 16th of every bar in `bars` at each step."""
+    hits, groups = [], []
+    for gid, s in enumerate(specs):
+        members, assigned = [], []
+        for b in s.get("bars", range(n_bars)):
+            for st in s["steps"]:
+                h = {"id": len(hits), "bar": b, "step": st, "on_grid": True, "onset_s": at(b * 16 + st),
+                     "level_db": s.get("level", -10.0), "status": "grouped", "group": gid}
+                (assigned if st in s.get("assigned", ()) else members).append(h["id"])
+                if st in s.get("assigned", ()):
+                    h["status"] = "assigned"
+                hits.append(h)
+        bars_with = len({hits[i]["bar"] for i in members + assigned})
+        pat = [len({hits[i]["bar"] for i in members + assigned if hits[i]["step"] == st}) / n_bars for st in range(16)]
+        audio = s.get("audio")
+        groups.append({
+            "id": gid, "count": len(members), "assigned": len(assigned), "tentative": len(members) < drumroles.TENTATIVE_N,
+            "stability": s.get("stability", 0.9), "separation": s.get("separation", 3.0), "nearest_group": s.get("nearest"),
+            "bars_with": bars_with, "pattern": pat, "level_db": s.get("level", -10.0), "members": members,
+            "assigned_members": assigned, "off_grid": 0,
+            "clean_hit": None if audio is None else {"hit": members[0], "audio": np.asarray(audio)[:, None]},
+            "clean_note": "none of the members tried is complete" if audio is None else None})
+    return {"sample_rate": SR, "tempo": BPM, "t0": T0, "threshold": threshold, "hits": hits, "groups": groups}
+
+
+OFFBEATS, ODDS = [2, 6, 10, 14], [1, 3, 5, 7, 9, 11, 13, 15]
+
+
+def names(r, kind, **kw):
+    out = drumroles.name_roles(r, kind, **kw)
+    return [g["name"] for g in out["groups"]], out
+
+
+def test_names_hh_offbeat_16th_and_open_each_by_its_rule_and_a_group_no_rule_fits_stays_neutral():
+    r = fake_result([
+        {"steps": OFFBEATS, "audio": noise_hit(1, 0.025)},
+        {"steps": ODDS + [0, 4, 8, 12], "audio": noise_hit(2, 0.005)},
+        {"steps": [0, 8], "audio": noise_hit(3, 0.1)},              # on the beats, falls 20 dB in 230 ms
+        {"steps": [0, 8], "audio": noise_hit(4, 0.005)},            # the same 16ths, falls in 13 ms: neither open nor a pattern
+    ])
+    got, out = names(r, "hh")
+    assert got == ["hh offbeat", "hh 16th", "hh open", "hh 4"]
+    assert [g["named"] for g in out["groups"]] == [True, True, True, False]
+    assert "no rule of the hh stem fits" in out["groups"][3]["reason"] and out["groups"][3]["rule"] is None
+    assert out["groups"][0]["measures"]["offbeat_share"] == 1.0 and out["groups"][2]["measures"]["fall_20_ms"] > 200
+    assert [role["name"] for role in out["roles"]] == ["hh 16th", "hh offbeat", "hh open", "hh 4"]       # roles by count: 96, 32, 16, 16
+    assert [g["role"] for g in out["groups"]] == [1, 0, 2, 3]
+
+
+def test_names_a_hat_that_plays_one_16th_of_each_beat_is_not_a_16th_hat():
+    # 1, 5, 9, 13 (the "e" of each beat) are 4 of the 8 odd 16ths; a hat on 6 of them is a 16th hat, a hat on 4 is not
+    on_e = fake_result([{"steps": [1, 5, 9, 13], "audio": noise_hit(1, 0.005)}])
+    assert names(on_e, "hh")[0] == ["hh 1"] and "4 of 8 odd 16ths" in names(on_e, "hh")[1]["groups"][0]["reason"]
+    six = fake_result([{"steps": [1, 3, 5, 7, 9, 11], "audio": noise_hit(1, 0.005)}])
+    assert names(six, "hh")[0] == ["hh 16th"] and "6 of 8 odd 16ths" in names(six, "hh")[1]["groups"][0]["rule"]
+
+
+def test_names_count_assigned_hits_in_the_pattern_and_say_how_many():
+    # offbeats 2 and 6 measured, 10 and 14 only assigned (heard under another hit's tail): two offbeats in use without the
+    # assigned hits (needs 3 of 4), four with them
+    r = fake_result([{"steps": OFFBEATS, "assigned": (10, 14), "bars": range(4), "audio": noise_hit(1, 0.025)}], n_bars=4)
+    got, out = names(r, "hh")
+    g, = out["groups"]
+    assert got == ["hh offbeat"] and (g["measures"]["measured"], g["measures"]["assigned"], g["measures"]["hits"]) == (8, 8, 16)
+    r["groups"][0]["assigned_members"] = []                       # without them the pattern is two offbeats: no rule
+    assert names(r, "hh")[0] == ["hh 1"]
+
+
+def test_names_snare_stem_rim_snare_and_a_noise_hit_that_stays_neutral():
+    r = fake_result([
+        {"steps": [4, 12], "audio": snare_hit(1)},                  # a 190 Hz tone under noise
+        {"steps": [3], "audio": click_hit()},                       # falls 20 dB in 8 ms
+        {"steps": [2, 14], "audio": noise_hit(2, 0.08)},            # noise only: a clap, a noise snare? no rule says
+    ])
+    got, out = names(r, "snare")
+    assert got == ["snare", "rim", "snare 3"]
+    assert "tone under the noise" in out["groups"][0]["rule"] and "falls 20 dB in" in out["groups"][1]["rule"]
+    assert "no rule of the snare stem fits" in out["groups"][2]["reason"] and out["groups"][2]["measures"]["noise_body_db"] == 0.0
+
+
+def test_names_toms_by_pitch_low_mid_high_when_several_and_kick_by_a_low_body():
+    r = fake_result([{"steps": [4], "audio": tom_hit(f=150.0)}, {"steps": [8], "audio": tom_hit(f=100.0)},
+                     {"steps": [12], "audio": tom_hit(f=220.0)}, {"steps": [0], "audio": noise_hit(1, 0.1)}])
+    got, out = names(r, "toms")
+    assert got == ["tom mid", "tom low", "tom high", "toms 4"]                 # 150, 100, 220 Hz; the noise has no pitch
+    assert any("ranked by body pitch" in n for n in out["notes"])
+    assert names(fake_result([{"steps": [4], "audio": tom_hit(f=150.0)}]), "toms")[0] == ["tom"]     # one tom: no rank
+    k = fake_result([{"steps": [0, 4, 8, 12], "audio": tom_hit(f=45.0, tau=0.1)},
+                     {"steps": [6], "audio": tom_hit(f=81.0), "bars": range(0, 8, 2)}])
+    got, out = names(k, "kick")
+    assert got == ["kick", "kick 2"] and "81 Hz" in out["groups"][1]["reason"]                # 81 Hz is over the 70 Hz the rule allows
+
+
+def test_names_stay_neutral_for_a_stem_of_unknown_kind_and_a_group_without_a_clean_hit():
+    r = fake_result([{"steps": OFFBEATS, "audio": noise_hit(1, 0.025)}, {"steps": [4], "audio": tom_hit()}])
+    got, out = names(r, "perc")
+    assert got == ["perc 1", "perc 2"] and "has no rules" in out["groups"][0]["reason"]
+    r = fake_result([{"steps": [4], "audio": None}])
+    got, out = names(r, "toms")
+    assert got == ["toms 1"] and "no clean hit" in out["groups"][0]["reason"]
+    # a pattern rule does not need the clean hit
+    assert names(fake_result([{"steps": OFFBEATS, "audio": None}]), "hh")[0] == ["hh offbeat"]
+
+
+def test_names_need_enough_hits_a_measured_stability_and_separation_and_the_reason_is_said():
+    ok = {"steps": OFFBEATS, "audio": noise_hit(1, 0.025)}
+    cases = [({"bars": range(1), "steps": [2, 6, 10]}, "only 3 measured hits (a name needs 4)"),
+             ({"stability": 0.6}, "stability 0.60 is under 0.75"), ({"stability": None}, "stability is not measured"),
+             ({"separation": 1.2, "nearest": 5}, "separation 1.20 is not over the grouping threshold 1.50")]
+    for change, reason in cases:
+        r = fake_result([{**ok, **change}])
+        got, out = names(r, "hh")
+        assert got == ["hh 1"] and not out["groups"][0]["named"] and reason in out["groups"][0]["reason"], out["groups"][0]
+    # a group that is alone (no neighbour, separation None) is eligible; exactly at the stability limit too
+    assert names(fake_result([{**ok, "separation": None}]), "hh")[0] == ["hh offbeat"]
+    assert names(fake_result([{**ok, "stability": 0.75}]), "hh")[0] == ["hh offbeat"]
+    # several reasons are all said
+    r = fake_result([{**ok, "stability": 0.5, "separation": 1.0, "nearest": 3}])
+    assert "stability 0.50" in names(r, "hh")[1]["groups"][0]["reason"] and "separation 1.00" in names(r, "hh")[1]["groups"][0]["reason"]
+
+
+def test_names_two_offbeat_groups_that_touch_are_one_role_with_variants_and_far_apart_two_roles():
+    short, long_ = noise_hit(1, 0.025), noise_hit(2, 0.06)         # falls 20 dB in 60 ms and in 137 ms: two decays
+    near = fake_result([{"steps": OFFBEATS, "audio": short, "separation": 1.54, "nearest": 1},
+                        {"steps": OFFBEATS, "bars": range(0, 8, 2), "audio": long_, "separation": 1.54, "nearest": 0, "level": -20.0}])
+    got, out = names(near, "hh")
+    assert got == ["hh offbeat", "hh offbeat"] and len(out["roles"]) == 1
+    role, = out["roles"]
+    assert role["groups"] == [0, 1] and role["count"] == 32 + 16 and [v["group"] for v in role["variants"]] == [0, 1]
+    assert role["variants"][0]["fall_20_ms"] < 80 < 120 < role["variants"][1]["fall_20_ms"]
+    assert any("may be one sound" in n for n in out["notes"])
+    far = fake_result([{"steps": OFFBEATS, "audio": short, "separation": 3.0, "nearest": 1},
+                       {"steps": OFFBEATS, "bars": range(0, 8, 2), "audio": long_, "separation": 3.0, "nearest": 0}])
+    got, out = names(far, "hh")
+    assert got == ["hh offbeat", "hh offbeat 2"] and len(out["roles"]) == 2 and all(r["variants"] is None for r in out["roles"])
+    # near but not on the same 16ths: not one sound
+    other = fake_result([{"steps": OFFBEATS, "audio": short, "separation": 1.54, "nearest": 1},
+                         {"steps": ODDS + [0, 4, 8, 12], "audio": long_, "separation": 1.54, "nearest": 0}])
+    assert names(other, "hh")[0] == ["hh offbeat", "hh 16th"] and len(drumroles.name_roles(other, "hh")["roles"]) == 2
+    # near and alike, but the second one is not eligible: it stays neutral, and says it may be the first
+    weak = fake_result([{"steps": OFFBEATS, "audio": short, "separation": 1.54, "nearest": 1},
+                        {"steps": OFFBEATS, "bars": range(0, 8, 2), "audio": long_, "separation": 1.54, "nearest": 0,
+                         "stability": 0.64}])
+    got, out = names(weak, "hh")
+    assert got == ["hh offbeat", "hh 2"] and "stability 0.64" in out["groups"][1]["reason"]
+    assert out["roles"][0]["possibly_also"] == [1] and "possibly the same sound as group 0 (hh offbeat)" in out["groups"][1]["note"]
+
+
+def test_names_leave_out_a_group_marked_as_bleed_and_it_stays_in_the_output():
+    r = fake_result([{"steps": OFFBEATS, "audio": noise_hit(1, 0.025)}, {"steps": [0, 8], "audio": noise_hit(2, 0.1)}])
+    got, out = names(r, "hh", bleed={0: {"bleed": False, "why": "-"}, 1: {"bleed": True, "why": "it is a copy"}})
+    assert got == ["hh offbeat", "hh 2"] and len(out["roles"]) == 1
+    g = out["groups"][1]
+    assert g["bleed"] and g["role"] is None and not g["named"] and "marked as bleed: it is a copy" in g["reason"]
+
+
+def test_names_on_a_real_hat_stem_closed_16ths_and_a_short_hat_on_the_offbeats():
+    # 3 bars of hat_events: a tau 25 ms hat on the offbeats, tau 5 ms on the other 16ths (48 measured hits, so the sample
+    # moves and stability is measured); two sounds 2.9 apart. The offbeat hat falls 20 dB in 60 ms: not "open" (140 ms)
+    r = run(stem(hat_events(3), 3), stability_runs=2)
+    got, out = names(r, "hh")
+    by_count = sorted(r["groups"], key=lambda g: -g["count"])
+    assert [g["count"] for g in by_count] == [36, 12] and all(g["stability"] == 1.0 for g in by_count)
+    assert {g["id"]: n for g, n in zip(r["groups"], got)} == {by_count[0]["id"]: "hh 16th", by_count[1]["id"]: "hh offbeat"}
+    assert [role["name"] for role in out["roles"]] == ["hh 16th", "hh offbeat"] and all(g["named"] for g in out["groups"])
+    # the same stem asked for no regrouping has no stability: both stay neutral, with the reason
+    quiet = names(run(stem(hat_events(3), 3)), "hh")
+    assert quiet[0] == ["hh 1", "hh 2"] and all("stability is not measured" in g["reason"] for g in quiet[1]["groups"])
+
+
+# ---------------------------------------------------------------- bleed
+
+def test_a_tom_fill_copied_20_db_down_into_a_kick_stem_is_marked_bleed_and_the_kick_stem_keeps_one_role():
+    # 9 bars. Kick stem: a 45 Hz kick on steps 0 and 8 of every bar (18 hits). Toms stem: a 150 Hz tom on steps 4 and 12 of
+    # bars 1, 3, 5 and 7 (8 hits). The kick stem also holds the same toms 20 dB down: copies of those hits
+    kick = lambda: tom_hit(f=45.0, tau=0.1) * 0.2     # noqa: E731
+    fill = [(at(16 * b + s), tom_hit()) for b in (1, 3, 5, 7) for s in (4, 12)]
+    toms = run(stem(fill, 9))
+    kicks = run(stem([(at(16 * b + s), kick()) for b in range(9) for s in (0, 8)]
+                     + [(t, h * 10 ** (-20 / 20)) for t, h in fill], 9))
+    assert sorted(g["count"] for g in kicks["groups"]) == [8, 18] and len(toms["groups"]) == 1
+    marks = drumroles.mark_bleed({"kick": kicks, "toms": toms})
+    copy, = [g for g in kicks["groups"] if g["count"] == 8]
+    real, = [g for g in kicks["groups"] if g["count"] == 18]
+    ev = marks["kick"][copy["id"]]
+    assert ev["bleed"] and ev["evidence"]["source_stem"] == "toms" and ev["evidence"]["coincide"] == 8
+    # built to coincide in every hit, the tom stem plays those 16ths in 4 of 9 bars: chance 4/9 each; and 20 dB louder
+    assert ev["evidence"]["rate"] == 1.0 and ev["evidence"]["expected"] == pytest.approx(4 / 9, abs=0.01)
+    assert ev["evidence"]["louder_db"] == pytest.approx(20.0, abs=3.0) and ev["evidence"]["distance"] < 1.0
+    assert not marks["kick"][real["id"]]["bleed"] and not marks["toms"][toms["groups"][0]["id"]]["bleed"]
+    out = drumroles.name_roles(kicks, "kick", bleed=marks["kick"])
+    assert len(out["roles"]) == 1 and out["roles"][0]["groups"] == [real["id"]]
+    bled = [g for g in out["groups"] if g["id"] == copy["id"]][0]
+    assert bled["bleed"] and bled["role"] is None and bled["reason"].startswith("marked as bleed")
+    assert len(out["groups"]) == 2                              # the bled group stays in the output
+
+
+def bleed_pair(a_audio, a_cells, a_level, b_audio, b_cells, b_level, n_bars=8):
+    """Two stems of one hit each: group 0 of "x" plays the cells (bar, step) of `a_cells` and group 0 of "y" those of `b_cells`."""
+    def result(audio, cells, level):
+        r = fake_result([{"steps": [0], "audio": audio, "level": level}], n_bars=n_bars)
+        steps = sorted(cells)
+        hits = [{"id": i, "bar": b, "step": s, "on_grid": True, "onset_s": at(b * 16 + s), "level_db": level,
+                 "status": "grouped", "group": 0} for i, (b, s) in enumerate(steps)]
+        g = r["groups"][0]
+        g.update(members=list(range(len(hits))), count=len(hits), assigned_members=[], assigned=0)
+        r["hits"] = hits
+        return r
+    return {"x": result(a_audio, a_cells, a_level), "y": result(b_audio, b_cells, b_level)}
+
+
+CELLS = [(b, 2 if b % 2 == 0 else 10) for b in range(8)]      # 8 hits, one a bar: step 2 in the even bars, 10 in the odd; chance 1/2 each
+
+
+def test_a_sound_that_only_coincides_with_a_louder_different_sounding_hit_is_not_bleed():
+    # x: a hat on 8 cells; y: a tom 15 dB louder on the same 8. The coincidence is far over chance (1.0 against 0.5, p 0.004)
+    # and y is louder, but a hat is not a tom: the clean hits are over 3 apart (a hat against a tom 3.9 and more)
+    marks = drumroles.mark_bleed(bleed_pair(noise_hit(1, 0.01), CELLS, -30.0, tom_hit(), CELLS, -15.0))
+    ev = marks["x"][0]
+    assert not ev["bleed"] and ev["evidence"]["failed"] == "likeness" and ev["evidence"]["distance"] > 1.5 * drumroles.BLEED_DISTANCE
+    assert ev["evidence"]["rate"] == 1.0 and ev["evidence"]["louder_db"] == pytest.approx(15.0) and "do not sound alike" in ev["why"]
+    assert not marks["y"][0]["bleed"]                           # and the tom is louder than the hat: nothing to mark there
+
+
+def test_bleed_not_marked_when_it_coincides_and_sounds_alike_but_is_louder_in_this_stem_the_other_is():
+    quiet = tom_hit() * 0.1
+    marks = drumroles.mark_bleed(bleed_pair(tom_hit(), CELLS, -10.0, quiet, CELLS, -30.0))
+    assert not marks["x"][0]["bleed"] and marks["x"][0]["evidence"]["failed"] == "level"
+    assert marks["x"][0]["evidence"]["louder_db"] == pytest.approx(-20.0) and "it is not under that group" in marks["x"][0]["why"]
+    assert marks["y"][0]["bleed"] and marks["y"][0]["evidence"]["source_stem"] == "x" and marks["y"][0]["evidence"]["distance"] < 0.1
+
+
+def test_a_group_that_coincides_only_at_the_rate_the_patterns_give_by_chance_is_not_bleed():
+    # x plays the 4 beats of every bar, 20 dB down, the same tom as y; y plays every 16th of every bar. Every hit of x
+    # coincides, but y is there at every 16th: the chance rate is 100 %, which is the base rate, not bleed
+    every = [(b, s) for b in range(8) for s in range(16)]
+    beats = [(b, s) for b in range(8) for s in (0, 4, 8, 12)]
+    marks = drumroles.mark_bleed(bleed_pair(tom_hit() * 0.1, beats, -30.0, tom_hit(), every, -10.0))
+    ev = marks["x"][0]
+    assert not ev["bleed"] and ev["evidence"]["failed"] == "coincidence"
+    assert ev["evidence"]["rate"] == 1.0 and ev["evidence"]["expected"] == 1.0 and "100 %" in ev["why"]
+    # coincidence at half the hits, with y playing on half the bars: 50 % observed against 50 % expected
+    even = [(b, s) for b in range(0, 8, 2) for s in (0, 4, 8, 12)]
+    marks = drumroles.mark_bleed(bleed_pair(tom_hit() * 0.1, beats, -30.0, tom_hit(), even, -10.0))
+    ev = marks["x"][0]["evidence"]
+    assert not marks["x"][0]["bleed"] and ev["failed"] == "coincidence" and ev["rate"] == 0.5 and ev["expected"] == 0.5
+
+
+def test_a_small_excess_over_chance_in_a_long_stem_is_not_bleed():
+    # x plays the 4 beats in bars 0-14 (60 hits), y plays them in bars 0-12 and then another 16th in bars 15-19, so the
+    # track runs over 20 bars: y is at each beat 16th in 13 of 20 bars (chance 65 %), x coincides in 13 of 15 bars (87 %):
+    # 22 points over chance, under the 25 asked for, though with 60 hits the chance of that from the patterns is under 1 %
+    x = [(b, s) for b in range(15) for s in (0, 4, 8, 12)]
+    y = [(b, s) for b in range(13) for s in (0, 4, 8, 12)] + [(b, 14) for b in range(15, 20)]
+    ev = drumroles.mark_bleed(bleed_pair(tom_hit() * 0.1, x, -30.0, tom_hit(), y, -10.0, n_bars=20))["x"][0]
+    assert not ev["bleed"] and ev["evidence"]["failed"] == "coincidence"
+    assert ev["evidence"]["rate"] == pytest.approx(13 / 15) and ev["evidence"]["expected"] == pytest.approx(13 / 20)
+    assert ev["evidence"]["p"] < drumroles.BLEED_P and ev["evidence"]["rate"] - ev["evidence"]["expected"] < drumroles.BLEED_MARGIN
+
+
+def test_a_partial_coincidence_far_over_chance_is_not_bleed():
+    # x plays steps 2 and 10 in bars 0-9 (20 hits); y plays them in bars 0-5 (12 coincide) and another 16th in bars 10-39, so
+    # the track runs over 40 bars and y is at those 16ths in 6 of 40 (chance 15 %): 60 % against 15 % is far over chance
+    # (p tiny), y is louder and the same sound, but 4 hits in 10 have no source in y: this is not a copy
+    x = [(b, s) for b in range(10) for s in (2, 10)]
+    y = [(b, s) for b in range(6) for s in (2, 10)] + [(b, 14) for b in range(10, 40)]
+    ev = drumroles.mark_bleed(bleed_pair(tom_hit() * 0.1, x, -30.0, tom_hit(), y, -10.0, n_bars=40))["x"][0]["evidence"]
+    assert ev["failed"] == "coincidence" and ev["rate"] == 0.6 and ev["expected"] == pytest.approx(0.15)
+    assert ev["p"] < drumroles.BLEED_P and ev["rate"] - ev["expected"] >= drumroles.BLEED_MARGIN
+
+
+def test_bleed_is_not_marked_without_enough_hits_or_a_clean_hit_and_says_so():
+    # 2 hits that both coincide with y, which plays that 16th in 6 of the 8 bars: chance 3/4 each, p 0.56, over the 0.01 limit
+    two = [(1, 2), (3, 2)]
+    marks = drumroles.mark_bleed(bleed_pair(tom_hit() * 0.1, two, -30.0, tom_hit(), two + [(5, 2), (7, 2), (0, 2), (2, 2)], -10.0))
+    assert not marks["x"][0]["bleed"] and "not well above chance" in marks["x"][0]["why"] and marks["x"][0]["evidence"]["p"] > 0.01
+    # everything holds but x has no clean hit: not marked, with the reason
+    pair = bleed_pair(None, CELLS, -30.0, tom_hit(), CELLS, -10.0)
+    marks = drumroles.mark_bleed(pair)
+    assert not marks["x"][0]["bleed"] and "likeness not tested" in marks["x"][0]["why"]
+    assert drumroles.mark_bleed({"x": pair["x"]})["x"][0]["why"] == "there is no other stem to compare with"
+    other = dict(pair["y"], tempo=120.0)
+    with pytest.raises(ValueError, match="share a tempo"):
+        drumroles.mark_bleed({"x": pair["x"], "y": other})
+    assert drumroles._tail([0.5, 0.5], 2) == pytest.approx(0.25) and drumroles._tail([0.5, 0.5], 1) == pytest.approx(0.75)
+    assert drumroles._tail([1.0, 1.0, 1.0], 3) == pytest.approx(1.0) and drumroles._tail([0.25] * 4, 4) == pytest.approx(0.25 ** 4)
