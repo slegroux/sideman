@@ -1378,6 +1378,8 @@ def test_bleed_is_not_marked_without_enough_hits_or_a_clean_hit_and_says_so():
     two = [(1, 2), (3, 2)]
     marks = drumroles.mark_bleed(bleed_pair(tom_hit() * 0.1, two, -30.0, tom_hit(), two + [(5, 2), (7, 2), (0, 2), (2, 2)], -10.0))
     assert not marks["x"][0]["bleed"] and "not well above chance" in marks["x"][0]["why"] and marks["x"][0]["evidence"]["p"] > 0.01
+    # over its own bars (1 and 3) y plays there in both: the chance is 100 % too, but p is not small, so it is not said to mislead
+    assert marks["x"][0]["evidence"]["p_evidence"] is False and "not evidence of leakage" not in marks["x"][0]["why"]
     # everything holds but x has no clean hit: not marked, with the reason
     pair = bleed_pair(None, CELLS, -30.0, tom_hit(), CELLS, -10.0)
     marks = drumroles.mark_bleed(pair)

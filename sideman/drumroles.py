@@ -1227,7 +1227,7 @@ def _bleed_why(ev: dict) -> str:
         "-" if ev["expected"] is None else "%.0f %%" % (100 * ev["expected"]),
         "" if ev["own_expected"] is None else " and %.0f %% over the %d bars this group plays in" % (100 * ev["own_expected"], ev["own_bars"]),
         "-" if ev["p"] is None else "%.3g" % ev["p"],
-        "" if ev["p_evidence"] is not False else "; p is over the track's bars and is not evidence of leakage here: over this "
+        "" if ev["p_evidence"] is not False or ev["p"] is None or ev["p"] > BLEED_P else "; p is over the track's bars and is not evidence of leakage here: over this "
         "group's own bars the other group plays at these 16ths about as often as they coincide")
     if ev["co_located"]:
         co = "co-located: chance cannot tell (%s); judged on level and likeness alone" % co

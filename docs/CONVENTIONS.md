@@ -624,11 +624,14 @@ group is marked bleed of a group in another stem only when **all three** hold:
    a partial overlap, the margin a long stem where a small excess is
    "significant", the p value a few hits.
    `p` is over the **track's** bars, which overstates the evidence for a part
-   that lives in one section (on Flare the kick stem's second group coincides
-   with the snare in 93 % of the bars it plays in, 38 % over the track). The
+   that lives in one section (on Flare, bars 32 to 64, the kick stem's second
+   group coincides with the snare stem's groups in 24 of its 26 hits, 92 %: the
+   snare plays at those 16ths in 38 % of the track's bars and in 93 % of the 7
+   bars the group plays in; the level, 4.7 dB under, is what keeps it unmarked). The
    evidence therefore also gives the chance over the bars the group itself plays
    in (`own_expected`, `own_bars`), and says "not evidence of leakage here" when
-   that is within 10 points of the observed rate. The test itself keeps the
+   that is within 10 points of the observed rate and `p` is small enough to
+   have passed. The test itself keeps the
    track-wide chance: a leak is only there in the bars where its source plays,
    so a chance over the group's own bars has the answer built in (a leaked tom
    fill would always read 100 %) and no leak of a sectional source could be
