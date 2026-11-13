@@ -679,27 +679,37 @@ are one line. Level, leading silence and a 44.1/48/96 kHz rate give no
 reading (at 22.05 kHz the highs are empty and read low). Change the patch,
 record again, compare again until `readings` is empty.
 
-`distance` is one number for how far apart the two hits sound: the
-multi-resolution STFT distance (Yamamoto et al. 2019, with the default
-settings of its PyTorch reference: FFT 512/1024/2048, spectral convergence
-plus mean log-magnitude difference, averaged over the three), with two
-differences from it: symmetric in a and b, and the log term reads nothing
-more than 60 dB under the loudest part of the spectrum (the reference's
-1e-4 floor made it measure how much inaudible tail or noise floor one hit
-had against the other's silence). 0 is the same hit; measured on
-synthetic drums, a decay 25 % longer reads about 0.16, a semitone 0.27,
-a kick against a hat 2.0; noise 80 dB under the peak reads about 0. Two
-unrelated drums read 1.5 to 2.2 and a close pair about 1: it ranks
-sounds by spectral overlap, so two pitches that do not overlap are far
-apart however near. The hits are first aligned on
-their onsets, scaled to the same loudest-1-ms level, and compared over
-the longer of the two (at most 2 s), the shorter counting as silent after
-its end, so a tail above the floor costs. Hits at different sample rates
-are compared at the lower. `distance_terms` splits it into `convergence`
-(loud parts: body, pitch) and `log_magnitude` (quieter parts down to the
-floor: tail, noise, highs) and gives the length compared. It says how far, not what differs: `readings`
-say what. null with `distance_note` when it cannot be computed (a hit
-under 1025 samples after its onset); the readings are still given.
+`distance` is one number for how far apart the spectra of the two hits
+are (not checked against listening): the multi-resolution STFT loss
+(Yamamoto et al. 2019, default settings of its PyTorch reference: FFT
+512/1024/2048, spectral convergence plus mean log-magnitude difference,
+averaged over the three), with four differences. The magnitudes are summed
+into Slaney mel bands first (that library's own mel option; `scale` linear
+is the plain bins). It is symmetric in a and b. The log term reads nothing
+more than 60 dB under the loudest part and averages over the frames where
+either hit is above that, so silence around the hit does not change it; a
+tail or noise bed above that floor does count. And the hits are equalised
+first: DC removed, onsets aligned (12 dB over a noise bed that precedes the
+hit), 25 ms of silence before each, the same loudest-1-ms level, compared
+over the longer of the two (at most 2 s), the shorter counting as silent
+after its end. Hits at different sample rates are compared at the lower;
+the channels of two stereo hits pairwise (an L/R swap reads as a
+difference), a mono hit against stereo's mono mix. 0 is the same spectra.
+Measured on synthetic drums: a decay 25 % longer 0.23, one semitone on a
+200 Hz tom 0.30, a kick against a hat 3.9, noise 80 dB under the peak
+about 0. Limits: a noise-like hit differs from another take of itself
+(the same hat with another noise seed 0.6, a snare 0.45; a hat with a
+50 % longer decay 0.85), so differences under about 0.5 on noisy hits are
+noise; low pitches have a shelf (a 50 Hz kick reads 0.25 from 0.5 to 1.5
+semitones off, then rises; twelve 0.8), so start from the measured pitch;
+there is no ceiling (a hat of 20 ms decay against 400 ms reads 5.5). On
+108 role-sorted one-shots the nearest other sample is in the same folder
+77 % of the time (standard error 4 %, chance 21 %). `distance_terms` splits
+it into `convergence` (loud parts) and `log_magnitude` (quieter parts down
+to the floor) and gives the length compared. It says how far apart two
+spectra are, not which property differs: `readings` say what. null with
+`distance_note` when it cannot be computed (a silent hit, also after DC
+removal or the mono mix); the readings are still given.
 Local only; needs the `listen` extra.
 
 ## Other

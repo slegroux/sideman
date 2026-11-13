@@ -269,50 +269,90 @@ thresholds, not that they are identical. Two drops whose starts were read at
 different times are compared from the later one; two pitches an octave or a
 twelfth apart on the same partials are one line, not a pitch difference.
 
-`sample_compare` also returns `distance`: one number for how far apart two
-hits sound, the score an optimiser can minimise when matching a synth patch
-to a sample. It is the multi-resolution STFT loss of `auraloss`
+`sample_compare` also returns `distance`: one number for how far apart the
+spectra of two hits are, the score an optimiser can minimise when matching a
+synth patch to a sample (`distance_terms` splits it into `convergence` and
+`log_magnitude`). It is the multi-resolution STFT loss of `auraloss`
 (`MultiResolutionSTFTLoss`, default settings) rewritten in numpy: at FFT sizes
 512, 1024 and 2048 (windows of 240, 600 and 1200 samples), spectral
 convergence (how much of the loud spectrum differs) plus the mean
 log-magnitude difference (how much of the quieter spectrum differs: tail,
-noise, highs), averaged over the sizes and split in `distance_terms`. At the
-default it differs from `auraloss` in two ways. It is symmetric (`auraloss`
-divides the convergence by the target alone; here it is the mean of both
-divisions). And the log term clamps magnitudes at 60 dB under the loudest STFT
-magnitude of either hit at that resolution (`floor_db`, 60) instead of at an
-absolute 1e-4, about 120 dB down. On the Bodzin one-shots the absolute floor
-let the log term swing from 0.4 to 3.6 with how much inaudible tail one hit
-had against the other's silence or padding (a kick read 4.8 from a snare whose
-40 dB fall is 508 ms, and closer to a hi tom): the term then measured the
-files' noise floors, not the sounds. `floor_db=None` in
-`oneshot.spectral_distance` is the `auraloss` definition (symmetry aside).
-Before measuring, what is not timbre is equalised: DC removed, the two onsets
-aligned, both scaled to the same loudest 1 ms (its RMS, not the sample peak,
-which one click would set), and both cut to the longer of the two (at most
-2 s), the shorter counting as silent after its end, so a longer tail on one
-side costs, in proportion to how far it rises above the floor (one that has
-fallen 60 dB costs nothing). A hit at another sample rate is compared at the
-lower rate. On synthetic drums (a 200 Hz tone with two harmonics, a kick with
-a pitch glide, a noise hat), 0 is the same hit, also read 5 ms late or at
-another gain (under 1e-9); 0.004 is the same tone started between two samples;
-0.16 is a decay 25 % longer (tau 50 against 40 ms) and 0.68 one 2.5 times
-longer; 0.27 is one semitone and 0.88 seven; noise under the tone's own
-envelope reads 0.016 at 40 dB under, 0.07 at 30 and 0.26 at 20, and a constant
-noise floor 80 dB under the peak 0.0004 (30 dB under: 1.4); a tail cut to
-silence where it is 70 dB down reads 0.0003, where it is 20 dB down 0.11; 2.0
-is a kick against a hat. On 108 real one-shots sorted into role folders (kicks,
-claps and snares, hats, toms, percussion), the nearest other sample is in the
-same folder for 76 % of them, against 21 % expected by chance (every kick's
-nearest is a kick); within-folder pairs read 1.2 on average against 2.1 across
-folders, and unrelated pairs 1.5 to 2.2. It says how far apart two hits are and not which property
-differs: for that read `readings`. The convergence term is linear and
-saturates near 1.4 for two spectra that do not overlap, so two pitches an
-octave apart are about as far as two unrelated drums: it ranks by spectral
-overlap, not by how near a pitch is, and the optimiser must start from the
-measured pitch. It counts the raw level too when asked (`match_level=False`),
-and the windows are in samples, so a score is comparable between files at one
-sample rate, not between 44.1 and 96 kHz.
+noise, highs), averaged over the sizes. It has not been checked against
+listening, only against `sample_analyze`'s readings and role-sorted samples
+(below). The default differs from `auraloss` in four ways, each measured:
+
+- **Mel bands** (`scale="mel"`): the magnitudes are first summed into Slaney
+  mel bands, `auraloss`'s own `scale="mel"`, with 128, 64 and 32 bands at the
+  three sizes (its one band count for all sizes gives empty filters and NaN at
+  512 with 128). A noise burst's bin magnitudes change with the noise
+  realisation and with a one-sample shift; bands average that out. `scale="linear"`
+  is the plain bins.
+- **Symmetric**: `auraloss` divides the convergence by the target's norm
+  alone; here it is the mean of both divisions.
+- **A dynamic-range floor** (`floor_db`, 60): the log term clamps magnitudes
+  at 60 dB under the loudest magnitude of either hit at that resolution, not
+  at an absolute 1e-4 (about 120 dB down), and averages over the frames where
+  either hit is above that floor, so it does not depend on how much silence the
+  files carry. With the absolute floor, the log term on the Bodzin pads swung
+  from 0.4 to 3.6 with how much inaudible tail one hit had against the other's
+  silence: a kick read 4.8 from a snare whose 40 dB fall is 508 ms. A tail or
+  noise bed that rises above the floor does count: a noise bed 50 dB under a
+  hat's peak adds 1.4 (it is 41 dB under the hat's loudest millisecond, 19 dB
+  above the floor), and one 45 dB under a tom adds 0.06 (a tone's loudest bin
+  stands about 25 dB over its mean level, so the bed is under the floor).
+  `floor_db=None` is the `auraloss` definition (symmetry aside).
+- **Equalised first**: DC removed; the onsets aligned (the first 1 ms within
+  40 dB of the loudest, or 12 dB over a noise bed that precedes the hit: a
+  clean hit read late by whole or fractional samples of silence differs by a
+  sample or two, 0.002 for a tone started 0.4 sample off the grid); each hit
+  placed 25 ms of silence after the start so the STFT's reflect padding never
+  mirrors the attack (with 2 ms of lead a one-sample shift of a hat cost 0.15 with
+  linear bins and 0.013 with mel; with 25 ms, 0.012 and 0.006, against 0.23 for
+  the smallest real difference below); both
+  scaled to the same loudest 1 ms (its RMS, not the sample peak, which one click
+  would set; `match_level=False` in `oneshot.spectral_distance` keeps the raw
+  level); both cut to the longer of the two (at most 2 s), the shorter counting
+  as silent after its end, so a tail on one side only costs in proportion to
+  how far it rises above the floor (one that has fallen 60 dB costs nothing).
+  Hits at another sample rate are compared at the lower rate. Channels are
+  compared pairwise, so swapping L and R of a stereo hit reads as a difference;
+  a mono hit against stereo is compared with the stereo's mono mix, which can
+  comb for a wide hit.
+
+Measured values, on synthetic drums (a 200 Hz tom with two harmonics, a 50 Hz
+kick with a pitch glide, noise hats and snares), default settings: 0 for the
+same hit, also read late by whole samples of silence (under 1e-9); a decay 25 %
+longer (tau 50 against 40 ms) 0.23, 2.5 times longer 0.91; one semitone on the
+200 Hz tom 0.30, seven 1.05, twelve 1.39; a kick against a hat 3.9, a hat
+against a snare 3.7. **Low pitches have a shelf**: on the 50 Hz kick 0.05, 0.1,
+0.2, 0.3 and 0.5 semitones read 0.06, 0.11, 0.18, 0.22 and 0.25, then 0.75 to
+1.5 semitones read 0.25, 0.24, 0.24, 0.25 (a local minimum: no step downhill),
+2 semitones 0.27 and twelve 0.79, because partials that do not overlap are as
+far apart at 0.75 semitones as at 1.5. So the distance does not guide pitch
+below about 2 semitones on a low drum; the search must start from the
+measured pitch (`pitch_body_hz`). There is no ceiling: a hat with a 20 ms
+decay against one of 400 ms reads 5.5, and the nearest of the 108 samples below to
+a crash cymbal is 3.5 away.
+Noise: a noise-like hit is not the same as another take of itself: the same hat
+with another noise seed reads 0.6, the same snare 0.45, about two thirds of a
+hat with a 50 % longer decay (0.85). Take 0.5 as the resolution on noisy
+hits: a threshold under it chases noise. Another take of a hat reads 0.6 from it
+and a snare 3.7. A constant noise floor
+80 dB under the peak reads 0.0004, 30 dB under 1.2; a tail replaced by
+silence from where it is 70 dB down reads 0.0003, from 20 dB down 0.19.
+
+Against role-sorted samples (108 one-shots in `_PRODUCTION/Drums`, folders as
+labels; the nearest other sample in the same folder, leave-one-out): 0.77
+(standard error 0.04; 0.21 by chance from the folder sizes) with mel, and
+0.77 with linear bins; per folder, mel: kicks 1.00 (33 files), claps and
+snares 0.84 (31), closed hats 0.50 (12), open hats 0.64 (11), percussion 0.33
+(9), toms 0.78 (9), rides 0 (2); mean distance within a folder 1.5, across
+folders 3.0. The misses are largely real likeness (closed and open hats of
+similar length, rims filed in two folders, a clave next to a clap), but not
+all: the ranking is by spectral overlap, not by pitch proximity or by role.
+It says how far apart two spectra are and not which property differs: for
+that read `readings`. The windows are in samples, so a score is comparable
+between files at one sample rate, not between 44.1 and 96 kHz.
 
 **Limits** (known, not yet handled):
 
