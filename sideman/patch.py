@@ -381,7 +381,13 @@ ASSUMPTIONS = (
     "Reading times: the attack noise reading's weight is taken at the middle of attack_window_ms (the profile's "
     "own window; a Hann window) and the body's at 0.36 of body_window_ms, calibrated on the stand-in; the "
     "extrapolation back to the onset is clamped to +-12 dB. A noise layer is accepted only when the attack's "
-    "energy above 2 kHz (click_db) is within 5 dB of its level and its flatness is at least 0.001 (a tone's and a click's reads 0.0). All three are heuristics to re-check on takes.",
+    "energy above 2 kHz (click_db) is within 5 dB of its level and its flatness is at least 0.001 (a tone's and a click's reads 0.0): then the level is pinned. "
+    "Flatness is taken over 20 Hz to 20 kHz, so noise that is band-limited or low-passed also reads 0.0 (and a "
+    "low-passed one has little above 2 kHz): the gate cannot tell it from window leakage. When it fails but the "
+    "reading is above the floor, the layer is kept with its level free down to NOISE_OFF_DB, so the search can switch "
+    "a phantom layer off and keep a real one (it cannot add one back); the same goes for the tail rule's flat body: a "
+    "noisy body with a long tail and no flat spectrum keeps the two-reading decay, and the noise decay's free range "
+    "is widened up to the tail's value. All of it is heuristics to re-check on takes.",
     "The note is held for at least the longest Decay and the take runs past it (Release = Decay): the length "
     "operator_live returns is a plan for the renderer, not something Live has been asked for.",
 )
@@ -559,10 +565,15 @@ def operator_guess(profile: dict) -> dict:
       noise_attack_ms attack_ms, at least NOISE_ATTACK_FLOOR_MS
       noise_filter_hz  high-pass for a noise-led hit whose bands are empty low (see _noise_filter)
       output_db      Volume: the sample's peak_db minus the peak of one oscillator at 0 dB (+3 tone, +11 noise)
-    A noise layer is only added to a pitched hit when its attack reading is above the leakage floor AND the attack's
-    energy above 2 kHz (click_db) is within HF_MARGIN_DB of it and its spectrum has a flat part (flatness.attack): a glide, a gated tone or a click on a tone read
-    "noise" from window leakage, but have no broadband energy to match it (the Bodzin kick, low tom and clave).
-    A reading under NOISE_FREE_DB leaves the level free, down to NOISE_OFF_DB; a stronger one pins it.
+    A noise layer is added to a pitched hit whenever its attack reading is above the leakage floor. Its level is PINNED
+    only with evidence: the attack's energy above 2 kHz (click_db) within HF_MARGIN_DB of the reading, and a flat
+    part in the spectrum (flatness.attack), and the reading itself over NOISE_FREE_DB. Without the evidence (a glide, a
+    gated tone or a click on a tone read "noise" from window leakage: the Bodzin kick, low tom and clave; but band-limited
+    or low-passed noise reads the same, flatness 0.0 over 20 Hz to 20 kHz) the level is FREE, from NOISE_OFF_DB (off)
+    to 6 dB over the reading: the search switches a phantom layer off and keeps a real one, and it cannot add one back,
+    which is why the layer is never removed. A reading under NOISE_FREE_DB is free too. The start is the reading either way.
+    The decay's range is x/÷3 around its value (4 for a default), and, when the body is noisy with a long tail but not
+    flat (band-passed noise, or a tonal tail: the tail rule needs flatness.body), widened up to the tail's decay.
     Why the level is pinned and the decay free: decay and level lie on a ridge (a longer layer, quieter, scores like
     a shorter, louder one: the search report), so one must be held. The level at its reference time is a direct
     reading, the decay a two-reading derivation under a leakage floor, so the level (at the reading's own time, not
@@ -612,11 +623,13 @@ def operator_guess(profile: dict) -> dict:
         a, b, click = nz.get("attack"), nz.get("body"), p.get("click_db")
         flat = p.get("flatness") or {}
         noise_wanted = a is not None and a > oneshot.NOISE_FLOOR_DB
-        if noise_wanted and (click is None or click < a - HF_MARGIN_DB or (flat.get("attack") or 0.0) < FLAT_ATTACK):
-            noise_wanted = False
+        evidence = noise_wanted and not (click is None or click < a - HF_MARGIN_DB or (flat.get("attack") or 0.0) < FLAT_ATTACK)
+        if noise_wanted and not evidence:
             notes.append("noise_db.attack is %.1f dB but the attack has %s dB above 2 kHz (click_db) and a flatness of %s: "
-                         "no broadband noise to match (window leakage of a glide, a gated tone or a click): no noise layer"
-                         % (a, "None" if click is None else "%.1f" % click, flat.get("attack")))
+                         "that is what window leakage of a glide, a gated tone or a click reads, and also what noise that is "
+                         "band-limited or low-passed reads (flatness 0.0): the layer is kept with its level free down to "
+                         "%.0f dB (off), for the search to decide" % (a, "None" if click is None else "%.1f" % click,
+                                                                       flat.get("attack"), NOISE_OFF_DB))
         if noise_wanted:
             structure["noise_on"] = True
             aw = p.get("attack_window_ms")
@@ -629,8 +642,11 @@ def operator_guess(profile: dict) -> dict:
                 "derived" if aw else "default")
             bw = p.get("body_window_ms") or [40.0, 150.0]
             t_b = bw[0] + NOISE_BODY_FRAC * (bw[1] - bw[0])
-            tau_noise, default_decay = None, False
-            if b is not None and b >= BODY_NOISE_DB and (flat.get("body") or 0.0) >= FLAT_BODY and f40 and f40 > TAIL_RATIO * fall20:
+            tau_noise, default_decay, tail_reach = None, False, None
+            noisy_tail = b is not None and b >= BODY_NOISE_DB and f40 and f40 > TAIL_RATIO * fall20
+            if noisy_tail and (flat.get("body") or 0.0) < FLAT_BODY:        # a flat body is noise; a band-limited one reads 0.0 too
+                tail_reach = (f40 - fall20) / FALL20_PER_T                  # the decay a flat tail would give, kept in reach
+            if noisy_tail and tail_reach is None:
                 tau_noise = (f40 - fall20) * TAU_PER_FALL20
                 reading, conf = "fall_40_ms - fall_20_ms (a body %.0f dB noisy, and a tail %.1f times the first 20 dB, "\
                                 "is the noise's)" % (b, f40 / fall20), "derived"
@@ -660,7 +676,7 @@ def operator_guess(profile: dict) -> dict:
             put("noise_decay_ms", tau_noise / (FALL20_PER_T * TAU_PER_FALL20), reading, conf)
             put("noise_attack_ms", max(NOISE_ATTACK_FLOOR_MS, attack), "attack_ms, floored at %.1f ms" % NOISE_ATTACK_FLOOR_MS,
                 "measured" if attack >= NOISE_ATTACK_FLOOR_MS else "default")
-            if a > NOISE_FREE_DB:
+            if a > NOISE_FREE_DB and evidence:
                 pinned["noise_level_ref_db"] = "decay and level of the noise layer lie on a ridge; the level at its reference time is read directly"
             else:
                 free["noise_level_ref_db"] = (NOISE_OFF_DB, ratio_a + 6.0, "lin")
@@ -675,6 +691,12 @@ def operator_guess(profile: dict) -> dict:
         put("output_db", min(0.0, peak_db - PEAK_DB_AT_0DB["tone"]),
             "peak_db minus %.0f dB (one sine at 0 dB peaks at +3 dBFS)" % PEAK_DB_AT_0DB["tone"], "default")
         free["carrier_hz"] = (patch["carrier_hz"] * 2 ** (-PITCH_BOUND_ST / 12), patch["carrier_hz"] * 2 ** (PITCH_BOUND_ST / 12), "log")
+            if tail_reach is not None and tail_reach > free["noise_decay_ms"][1]:
+                free["noise_decay_ms"] = (free["noise_decay_ms"][0], tail_reach, "log")
+                notes.append("the body is %.0f dB noisy and falls 40 dB in %.1f times its first 20 dB, but its spectrum has no "
+                             "flat part (flatness.body %s: a tonal tail, or band-limited noise): the tail is not taken as the "
+                             "noise's decay, and the noise decay's range is widened up to it (%.0f ms) so the search can reach it"
+                             % (b, f40 / fall20, flat.get("body"), tail_reach))
         if structure["pitch_env_on"]:
             d = patch["pitch_drop_st"]
             w = max(DROP_WIDTH_ST, 0.4 * abs(d))

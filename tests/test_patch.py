@@ -697,9 +697,20 @@ def test_guess_start_beats_a_start_30_percent_off_in_the_same_budget():
 SR48 = 48000
 
 
-def sine_hit(f=800.0, tau=0.005, ndb=-10.0, ntau=None, att=0.001, secs=None, seed=0, drop=0.0, ptau=0.02, gate=None):
+def band_limited(x, lo, hi, sr=SR48):
+    """White noise x restricted to lo..hi Hz by zeroing the other FFT bins, at the rms it had."""
+    spec = np.fft.rfft(x)
+    hz = np.fft.rfftfreq(len(x), 1.0 / sr)
+    spec[(hz < lo) | (hz > hi)] = 0.0
+    y = np.fft.irfft(spec, len(x))
+    return y * math.sqrt(np.mean(x ** 2) / np.mean(y ** 2))
+
+
+def sine_hit(f=800.0, tau=0.005, ndb=-10.0, ntau=None, att=0.001, secs=None, seed=0, drop=0.0, ptau=0.02, gate=None,
+             band=None):
     """A mono [n, 1] hit at 48 kHz: a sine with an exponential amp envelope (tau s), optional glide, noise at ndb against
-    the tone at the onset decaying with ntau (default tau / 2); `gate` ends the tone abruptly (s)."""
+    the tone at the onset decaying with ntau (default tau / 2); `gate` ends the tone abruptly (s); `band` = (lo, hi) Hz
+    restricts the noise to that band (an FFT mask, before the envelope), at the same power."""
     ntau = ntau or tau / 2
     secs = secs or max(0.3, 12 * max(tau, ntau))
     t = np.arange(int(secs * SR48)) / SR48
@@ -707,7 +718,8 @@ def sine_hit(f=800.0, tau=0.005, ndb=-10.0, ntau=None, att=0.001, secs=None, see
     ramp = np.clip(t / att, 0, 1)
     env = np.exp(-t / tau) if gate is None else (t < gate).astype(float)
     tone = np.sin(0.7 + 2 * np.pi * np.cumsum(f_t) / SR48) * env * ramp
-    noise = np.random.default_rng(seed).standard_normal(len(t)) / math.sqrt(2) * 10 ** (ndb / 20) * np.exp(-t / ntau) * ramp
+    white = np.random.default_rng(seed).standard_normal(len(t)) / math.sqrt(2)
+    noise = (white if band is None else band_limited(white, *band)) * 10 ** (ndb / 20) * np.exp(-t / ntau) * ramp
     return (0.5 * (tone + noise))[:, None]
 
 
@@ -972,18 +984,84 @@ def test_to_live_rounds_quantized_values_refuses_bad_raw_ones_and_reads_only_the
         patch.to_live({"Ae Attack": 1.0}, units)
 
 
-@pytest.mark.parametrize("name, attack, click, flat, wanted", [
+@pytest.mark.parametrize("name, attack, click, flat, pinned", [
     ("Bodzin kick (glide: leakage, little above 2 kHz)", -21.2, -28.8, 0.0, False),
     ("Bodzin low tom (a click on a gated tone)", -19.1, -25.5, 0.0, False),
     ("Bodzin clave (energy above 2 kHz, but a tone's flatness)", -18.5, -18.9, 0.0, False),
     ("Bodzin rim (the same)", -19.2, -18.3, 0.0, False),
     ("Bodzin snare (noise)", -6.9, -7.8, 0.075, True),
 ])
-def test_noise_layer_gate_on_the_readings_of_real_samples(name, attack, click, flat, wanted):
+def test_noise_layer_gate_on_the_readings_of_real_samples(name, attack, click, flat, pinned):
     """The click_db and flatness conditions each matter: the kick and low tom fail the energy above 2 kHz, the clave
     and rim pass it on a hard strike and fail only the flatness. Readings are those of the Bodzin one-shots
-    (`~/.omc/reports/sideman-patch-match/scripts/guess_bodzin.out`)."""
+    (`~/.omc/reports/sideman-patch-match/scripts/guess_bodzin.out`). All five are above the leakage floor, so all five
+    keep a layer; only the snare, which passes the gate, has its level pinned. The others have it free, down to off."""
     g = patch.operator_guess(reading(noise_db={"attack": attack, "body": -8.0}, click_db=click,
                                      flatness={"attack": flat, "body": flat}))
-    assert g["structure"]["noise_on"] is wanted, name
-    assert ("noise_level_ref_db" in g["patch"]) is wanted
+    assert g["structure"]["noise_on"] is True and "noise_level_ref_db" in g["patch"], name
+    assert ("noise_level_ref_db" in g["pinned"]) is pinned, name
+    if not pinned:
+        lo, hi, scale = g["free"]["noise_level_ref_db"]
+        assert lo == patch.NOISE_OFF_DB and lo < g["patch"]["noise_level_ref_db"] < hi and scale == "lin", name
+        assert any("kept with its level free" in n for n in g["notes"]), name
+
+
+# ---- review round 2: band-limited noise, the tail, tables with a dip, the search's bound check
+
+NOISE_TOM = dict(f=180.0, tau=0.06, ndb=-10.0, ntau=0.03)
+NOISE_CASES = [          # (name, hit, true onset dB, pinned): the noise's colour is the only thing that changes
+    ("tom, white noise", dict(NOISE_TOM), -10.0, True),
+    ("tom, noise high-passed at 3 kHz", dict(NOISE_TOM, band=(3000.0, 23000.0)), -10.0, True),
+    ("tom, noise band-passed 1-5 kHz", dict(NOISE_TOM, band=(1000.0, 5000.0)), -10.0, False),
+    ("tom, noise band-passed 2-8 kHz", dict(NOISE_TOM, band=(2000.0, 8000.0)), -10.0, False),
+    ("tom, noise low-passed at 1.5 kHz", dict(NOISE_TOM, band=(20.0, 1500.0)), -10.0, False),
+    ("snare 200 Hz, noise band-passed 1-5 kHz", dict(f=200.0, tau=0.04, ndb=-3.0, ntau=0.08, band=(1000.0, 5000.0)), -3.0, False),
+    ("kick, noise low-passed at 4 kHz", dict(f=55.0, tau=0.15, ndb=-10.0, ntau=0.01, band=(20.0, 4000.0), drop=12.0,
+                                             ptau=0.025, att=0.0015), -10.0, False),
+]
+
+
+@pytest.mark.parametrize("name, kw, true_onset, pinned", NOISE_CASES, ids=[c[0] for c in NOISE_CASES])
+def test_every_noise_colour_keeps_its_layer_and_only_one_with_evidence_pins_the_level(name, kw, true_onset, pinned):
+    """A tone plus noise of a known level and colour (FFT mask). White noise and noise high-passed at 3 kHz are flat
+    over some of the spectrum and have energy above 2 kHz at the level of the layer: the gate has its evidence and
+    the level is pinned. Band-passed noise and low-passed noise read a flatness of 0.0 (over 20 Hz to 20 kHz), and the
+    low-passed also has almost nothing above 2 kHz: the gate has no evidence, but the layer is real, so it is kept with
+    the level free from off up to a few dB over the reading, and the true onset is within reach."""
+    for seed in range(3):
+        prof = prof48(sine_hit(seed=seed, **kw))
+        g = patch.operator_guess(prof)
+        q = g["patch"]
+        assert g["structure"]["noise_on"] is True, (name, seed)
+        assert ("noise_level_ref_db" in g["pinned"]) is pinned, (name, seed, prof["flatness"], prof["click_db"])
+        if pinned:
+            assert prof["flatness"]["attack"] >= patch.FLAT_ATTACK
+            assert abs(patch.noise_onset_db(q) - true_onset) <= 3.0, (name, seed, patch.noise_onset_db(q))
+        else:
+            lo, hi, scale = g["free"]["noise_level_ref_db"]
+            assert lo == patch.NOISE_OFF_DB and scale == "lin" and lo < q["noise_level_ref_db"] <= hi
+            top = patch.noise_onset_db(dict(q, noise_level_ref_db=hi))
+            assert top >= true_onset - 3.0, (name, seed, top)           # the search can reach the true level (and off)
+            assert patch.noise_onset_db(dict(q, noise_level_ref_db=lo)) < -40.0           # and switch the layer off
+            assert prof["flatness"]["attack"] < patch.FLAT_ATTACK       # why: band-limited noise reads flatness 0.0
+            if not name.startswith("kick"):      # the kick's noise decay is a default (no body reading): its start is further off
+                assert abs(patch.noise_onset_db(q) - true_onset) <= 3.0, (name, seed, patch.noise_onset_db(q))
+
+
+def test_a_noisy_body_with_a_long_tail_and_no_flat_spectrum_keeps_the_tail_in_reach_of_the_noise_decay():
+    """Body 9 dB down (12 % noise), the 40 dB fall 4.4 times the 20 dB one: a flat body is a noise tail and gives
+    the decay; a body with flatness 0.0 may be a tonal ring or a band-passed noise tail. It is not taken
+    as the noise's decay, but the decay's free range must reach it: it was x/÷3 around a much shorter decay."""
+    kw = dict(fall_20_ms=26.7, fall_40_ms=118.8, noise_db={"attack": -2.0, "body": -9.0}, click_db=-2.0)
+    tail_t = (118.8 - 26.7) / math.log(10) / TAU_FROM_T                  # T of the 20 dB between the two falls
+    band = patch.operator_guess(reading(flatness={"attack": 0.0, "body": 0.0}, **kw))
+    q, (lo, hi, _) = band["patch"], band["free"]["noise_decay_ms"]
+    assert q["noise_decay_ms"] * patch.NOISE_DECAY_FACTOR < tail_t          # the range without the widening misses the tail
+    assert "fall_40_ms - fall_20_ms" not in band["sources"]["noise_decay_ms"]["reading"]
+    assert lo == pytest.approx(q["noise_decay_ms"] / patch.NOISE_DECAY_FACTOR) and hi == pytest.approx(tail_t, rel=1e-6)
+    assert any("widened" in n for n in band["notes"])
+    flat = patch.operator_guess(reading(flatness={"attack": 0.05, "body": 0.07}, **kw))
+    assert "fall_40_ms - fall_20_ms" in flat["sources"]["noise_decay_ms"]["reading"]       # a flat body: the tail is the decay
+    assert not any("widened" in n for n in flat["notes"])
+    no_tail = patch.operator_guess(reading(flatness={"attack": 0.0, "body": 0.0}, **dict(kw, fall_40_ms=60.0)))
+    assert not any("widened" in n for n in no_tail["notes"])            # no tail past 2.5 times the 20 dB fall: nothing to widen
