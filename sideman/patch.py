@@ -9,7 +9,10 @@ a round is one batch of `population` renders and there are only about eight roun
 sample-and-select method with no gradient and no model to fit (a full covariance, as CMA-ES keeps, cannot be
 estimated from so few samples); steps adapt per parameter by whether the selected moves agree in direction.
 The search is judged by the score it reaches, not by the parameters it returns: parameters that trade off against
-each other (a noise layer's decay and level) are not individually recovered.
+each other (a noise layer's decay and level) are not individually recovered. In `operator_guess`, a noise layer
+whose reading is weak (under NOISE_FREE_DB) or lacks evidence (the gate failed) has both its level and its decay
+free, so the two can trade off along the ridge a longer, quieter layer shares with a shorter, louder one, and the
+search cannot separate them; only a strong layer with evidence has its level pinned.
 Choices that are not obvious from the code:
 
 - A patch is a dict of name -> float. `bounds` maps a name to (low, high) or (low, high, "log"); times and
@@ -367,11 +370,15 @@ ASSUMPTIONS = (
     "under the carrier, Coarse 1, Fine 59 to 122; Coarse 2 or more only above about 25 kHz. A Coarse and A Fine are "
     "passed as raw values if the units table has no row for them: confirm their display numbers equal the raw ones.",
     "Global Time = 0 % and Time < Key = 0 % leave every envelope time as set (Time scales them by about e^(0.023 per "
-    "%): measured 2026-11-09); Transpose 0; Tone, Spread, Glide On, Shaper, LFO On = 0 and Pan are left at the "
-    "device's defaults or the Set's state, not read: a scratch Operator must start from the Init preset.",
+    "%): measured 2026-11-09); operator_live writes LFO On = 0, Time = 0 and Time < Key = 0 itself. Transpose 0, "
+    "Tone, Spread, Glide On, Shaper and Pan are left at the device's defaults or the Set's state, not read: a "
+    "scratch Operator must start from the Init preset.",
     "Ae/Be Init and Peak levels, Ae Mode / Ae Loop (no loop), and Ae/Be Retrig are left at the device's defaults; "
     "Sustain is -inf and Release = Decay as in bzkit.py. Osc level < velocity and < key are left at their defaults "
     "(bzkit.py set 35 % level < velocity): the levels assume the default velocity response at velocity 100.",
+    "Pe Mode, Pe Loop, Pe Retrig, Pe Release and Pe End are left at the device's defaults: they matter after the "
+    "note-off (a pitch envelope that loops, or whose release moves the pitch again, would change the tail), and the "
+    "guess holds the note for the longest decay. Confirm they are off / zero on the Init preset.",
     "The profile's attack_ms equals Operator's Attack time: the profile reads the envelope's rise over whole periods "
     "and a linear ramp reads 89 % of its length, while Operator's attack may not be linear.",
     "Filter On / Filter Type / Filter Freq: type 1 is the high-pass (bzkit.py: 0 LP, 1 HP, 2 BP in the XML). "
@@ -684,6 +691,12 @@ def operator_guess(profile: dict) -> dict:
                              "(down to %.0f dB, off), not pinned" % (a, oneshot.NOISE_FLOOR_DB, NOISE_OFF_DB))
             nfactor = DEFAULT_NOISE_FACTOR if default_decay else NOISE_DECAY_FACTOR
             free["noise_decay_ms"] = (patch["noise_decay_ms"] / nfactor, patch["noise_decay_ms"] * nfactor, "log")
+            if tail_reach is not None and tail_reach > free["noise_decay_ms"][1]:
+                free["noise_decay_ms"] = (free["noise_decay_ms"][0], tail_reach, "log")
+                notes.append("the body is %.0f dB noisy and falls 40 dB in %.1f times its first 20 dB, but its spectrum has no "
+                             "flat part (flatness.body %s: a tonal tail, or band-limited noise): the tail is not taken as the "
+                             "noise's decay, and the noise decay's range is widened up to it (%.0f ms) so the search can reach it"
+                             % (b, f40 / fall20, flat.get("body"), tail_reach))
             pinned["noise_ref_ms"] = pinned["noise_attack_ms"] = "set from the reading, not searched"
         elif a is None or a <= oneshot.NOISE_FLOOR_DB:
             notes.append("noise_db.attack is %s: no noise layer" % ("missing" if a is None else "%.1f dB, under the %.0f dB floor "
@@ -691,12 +704,6 @@ def operator_guess(profile: dict) -> dict:
         put("output_db", min(0.0, peak_db - PEAK_DB_AT_0DB["tone"]),
             "peak_db minus %.0f dB (one sine at 0 dB peaks at +3 dBFS)" % PEAK_DB_AT_0DB["tone"], "default")
         free["carrier_hz"] = (patch["carrier_hz"] * 2 ** (-PITCH_BOUND_ST / 12), patch["carrier_hz"] * 2 ** (PITCH_BOUND_ST / 12), "log")
-            if tail_reach is not None and tail_reach > free["noise_decay_ms"][1]:
-                free["noise_decay_ms"] = (free["noise_decay_ms"][0], tail_reach, "log")
-                notes.append("the body is %.0f dB noisy and falls 40 dB in %.1f times its first 20 dB, but its spectrum has no "
-                             "flat part (flatness.body %s: a tonal tail, or band-limited noise): the tail is not taken as the "
-                             "noise's decay, and the noise decay's range is widened up to it (%.0f ms) so the search can reach it"
-                             % (b, f40 / fall20, flat.get("body"), tail_reach))
         if structure["pitch_env_on"]:
             d = patch["pitch_drop_st"]
             w = max(DROP_WIDTH_ST, 0.4 * abs(d))
@@ -736,7 +743,9 @@ def search_arguments(guess: dict, units: dict | None = None) -> dict:
     units table, each bound is pulled in toward the start (halving the distance, up to 30 times) until the voice
     at that bound converts through to_live: one candidate out of the table's range would stop the search
     (a render that raises ends it), so the search is never offered one. Raises ValueError when the start itself
-    does not convert."""
+    does not convert. The check is one parameter at a time, the others at their start values: a combination of
+    bounds (two decays both at their long end) is not checked, and may still fall outside a table. The corners are
+    not checked: 2^n voices for n free parameters, and pulling in one bound at a time would not say which to pull."""
     start, bounds = dict(guess["patch"]), dict(guess["free"])
     if units is None:
         return {"start": start, "bounds": bounds}
