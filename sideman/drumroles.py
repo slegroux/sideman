@@ -79,7 +79,8 @@ Choices that are not obvious from the code:
   every other hit goes to the nearest of the sample's medoids if within `threshold` of it (n * k distances for k
   groups), and what is left over is sampled again, until nothing is or `max_groups` groups exist. Overlapped hits cost
   one distance per group. `stability_runs` regroupings with a shifted sample reuse every distance already measured, and
-  cost about as much again for each. The hits are put in time order first, so the order they come in never matters;
+  cost about as much again for each (Flare hh, bars 32-64, 374 hits: 41 s; the whole stem, 2522 hits: 441 s, 175 ms a
+  hit, with the default two regroupings and the pitch reads of the groups that have one). The hits are put in time order first, so the order they come in never matters;
   ties go to the earlier hit. Memory: the stem as float64.
 - Sections do not regroup: a section's groups are the stem's groups restricted to the hits whose bar lies in the section
   (the same ids in every section; the count, pattern, level, spread and clean hit are the section's own, `stability`
