@@ -505,7 +505,12 @@ hit before trusting one.
 A group is **named only when it is eligible**: at least 4 measured hits,
 `stability` measured (it is not on a stem with no more measured hits than the
 sample of 32, nor for a tentative group) and at least 0.75, and `separation`
-over the grouping threshold (1.5; a lone group has no neighbour and passes).
+over the grouping threshold (1.5). `separation` is measured against the nearest group
+of at least 4 measured hits (`hit_groups` also keeps `separation_any` and
+`nearest_any`, against any group): a one-to-three hit satellite beside a big group
+says nothing about whether two sounds are apart (on Flare a 3-hit group at 1.21
+had kept the 57-hit toms group from a name). A group with no such neighbour has
+`separation` None, no rival, and passes that test, as a lone group does.
 Otherwise it keeps the neutral name and the reason says which test it failed.
 The rule is the second review's: on the Flare hats, groups at stability
 0.79-0.91 were the ones the sample did not move, 0.13-0.69 the ones it did.
@@ -583,6 +588,16 @@ group is marked bleed of a group in another stem only when **all three** hold:
    sounds measured (2.5 over a bleed bed, 2.8 for closed against open hat).
    Without a clean hit on either side the test is not made and the group is
    not marked; the evidence says so.
+
+**One source split over several groups.** A separator, or the grouping, can split one
+source into several groups of its stem, so that no single group coincides enough.
+A group that fails the first test against every group of another stem is also
+tested against the union of that stem's groups that were not marked (at least two):
+the chance rate is computed the same way from the 16ths where any of them plays.
+It never marks on coincidence alone: the level is read over all coincident pairs,
+each hit at its own level, and the clean hit must be within 2.0 of the clean hit
+of every group a coincident pair belongs to (the furthest counts). It is reported
+separately (`union` in the answer; the evidence says "the union of groups ...").
 
 A marked group stays in the output with its `evidence` (hits that coincide,
 `rate`, `expected`, `p`, `louder_db`, `distance`) and is left out of the stem's
