@@ -854,9 +854,11 @@ def _pattern_numbers(use: dict) -> dict:
 
 
 def _enough(in_use: int, known: int, total: int, needed: int, known_min: int) -> bool:
-    """`needed` of `total` 16ths in use, judged over the known ones: at least `known_min` known and at least the same share
-    of them (rounded up) in use, so an unknown 16th counts neither for nor against."""
-    return known >= known_min and in_use >= math.ceil(needed / total * known - 1e-9)
+    """`needed` of `total` 16ths in use, judged over the known ones: at least `known_min` known and no more than
+    `total - needed` of the known ones empty (not in use), so an unknown 16th counts neither for nor against. Monotone: a
+    16th that is in use and becomes unknown (hidden) leaves the number of empty ones as it was, so it never takes a name away;
+    the share of the known ones this replaces did (8 known, 6 in use: named; 7 known, 5 in use: not)."""
+    return known >= known_min and known - in_use <= total - needed
 
 
 def _unknown_text(unknown: int, what: str) -> str:
@@ -944,9 +946,10 @@ def _no_rule(kind: str, use: dict, m: dict | None, why_no_clean: str | None, rea
         if off_known < OFFBEAT_KNOWN:
             parts.append("only %d of 4 offbeats could be observed (%d needed to name an offbeat hat)" % (off_known, OFFBEAT_KNOWN))
         parts.append("%.0f %% of its hits on the offbeats, %d of %d known offbeats%s and %d of %d known odd 16ths%s in use over the "
-                     "bars they could be seen in (a name needs %.0f %% and %d of 4, or %d of 8; at least %d and %d known)" % (
+                     "bars they could be seen in (a name needs %.0f %% and at most %d of the 4 offbeats empty, or at most %d of the 8 odd 16ths "
+                     "empty; at least %d and %d known)" % (
                          100 * pn["share_off"], off_used, off_known, _unknown_text(off_unk, "offbeats"), odd_used, odd_known,
-                         _unknown_text(odd_unk, "odd 16ths"), 100 * OFFBEAT_SHARE, OFFBEAT_STEPS, ODD_STEPS, OFFBEAT_KNOWN, ODD_KNOWN))
+                         _unknown_text(odd_unk, "odd 16ths"), 100 * OFFBEAT_SHARE, 4 - OFFBEAT_STEPS, 8 - ODD_STEPS, OFFBEAT_KNOWN, ODD_KNOWN))
         parts.append("%.1f hits a bar on the offbeats and %.1f on the odd 16ths, over its own bars (a name needs %.0f and %.0f)" % (
             pn["off_per_bar"], pn["odd_per_bar"], OFFBEAT_PER_BAR, ODD_PER_BAR))
     if m is None:
@@ -1018,7 +1021,7 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
     "measures" holds, per 16th, `steps` (see `_use`): the bars the group plays there, the bars it could be seen in, and the
     shares of its own bars and of the observable ones, with "in use", "not in use" or "unknown" (observable in under
     OBSERVE_MIN bars: it counts neither for nor against); the hh pattern rules judge in-use over the known 16ths only
-    (at least ODD_STEPS of 8, or the same share of the known ones rounded up, with ODD_KNOWN known; the offbeats the same),
+    (at most 8 - ODD_STEPS of the known odd 16ths empty, with at least ODD_KNOWN known; the offbeats 4 - OFFBEAT_STEPS and OFFBEAT_KNOWN),
     and a name that was given with unknown 16ths says how many in `note`. A result without `hidden_cells` and
     `unmeasured_cells` has nothing hidden: every bar the group plays in is observable."""
     thr, sr = result["threshold"], result["sample_rate"]

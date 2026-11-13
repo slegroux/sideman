@@ -531,9 +531,13 @@ bars of four reads 25 %. A 16th observable in fewer than 4 bars is *unknown*: it
 counts neither for nor against, and a name given with unknown 16ths says how many
 in its `note`. The per-16th bar counts and shares (over all bars and over the
 observable ones) are in each role's `steps`. "n of m in use" is read over the
-known 16ths: the share asked for (6 of 8, 3 of 4) of the known ones, rounded up,
-and **at least as many known as the rule asks in use**: 6 of the 8 odd 16ths for
-`hh 16th`, 3 of the 4 offbeats for `hh offbeat`. A group seen at only half the
+known 16ths: **at most 2 of the known odd 16ths empty** (8 - 6) for `hh 16th`, at
+most 1 of the known offbeats empty (4 - 3) for `hh offbeat`, and **at least as many
+known as the rule asks in use**: 6 of the 8 odd 16ths, 3 of the 4 offbeats. (The rule
+first took the same share of the known ones, rounded up. That is not monotone: 8
+known with 6 in use was named and 7 known with 5 in use, the same group with one
+in-use 16th hidden under a tail, was not. Counting the empty ones is monotone, and an
+unknown 16th still counts neither for nor against.) A group seen at only half the
 steps is not named from them: on Flare a hat group seen at its four "e" steps,
 its four "a" steps hidden under a tail, passed 4 of 4 known and was named from half
 the evidence. With fewer known the group stays neutral, "only N of 8 odd 16ths could
@@ -547,11 +551,11 @@ is judged over that section, not over the stem.
 |------|------|------|-----------------------------|
 | hh | `hh offbeat` | at least 90 % of the hits on steps 2, 6, 10, 14, at least 3 of those 4 in use (of the known ones), and **at least 2 hits a bar on them** over the group's own bars | 90 %: chosen, a tenth of the hits may be strays or assigned to the wrong 16th; 3 of 4: one offbeat may be taken by the other hat (Flare hh group 0 plays its four offbeats in 56 % to 89 % of the stem's bars: 2.2 to 3.6 a bar); 2 a bar: half of the 4, chosen (one hit a bar rotating over the offbeats put each in use in a quarter of the bars and was named) |
 | hh | `hh 16th` | at least 6 of the 8 odd 16ths in use, and **at least 4 hits a bar on them** over the group's own bars | chosen: half of the 8 (2 hits a bar rotating over the odd 16ths put each in use in a quarter of the bars and was named); a 16th-note hat plays the "e" and "a" of each beat, and 6 of 8 leaves two gaps (4 of 8 let a hat that plays only the "e" of each beat, Flare hh group 2, take the name); an offbeat group has none of them |
-| hh | `hh open` | neither pattern fits and the clean hit falls 20 dB in 140 ms or more | `fall_20_ms` of the 22 closed and open hats of `_PRODUCTION/Drums` that could be measured (below) |
-| snare | `rim` | the clean hit falls 20 dB in under 30 ms | the library's 3 rims: 5, 19 and 28 ms; its other 30 claps and snares: 35 to 167 ms. Also under 30 ms, so named `rim` in a snare stem: 5 hats (1 closed, 4 open: 15 to 29 ms) and 1 clave (26.7 ms) |
+| hh | `hh open` | neither pattern fits and the members read fall 20 dB in 140 ms or more | `fall_20_ms` of the 22 closed and open hats of `_PRODUCTION/Drums` that could be measured (below) |
+| snare | `rim` | the members read fall 20 dB in under 30 ms | the library's 3 rims: 5, 19 and 28 ms; its other 30 claps and snares: 35 to 167 ms. Also under 30 ms, so named `rim` in a snare stem: 5 hats (1 closed, 4 open: 15 to 29 ms) and 1 clave (26.7 ms) |
 | snare | `snare` | not a rim, and the noise share of the body is over -12.0 and at most -1.0 dB (a tone under the noise, not all tone) | the library (108 samples, rim rule first): its 9 snares (7 snares, 2 labelled clap + snare) read -9.1 to -1.0, 9 of 9 named; its 9 toms -40.6 to -14.8 and its 33 kicks -39.7 to -23.0, 0 of 42 (at most -1.0 alone would have named all 9 toms and 31 of the 33 kicks that could be read); the other 14 claps -0.3 to 0 stay neutral. **Still named: 1 clave (Clave Mian, -8.9 dB) and 7 hats (3 closed, 4 open, -3.3 to -1.7)**: nothing read here tells a hat's or a clave's noise from a snare's, which is why the name is only "passed this rule" |
-| toms | `tom` | the clean hit is pitched | `profile_array`'s `pitched`; the library's toms are all pitched (53 to 578 Hz) |
-| kick | `kick` | pitched, body at most 70 Hz | the library's 33 kicks: 28 to 56 Hz |
+| toms | `tom` | the members read are pitched | `profile_array`'s `pitched`; the library's 9 toms are all pitched (53 to 578 Hz). Also pitched: its 33 kicks, 4 snares or claps and 4 percussion samples, so a kick in the toms stem is a `tom` (the word means "pitched, in the toms stem") |
+| kick | `kick` | pitched, body at most 70 Hz | the library's 33 kicks: 28 to 56 Hz. Also pitched at 70 Hz or under: the library's 53 Hz low tom (BZ LowTom Astronautin), which a kick stem would name `kick` |
 
 **The measurement rules read members, not one hit.** `hh open`, `rim`,
 `snare`, `tom` and `kick` read the readings of up to 8 complete members of the

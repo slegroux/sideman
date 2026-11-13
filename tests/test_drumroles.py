@@ -792,11 +792,13 @@ def test_names_a_step_observable_in_too_few_bars_is_unknown_counts_for_nothing_a
     assert "named without 2 of the 8 odd 16ths: [1, 5]" in e["note"] and "under 4 bars" in e["note"] and e["note"] == out["roles"][0]["note"]
     assert "6 of 6 known odd 16ths in use (2 of the odd 16ths unknown" in e["rule"]
     # an unknown step counts neither for nor against: a group that plays only 3 of its 6 known odd 16ths is not named
-    # with 2 unknown, 5 of the 6 known in use is 3/4 of them (6 of 8 asked, scaled to the known ones): named; 4 of 6 is not
+    # with 2 unknown, 5 of the 6 known in use leaves 1 empty: named; 4 of 6 leaves 2 empty, the 2 a 16th hat may have (8 - 6),
+    # so it is named too (it was not, when the rule read the same share of the known ones: 4 of 6 is under 3/4; that rule took a
+    # name away from a group when one of its in-use steps was hidden, see the monotone test); 3 of 6 leaves 3 empty and is not
     five = fake_result([{"steps": [7, 9, 11, 13, 15, 0, 4, 8, 12], "audio": noise_hit(1, 0.012), "hidden": hide}])
     assert names(five, "hh")[0] == ["hh 16th"] and "5 of 6 known odd 16ths in use" in names(five, "hh")[1]["groups"][0]["rule"]
     four = fake_result([{"steps": [7, 9, 11, 13, 0, 4, 8, 12], "audio": noise_hit(1, 0.012), "hidden": hide}])
-    assert names(four, "hh")[0] == ["hh 1"]
+    assert names(four, "hh")[0] == ["hh 16th"] and "4 of 6 known odd 16ths in use" in names(four, "hh")[1]["groups"][0]["rule"]
     few = fake_result([{"steps": [3, 7, 11, 0, 4, 8, 12], "audio": noise_hit(1, 0.012), "hidden": hide}])
     assert names(few, "hh")[0] == ["hh 1"]
     # too few known (3 of 8: the other 5 unknown) is not enough to name it, whatever the three show: a 16th hat needs at least
@@ -805,6 +807,26 @@ def test_names_a_step_observable_in_too_few_bars_is_unknown_counts_for_nothing_a
     scarce = fake_result([{"steps": ODDS + [0, 4, 8, 12], "audio": noise_hit(1, 0.012), "hidden": hid5}])
     got, out = names(scarce, "hh")
     assert got == ["hh 1"] and "only 3 of 8 odd 16ths could be observed (6 needed to name a 16th hat)" in out["groups"][0]["reason"] and len(out["groups"][0]["measures"]["unknown_steps"]) == 5
+
+
+def test_hiding_a_16th_that_is_in_use_never_takes_a_name_away():
+    # a 16th hat may leave 2 of the 8 odd 16ths empty (an offbeat hat 1 of the 4); a step that is in use and becomes unknown
+    # (hidden) leaves the empty ones as they were. The old rule (the share asked for, of the known ones, rounded up) named 8 known
+    # with 6 in use and not 7 known with 5 in use
+    assert drumroles._enough(6, 8, 8, 6, 6) and drumroles._enough(5, 7, 8, 6, 6) and drumroles._enough(4, 6, 8, 6, 6)
+    assert not drumroles._enough(3, 6, 8, 6, 6) and not drumroles._enough(5, 5, 8, 6, 6)       # 3 empty; only 5 known
+    assert drumroles._enough(3, 4, 4, 3, 3) and drumroles._enough(2, 3, 4, 3, 3) and not drumroles._enough(1, 3, 4, 3, 3)
+    for total, needed, known_min in ((8, 6, 6), (4, 3, 3)):
+        for known in range(known_min + 1, total + 1):
+            for used in range(1, known + 1):
+                if drumroles._enough(used, known, total, needed, known_min):
+                    assert drumroles._enough(used - 1, known - 1, total, needed, known_min)
+    # the same through the names: 6 of 8 in use is named; with one of those 6 hidden in 6 of 8 bars it is still named
+    six = [1, 3, 5, 7, 9, 11, 0, 4, 8, 12]
+    assert names(fake_result([{"steps": six, "audio": noise_hit(1, 0.012)}]), "hh")[0] == ["hh 16th"]
+    hidden = fake_result([{"steps": six, "audio": noise_hit(1, 0.012), "hidden": [(b, 1) for b in range(2, 8)]}])
+    got, out = names(hidden, "hh")
+    assert got == ["hh 16th"] and out["groups"][0]["measures"]["unknown_steps"] == [1] and "5 of 7 known odd 16ths in use" in out["groups"][0]["rule"]
 
 
 def test_names_a_16th_hat_needs_six_of_the_eight_odd_16ths_known_not_only_the_ones_it_was_seen_at():
