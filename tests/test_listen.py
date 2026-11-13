@@ -1563,11 +1563,12 @@ def test_drum_layer_an_808_late_and_lower_is_not_at_the_same_place_and_reads_onl
 @pytest.mark.parametrize("delta", [0.006, 0.010])
 def test_drum_layer_the_reference_hit_last_in_its_slice_is_compared_over_the_same_length(tmp_path, delta):
     """One tom (100 Hz, tau 150 ms, 0.5 s long) on beat 4 of a one-bar section at 120 BPM, and an accent twice as
-    loud 2 ms after the reference's slice ends (a beat past the section). The tom is the last hit in the reference's
-    slice. The same audio read 6 or 10 ms late puts that accent's first ms inside our slice: our cut must stop where
-    the reference's does, or it holds the accent and reads an attack a second long."""
+    loud 2 ms after the reference's slice ends (a beat past the section, 50 ms short of the beat line). The tom is
+    the last hit in the reference's slice. Our slice runs 30 ms longer, and read 6 or 10 ms late it holds the
+    accent's first 34 or 38 ms: our cut must stop where the reference's does, or it holds the accent and reads an
+    attack about a second long."""
     total = 5.0
-    x = 0.5 * hit_train(100, 0.15, [2.0], total) + 1.0 * hit_train(100, 0.15, [3.002], total)
+    x = 0.5 * hit_train(100, 0.15, [2.0], total) + 1.0 * hit_train(100, 0.15, [2.952], total)
     d = {}
     for side in ("ref", "ours"):
         f = tmp_path / side

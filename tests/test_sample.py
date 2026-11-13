@@ -1054,3 +1054,20 @@ def test_hit_cut_finds_the_same_onset_wherever_it_is_asked_for_near_the_hit():
     found = {oneshot.hit_cut(np.stack([x, x], 1), SR, on / SR + d / 1000, 0.1)[1] for d in np.arange(-8.0, 8.01, 0.5)}
     assert len(found) == 1, sorted((f - on / SR) * 1000 for f in found)
     assert -4.0 <= (found.pop() - on / SR) * 1000 <= 0.0
+
+
+@pytest.mark.parametrize("tau,gap", [(0.08, 0.20), (0.12, 0.15)])
+def test_hit_cut_reads_a_low_tail_over_20_ms_not_one_frame(tau, gap):
+    """A kick gliding 24 st down to 55 Hz (decay `tau`) and the same kick `gap` s later, on its tail. One 1 ms frame
+    of a 55 Hz tail is loud or quiet with the phase it falls on, so a tail level read from the window's first frame
+    puts the onset in the tail (tens of ms early) for some `at`. Read as the loudest 1 ms over 20 ms, every `at` within
+    6 ms of the second kick finds one onset, at the kick's start (within 2 ms after it: the sine starts at 0)."""
+    t = np.arange(int(0.6 * SR)) / SR
+    h = np.sin(2 * np.pi * np.cumsum(55.0 * 2 ** (2.0 * np.exp(-t / 0.02))) / SR) * np.exp(-t / tau)
+    x = np.zeros(2 * SR)
+    for s0 in (int(0.5 * SR), int((0.5 + gap) * SR)):
+        x[s0:s0 + len(h)] += h[:len(x) - s0]
+    on = int((0.5 + gap) * SR) / SR
+    found = {oneshot.hit_cut(np.stack([x, x], 1), SR, on + d / 1000, 0.2)[1] for d in np.arange(-6.0, 6.01, 0.25)}
+    assert len(found) == 1, sorted((f - on) * 1000 for f in found if f is not None)
+    assert 0.0 <= (found.pop() - on) * 1000 <= 2.0
