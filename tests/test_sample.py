@@ -1114,10 +1114,9 @@ def dist(a, b, **kw):
 
 @functools.lru_cache(maxsize=None)
 def smallest():
-    """The smallest real difference tested below: the least of a decay 25 % longer (tau 50 against 40 ms),
-    one semitone, and noise 60 dB under the tone."""
-    x = tom()
-    return min(dist(tom(0.05), tom(0.04)), dist(tom(), tom(semitones=1)), dist(x, noisy(x, 60)))
+    """The smallest real difference tested below: the least of a decay 25 % longer (tau 50 against 40 ms) and
+    one semitone. (Noise 60 or 40 dB under the tone is under the default 60 dB floor of the spectrum: not read.)"""
+    return min(dist(tom(0.05), tom(0.04)), dist(tom(), tom(semitones=1)))
 
 
 @pytest.mark.parametrize("name,x", [("tom", tom()), ("kick", kick()), ("hat", hat()),
@@ -1145,7 +1144,7 @@ def test_distance_the_same_hit_read_late_is_not_a_difference(name, x, ms):
 @pytest.mark.parametrize("ms", [5.0, 12.3])
 def test_distance_a_tone_started_between_two_samples_is_far_under_the_smallest_real_difference(ms):
     # 12.3 ms is 590.4 samples: the second hit starts 0.4 samples off the first's grid.
-    # What is left (about 8 % of the smallest real difference) is the sub-sample position of the onset
+    # What is left (a few % of the smallest real difference) is the sub-sample position of the onset
     x = delayed(200, 0.04, 0.0, partials=BASE)
     d = dist(x, delayed(200, 0.04, ms / 1000, partials=BASE))
     assert d < 0.1 * smallest(), (d, smallest())
@@ -1193,7 +1192,7 @@ def test_distance_a_longer_tail_on_one_side_costs_and_costs_more_the_more_is_mis
     # the same decay; one file is cut after 300 ms or 150 ms, the other runs 600 ms (e^-6 = -52 dB at the end)
     full = hit(200, 0.1)
     cut300, cut150 = dist(full, full[:int(0.3 * SR)]), dist(full, full[:int(0.15 * SR)])
-    assert cut300 > 0.3 * smallest() and cut150 > cut300, (cut300, cut150)
+    assert cut300 > 0.2 * smallest() and cut150 > cut300, (cut300, cut150)
     # over a shared length (max_s) nothing differs
     assert dist(full, full[:int(0.15 * SR)], max_s=0.15) < 1e-9
     # and the shared 150 ms of a different decay still costs, as the decay test shows
@@ -1250,3 +1249,42 @@ def test_distance_through_the_tool_says_why_when_it_has_none(tmp_path):
     out = json.loads(S.sample_compare(str(p), str(p)))
     assert out["distance"] is None and "too short" in out["distance_note"]
     assert "readings" in out and "distance_terms" not in out
+
+
+# ---------------------------------------------------------------- distance: the dynamic-range floor
+
+def floor_noise(x, db):
+    """x plus a constant white noise floor `db` under its sample peak (a recording's noise floor, not the tone's decay)."""
+    w = np.random.default_rng(5).standard_normal(x.shape)
+    return x + w * np.abs(x).max() * 10 ** (-db / 20)
+
+
+def test_distance_a_noise_floor_80_db_down_is_not_read_but_30_db_down_is():
+    x = tom()
+    quiet, loud = dist(x, floor_noise(x, 80)), dist(x, floor_noise(x, 30))
+    assert quiet < 0.01 * loud, (quiet, loud)
+    # the reference definition (no floor) reads that floor: the ratio is far larger there, so the floor is what does it
+    raw_quiet, raw_loud = (dist(x, floor_noise(x, db), floor_db=None) for db in (80, 30))
+    assert raw_quiet > 0.05 * raw_loud and raw_quiet / raw_loud > 20 * quiet / loud, (raw_quiet, raw_loud)
+
+
+def test_distance_a_tail_replaced_by_silence_costs_what_is_audible_of_it():
+    # tau 50 ms, the envelope e^(-t/tau) is `db` down at tau * ln(10^(db/20)): 403 ms for 70 dB, 115 ms for 20 dB
+    x = hit(200, 0.05)
+
+    def silent_from(db):
+        y = x.copy()
+        y[int(0.05 * math.log(10 ** (db / 20)) * SR):] = 0.0
+        return y
+    gone70, gone20 = dist(x, silent_from(70)), dist(x, silent_from(20))
+    assert gone70 < 0.01 * smallest(), gone70
+    assert gone20 > 0.3 * smallest() and gone20 > 100 * gone70, (gone20, gone70)
+
+
+def test_distance_floor_none_is_the_references_definition_and_a_floor_can_only_lower_the_log_term():
+    a, b = tom(0.04), tom(0.10)
+    ref, floored = (oneshot.distance_terms(a, b, SR, floor_db=f) for f in (None, 60.0))
+    assert floored["convergence"] == pytest.approx(ref["convergence"], rel=1e-12)   # linear: not touched
+    assert floored["log_magnitude"] < ref["log_magnitude"]
+    assert dist(a, b) == dist(a, b, floor_db=60.0) != dist(a, b, floor_db=40.0)      # the default is 60 dB
+    assert oneshot.distance_terms(a, b, SR, floor_db=120.0)["log_magnitude"] == pytest.approx(ref["log_magnitude"], rel=0.02)
