@@ -309,11 +309,13 @@ FALL20_PER_T = 0.29      # Operator, slope 1: the amp envelope falls 20 dB in 0.
 TAU_PER_FALL20 = 1.0 / math.log(10.0)       # tau = fall_20 / ln(10), for an exponential amplitude decay
 ATTACK_FLOOR_MS = 1.5    # a tone attack of 0.1 ms clicks (measured 2026-11-11): never less
 NOISE_ATTACK_FLOOR_MS = 0.1   # noise has no tone to click: the hand-built hats and claps use 0.1 ms
+TAIL_MS = 100.0         # track readings from here on, when they agree, are the carrier the glide settled on
 PITCH_BOUND_ST = 0.5     # the carrier may move this far either way in the search
 NOISE_REF_MS = 15.0      # the profile's "attack" noise reading is a Hann window over 0-30 ms: its centre
 NOISE_BODY_MS = 80.0     # ...and the "body" reading's centre of weight (40-150 ms of a decaying hit)
 PEAK_DB_AT_0DB = {"tone": 3.0, "noise": 11.0}   # peak of a voice at osc level 0 dB, velocity 100 (measured 2026-11-11)
 FILTER_CLEAR_DB = 10.0   # a band within this of the densest is "clear" (the noise reaches down to it)
+TAIL_RATIO = 2.5         # a hit whose 40 dB fall is this many times its 20 dB fall has a tail longer than an exponential
 DECAY_FACTOR = 1.5       # free decays may move by this factor either way
 NOISE_DECAY_FACTOR = 3.0
 DROP_WIDTH_ST = 2.0      # the free pitch drop may move by max(this, 40 %) either way
@@ -389,24 +391,40 @@ def _pitch_envelope(p: dict) -> dict:
     if abs(drop) <= oneshot.DROP_ST:
         return out
     settle = p.get("pitch_settle_ms")
-    fallback = {"carrier_hz": f_body, "drop_st": drop, "confidence": "derived",
-                "tau_ms": max(1.0, (settle if settle else 20.0) / math.log(max(abs(drop), 2 * oneshot.SETTLE_ST) /
+    if settle is not None and settle < oneshot.FAST_SETTLE_MS:
+        out["reading"] = "pitch_body_hz; the %.1f st drop is over in %.1f ms: a click, not a glide" % (drop, settle)
+        return out
+    late = [v for k, v in (p.get("pitch_track_hz") or {}).items() if v and float(k) >= TAIL_MS]
+    tail = None
+    if len(late) >= 2 and abs(12 * math.log2(max(late) / min(late))) <= oneshot.PITCH_ST:
+        tail = float(np.exp(np.mean(np.log(late))))            # the glide has settled: the late readings are the carrier
+    carrier = tail or f_body
+    s_tail = 12 * math.log2(carrier / f_body)
+    start = p.get("pitch_start_hz")
+    drop0 = 12 * math.log2(start / carrier) if start else drop
+    fallback = {"carrier_hz": carrier, "drop_st": drop0, "confidence": "derived",
+                "tau_ms": max(1.0, (settle if settle else 20.0) / math.log(max(abs(drop0), 2 * oneshot.SETTLE_ST) /
                                                                           oneshot.SETTLE_ST)),
-                "reading": "pitch_body_hz, pitch_drop_st, pitch_settle_ms (tau = settle / ln(drop / %.1f st))" % oneshot.SETTLE_ST}
+                "reading": "pitch_start_hz, pitch_settle_ms (tau = settle / ln(drop / %.1f st)), %s"
+                           % (oneshot.SETTLE_ST, "carrier from the late track" if tail else "carrier = pitch_body_hz")}
     if len(pts) < 3:
         return fallback
     t = np.array(sorted(pts))
     st = np.array([12 * math.log2(pts[x] / f_body) for x in t])
-    best = None
     w = (t + 5.0) / 50.0           # early points are the least reliable (a fast glide in short frames): weight by time
+    best = None
     for tau in np.geomspace(1.0, 600.0, 160):
-        a = np.stack([np.ones_like(t), np.exp(-t / tau)], axis=1)
-        c = np.linalg.lstsq(a * w[:, None], st * w, rcond=None)[0]
-        rss = float((((a @ c - st) * w) ** 2).sum())
+        e = np.exp(-t / tau)
+        if tail:
+            amp = float(((st - s_tail) * e * w ** 2).sum() / max((e * e * w ** 2).sum(), 1e-12))
+            coef = np.array([s_tail, amp])
+        else:
+            coef = np.linalg.lstsq(np.stack([np.ones_like(t), e], axis=1) * w[:, None], st * w, rcond=None)[0]
+        rss = float(((((coef[0] + coef[1] * e) - st) * w) ** 2).sum())
         if best is None or rss < best[0]:
-            best = (rss, tau, c)
-    rss, tau, (s_inf, amp) = best
-    rss = float(((np.stack([np.ones_like(t), np.exp(-t / tau)], axis=1) @ np.array([s_inf, amp]) - st) ** 2).sum())
+            best = (rss, tau, coef)
+    _, tau, (s_inf, amp) = best
+    rss = float(((s_inf + amp * np.exp(-t / tau) - st) ** 2).sum())
     if rss / len(t) > 0.5 ** 2 or abs(amp) <= oneshot.DROP_ST or tau in (1.0, 600.0) or abs(s_inf) > 2.0:
         return fallback
     return {"carrier_hz": f_body * 2 ** (s_inf / 12), "drop_st": float(amp), "tau_ms": float(tau),
@@ -459,8 +477,10 @@ def operator_guess(profile: dict) -> dict:
                      and 80 ms, the noise's decay rate against the tone's is
                      (ratio_attack_dB - ratio_body_dB) / (8.686 * 65 ms), and 1/tau_noise = that + 1/tau_tone;
                      with no usable body reading (under oneshot.NOISE_FLOOR_DB: a tone's window leakage) the
-                     default is a third of the tone's. Noise-led: fall_40_ms / 2 / 0.29 (the late fall is the
-                     noise's: a tone in it decays faster), or fall_20_ms if the take has no 40 dB fall
+                     default is a third of the tone's; a pitched hit whose 40 dB fall is over 2.5 times its 20 dB
+                     fall has it from fall_40_ms - fall_20_ms (a tail longer than an exponential is the noise's).
+                     Noise-led: the larger of fall_20_ms and fall_40_ms / 2, over 0.29 (when the hit falls more
+                     slowly later the late fall is the noise's: a tone in the first 20 dB decays faster)
       noise_attack_ms attack_ms, at least NOISE_ATTACK_FLOOR_MS
       noise_filter_hz  high-pass for a noise-led hit whose bands are empty low (see _noise_filter)
       output_db      Volume: the sample's peak_db minus the peak of one oscillator at 0 dB (+3 tone, +11 noise)
@@ -483,6 +503,11 @@ def operator_guess(profile: dict) -> dict:
     attack = p.get("attack_ms") or 0.0
     fall20 = float(p["fall_20_ms"])
     tau_tone = fall20 * TAU_PER_FALL20
+    f40 = p.get("fall_40_ms")
+    if f40 and not 1.6 <= f40 / fall20 <= TAIL_RATIO:
+        notes.append("the decay is not exponential (fall_40_ms / fall_20_ms = %.1f, an exponential reads 2.0): Operator's "
+                     "amp envelope has no slope parameter in the LOM, so the guess matches the first 20 dB and %s"
+                     % (f40 / fall20, "rings on past the 40 dB point" if f40 / fall20 < 1.6 else "falls short of the tail"))
     structure = {"tone_on": pitched, "noise_on": False, "pitch_env_on": False, "filter_on": False}
     if pitched:
         pe = _pitch_envelope(p)
@@ -511,6 +536,11 @@ def operator_guess(profile: dict) -> dict:
             else:
                 tau_noise = tau_tone / 3.0
                 reading, conf = "none (no noise reading above %.0f dB in the body): a third of the tone's decay" % oneshot.NOISE_FLOOR_DB, "default"
+            f40 = p.get("fall_40_ms")
+            if f40 and f40 > TAIL_RATIO * fall20:
+                tau_noise = (f40 - fall20) * TAU_PER_FALL20
+                reading, conf = "fall_40_ms - fall_20_ms (the 20 dB between them is the tail, and a tail "\
+                                "%.1f times as long as the first 20 dB is the noise's)" % (f40 / fall20), "derived"
             put("noise_decay_ms", tau_noise / (FALL20_PER_T * TAU_PER_FALL20), reading, conf)
             put("noise_attack_ms", max(NOISE_ATTACK_FLOOR_MS, attack), "attack_ms, floored at %.1f ms" % NOISE_ATTACK_FLOOR_MS, "default")
             pinned["noise_level_ref_db"] = "decay and level of the noise layer lie on a ridge; the level at 15 ms is read directly"
@@ -536,9 +566,9 @@ def operator_guess(profile: dict) -> dict:
     else:
         structure["noise_on"] = True
         late = p.get("fall_40_ms")
-        decay_ms = (late / 2.0 if late else fall20) / FALL20_PER_T
-        put("noise_decay_ms", decay_ms, "fall_40_ms / 2 / %.2f (the late fall is the noise's; a tone in the first "
-            "20 dB decays faster)" % FALL20_PER_T if late else "fall_20_ms / %.2f" % FALL20_PER_T,
+        decay_ms = max(fall20, late / 2.0 if late else 0.0) / FALL20_PER_T
+        put("noise_decay_ms", decay_ms, "the larger of fall_20_ms and fall_40_ms / 2, over %.2f (when the hit falls more "
+            "slowly later, the late fall is the noise's: a tone in the first 20 dB decays faster)" % FALL20_PER_T,
             "derived")
         put("noise_attack_ms", max(NOISE_ATTACK_FLOOR_MS, attack), "attack_ms, floored at %.1f ms" % NOISE_ATTACK_FLOOR_MS,
             "measured" if attack >= NOISE_ATTACK_FLOOR_MS else "default")
