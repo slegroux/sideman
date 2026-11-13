@@ -71,15 +71,17 @@ def at(index, ms=0.0):
 
 
 def hat_events(bars, open_tau=0.025, closed_tau=0.005, rng_seed=7):
-    """Open hats on the offbeats (steps 2, 6, 10, 14), closed hats on every other 16th. At the next 16th (121 ms) an
-    open hat of tau 25 ms is 42 dB down: the closed hat after it starts out of a tail well under the -30 dB the
-    grouping accepts (the +-2 dB gains and the 10 ms window the tail is read over cost it about 5 dB)."""
+    """A longer hat (`open_tau`) on the offbeats (steps 2, 6, 10, 14), a shorter one (`closed_tau`) on every other
+    16th. With the defaults the longer hat is not an open hat but a short one: at the next 16th (121 ms) it is 42 dB
+    down, so the hat after it starts out of a tail well under the -30 dB the grouping accepts (the +-2 dB gains and the
+    10 ms window the tail is read over cost it about 5 dB). A real open hat (tau 120 ms and more) is the H1 tests."""
     rng = np.random.default_rng(rng_seed)
     return [(at(i), noise_hit(i, open_tau if OFFBEAT(i % 16) else closed_tau, rng.uniform(-2, 2)))
             for i in range(bars * 16)]
 
 
 def run(x, **kw):
+    kw.setdefault("stability_runs", 0)                       # the regroupings triple the time; the stability tests ask for them
     return drumroles.hit_groups(x, BPM, T0, sr=SR, **kw)
 
 
@@ -103,7 +105,7 @@ def hats(hat_stem):
     return run(hat_stem)
 
 
-def test_hats_open_on_the_offbeats_and_closed_on_the_rest_are_two_groups(hats):
+def test_a_short_hat_on_the_offbeats_and_a_shorter_one_on_the_rest_are_two_groups(hats):
     r = hats
     assert len(r["hits"]) == 8 * 16 and all(h["status"] == "grouped" for h in r["hits"]), r["unmeasured"]
     closed, open_ = r["groups"]                      # ordered by count: 96 closed, 32 open
@@ -148,6 +150,11 @@ def test_open_hats_with_a_rest_after_them_have_a_clean_hit_that_falls_40_db():
     c = g["clean_hit"]
     assert g["count"] == 16 and c is not None and c["hit"] in g["members"] and g["clean_note"] is None
     assert 0.46 * SR <= len(c["audio"]) <= drumroles.MAX_CUT_S * SR
+    # its tail (-10.5, -21, -31.5 dB at the next three 16th lines, -42 at the fourth, where the next hit is) sounds through 3 lines
+    assert all(r["hits"][i]["through"] == 3 for i in g["members"])
+    # so the lines 1-3 after each hat (steps 3-5, 7-9, 11-13, 15-1) are inside a tail with no hit; the hats' own lines are not;
+    # the steps 0 and 1 of bar 0 have no earlier hat (bars 1-3 of 4: 0.75)
+    assert r["hidden_pattern"] == [0.75, 0.75, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0]
 
 
 # ---------------------------------------------------------------- one sound, and where it falls
@@ -209,10 +216,10 @@ def test_a_bed_30_db_under_the_hits_gives_fewer_groups_never_wrong_ones():
     # the hits start out of a bed only 30 dB under them (a lead-in of -30 dB or louder is "overlapped"): the hits that
     # are measured may still be grouped, and each one must be in a group of its own kind; the rest are reported
     r = run(stem(hat_events(4), 4, bed_db=30.0))
-    assert {h["status"] for h in r["hits"]} <= {"grouped", "overlapped", "faint", "no_lead"}
-    assert sum(h["status"] == "grouped" for h in r["hits"]) + len(r["unmeasured"]) == len(r["hits"])
+    assert {h["status"] for h in r["hits"]} <= {"grouped", "assigned", "overlapped", "faint", "no_lead"}
+    assert sum(h["status"] in ("grouped", "assigned") for h in r["hits"]) + len(r["unmeasured"]) == len(r["hits"])
     for g in r["groups"]:
-        assert len({truth_label(r["hits"][i]) for i in g["members"]}) == 1, g["pattern"]
+        assert len({truth_label(r["hits"][i]) for i in g["members"] + g["assigned_members"]}) == 1, g["pattern"]
     assert len(r["groups"]) <= 2
     assert all(u["reason"] and u["status"] in ("overlapped", "faint", "no_lead") for u in r["unmeasured"])
 
@@ -280,39 +287,20 @@ def test_sections_are_the_same_groups_restricted_and_their_order_does_not_matter
 
 # ---------------------------------------------------------------- what cannot be measured
 
-def test_16th_hats_under_an_open_hats_tail_are_marked_overlapped_or_not_found_and_the_same_every_bar():
-    # the open hat (tau 120 ms) rings through the closed 16ths after it. Its tail is, at k 16ths after it,
-    # exp(-k * 0.121 / 0.12) = -8.8 dB (k=1), -17.5 (k=2), -26 (k=3), -35 (k=4, the next open hat)
-    r = run(stem(hat_events(8, open_tau=0.12, closed_tau=0.012), 8))
-    h = r["hits"]
-    assert len(h) < 8 * 16                                 # hits that do not rise out of the tail are not hits to the detector...
-    assert any("tail" in n for n in r["notes"])            # ...and the report says so
-    assert all(x["through"] >= 1 for x in h if OFFBEAT(x["step"]))     # an open hat's tail sounds through the next line
-    for x in h:
-        if x["bar"] >= 1 and x["step"] % 4 in (3, 0):      # 1 and 2 sixteenths after an open hat: a tail 9 and 17 dB down
-            assert x["status"] == "overlapped" and "dB" in x["reason"] and x["group"] is None, x
-    open_ = [x for x in h if OFFBEAT(x["step"]) and x["bar"] >= 1]
-    assert open_ and all(x["status"] == "grouped" for x in open_)      # the open hats follow a tail of -35 dB: measured
-    g, = [g for g in r["groups"] if g["pattern"][2] > 0]
-    assert all(OFFBEAT(h[i]["step"]) for i in g["members"]) and all(g["pattern"][s] == 0 for s in range(16) if not OFFBEAT(s))
-    # the same bar after bar: the status of each step is one value from bar 1 on (not 3 sixteenths after an open hat, where
-    # the tail is -26 dB, within the gains' +-2 dB and the noise of the -30 dB the grouping accepts)
-    for s in (s for s in range(16) if s % 4 != 1):
-        assert len({x["status"] for x in h if x["step"] == s and x["bar"] >= 1}) <= 1, s
-    assert all(u["status"] != "grouped" for u in r["unmeasured"])
-
-
-def test_a_grace_note_55_ms_before_a_beat_is_too_short_and_the_hit_after_it_starts_out_of_its_tail():
+def test_a_grace_note_55_ms_before_a_beat_is_too_short_and_the_hit_after_it_is_assigned():
     events = [(at(i), tom_hit()) for i in range(0, 32, 4)]
     events.append((at(16) - 0.055, tom_hit(-12)))          # a grace note 55 ms before the beat at bar 1
     r = run(stem(events, 2))
     grace, main = (x for x in r["hits"] if abs(x["onset_s"] - at(16)) < 0.1)
     assert abs(grace["onset_s"] - (at(16) - 0.055)) < 0.001 and grace["status"] == "too_short" and "55 ms" in grace["reason"]
     assert grace["group"] is None and grace["bar"] == 1 and grace["step"] == 0 and grace["offset_ms"] == pytest.approx(-55.0, abs=1)
-    # the hit after it starts out of the grace note's tail (-12 dB, 55 ms later -6 dB more): not measured, and says why
-    assert main["status"] == "overlapped" and "dB" in main["reason"]
-    assert r["groups"][0]["count"] == 7 and not {grace["id"], main["id"]} & set(r["groups"][0]["members"])
-    assert r["unmeasured_pattern"] == [0.5 if i == 0 else 0.0 for i in range(16)]       # the main hit, in 1 bar of 2
+    # the hit after it starts out of the grace note's tail (-12 dB, 55 ms later -6 dB more, so -18 dB under it: assigned over
+    # its first 40 ms to the tom group, flagged as assigned, and not one of its measured members)
+    assert main["status"] == "assigned" and "overlapped" in main["reason"] and main["group"] == r["groups"][0]["id"]
+    g = r["groups"][0]
+    assert g["count"] == 7 and g["assigned"] == 1 and main["id"] in g["assigned_members"] and main["id"] not in g["members"]
+    assert g["assigned_pattern"] == [0.5 if i == 0 else 0.0 for i in range(16)] and g["pattern"][0] == 1.0
+    assert r["unmeasured_pattern"] == [0.0] * 16           # the grace note is off the grid, the main hit has a group
 
 
 def test_a_stem_read_from_a_file_and_the_inputs_that_are_refused(tmp_path):
@@ -336,3 +324,198 @@ def test_average_linkage_does_not_chain():
     p = np.array([0.0, 1.4, 2.8, 10.0, 10.5])
     clusters = drumroles._agglomerate(np.abs(p[:, None] - p[None, :]), 1.5)
     assert sorted(sorted(c) for c in clusters) == [[0, 1], [2], [3, 4]]
+
+
+# ---------------------------------------------------------------- H1: 16th hats under a real open hat
+
+def kinds_of(r, played, tol=0.015):
+    """({hit id: kind of the played hat it is}, hits that are none of them) for `played` = [(time s, kind)]."""
+    on = np.array([h["onset_s"] for h in r["hits"]])
+    out = {}
+    for t, kind in played:
+        k = int(np.argmin(np.abs(on - t)))
+        if abs(on[k] - t) <= tol:
+            out[k] = kind
+    return out, len(r["hits"]) - len(out)
+
+
+@pytest.mark.parametrize("tau,grid,least_closed", [(0.12, False, 45), (0.12, True, 61), (0.2, False, 14), (0.2, True, 29)])
+def test_16th_hats_under_a_real_open_hat_are_placed_in_the_hat_group_or_reported(tau, grid, least_closed):
+    # Open hats (tau 120 and 200 ms) on the offbeats, closed hats (tau 12 ms) on the 96 other 16ths, its own seed and +-2 dB
+    # each. The closed hat after an open one starts out of a tail 9 dB (tau 120) or 14 dB (200) under it, which the detector
+    # does not see as a hit (`grid_onsets` looks for it at the 16th line), and where it is found its tail makes it
+    # "overlapped": it is assigned to the nearest existing group, over a window that shrinks with the tail. The review
+    # measured, with both: 61-63 closed hats placed (tau 120) and 29-33 (tau 200), where there were 2 before; the numbers
+    # asserted for A off are what this code placed on these stems (51 and 16), less a hat or two. No hat in the wrong group.
+    ev = hat_events(8, open_tau=tau, closed_tau=0.012)
+    played = [(t, "open" if OFFBEAT(i % 16) else "closed") for i, (t, _) in enumerate(ev)]
+    r = run(stem(ev, 8), grid_onsets=grid)
+    kinds, extra = kinds_of(r, played)
+    placed = {k: sum(r["hits"][i]["status"] in ("grouped", "assigned") for i, kd in kinds.items() if kd == k)
+              for k in ("open", "closed")}
+    assert placed["open"] == 32 and placed["closed"] >= least_closed, placed
+    assert extra == 0                                       # no hit that was not played, with `grid_onsets` or without
+    for g in r["groups"]:                                   # nothing in a group of the other kind
+        assert len({kinds[i] for i in g["members"] + g["assigned_members"]}) == 1, g
+    g, = [g for g in r["groups"] if kinds[(g["members"] + g["assigned_members"])[0]] == "open"]
+    assert g["pattern"] == [1.0 if OFFBEAT(s) else 0.0 for s in range(16)] and g["bars_with"] == 8
+    assert g["count"] + g["assigned"] == 32
+    assert all(h["status"] == "assigned" and h["distance"] <= drumroles.THRESHOLD and "overlapped" in h["reason"]
+               for h in r["hits"] if h["group"] is not None and h["status"] != "grouped")
+    assert g["clean_hit"] is None or g["clean_hit"]["hit"] in g["members"]       # an assigned hit is never the clean hit
+    # the lines inside a tail where no hit was found: the open hats' own lines never; the line right after an open hat
+    # (steps 3, 7, 11, 15: its tail is 9 dB down there) always without the search, less so with it
+    assert [r["hidden_pattern"][s] for s in (2, 6, 10, 14)] == [0.0] * 4
+    after = [r["hidden_pattern"][s] for s in (3, 7, 11, 15)]
+    assert (max(after) < 1.0) if grid else (after == [1.0] * 4), after
+    assert r["grid_hits"] == sum(h["source"] == "grid" for h in r["hits"]) == (len(r["hits"]) - sum(
+        h["source"] == "segment" for h in r["hits"]))
+    assert (r["grid_hits"] > 0) == grid
+
+
+# ---------------------------------------------------------------- the grid-line detector on stems that are not hats
+
+def bleed_stem(kind):
+    """2 bars of a tom (every beat) or a kick (every beat), with a hat (every 16th) or a snare-like burst (the offbeats)
+    bleeding in 45 dB under it: under the 40 dB `_segments` reads, over what the grid detector's 6 dB rise asks."""
+    if kind == "tom":
+        main = [(at(i), tom_hit(f=150.0, tau=0.08)) for i in range(0, 32, 4)]
+        bleed = [(at(i), noise_hit(500 + i, 0.01, -45.0, 0.1)) for i in range(32)]
+        lines = [i for i in range(32) if i % 4 != 0]             # 16th lines with no tom within 50 ms
+    else:
+        main = [(at(i), tom_hit(f=45.0, tau=0.10)) for i in range(0, 32, 4)]
+        bleed = [(at(i), noise_hit(500 + i, 0.05, -45.0, 0.3)) for i in range(2, 32, 4)]
+        lines = [i for i in range(32) if i % 4 == 2]
+    return stem(main + bleed, 2), lines
+
+
+@pytest.mark.parametrize("kind", ["tom", "kick"])
+def test_grid_onsets_on_a_tom_or_kick_stem_count_the_bleed_as_hits_and_say_so(kind):
+    x, lines = bleed_stem(kind)
+    off, on = run(x), run(x, grid_onsets=True)
+    assert len(off["hits"]) == 8 and off["grid_hits"] == 0 and not off["grid_onsets"]       # the beats of the drum
+    # with the search every bleed hit at a free line is a hit: 24 hat bleeds (12 of the 16 lines a bar) on the tom stem,
+    # 8 burst bleeds (the offbeats) on the kick stem. The kick stem gives 8 more: the line after each kick, where
+    # the kick's own 45 Hz tail is found as a hit, because the first-difference power of a low tone swings with its
+    # phase by more than the 6 dB the search asks for (its 22 ms period against the 3 and 5 ms windows).
+    grid = [h for h in on["hits"] if h["source"] == "grid"]
+    expected = lines if kind == "tom" else sorted(lines + [i - 1 for i in lines])
+    assert on["grid_onsets"] and on["grid_hits"] == len(grid) == len(expected) == len(on["hits"]) - 8, (on["grid_hits"], len(expected))
+    assert sorted(h["bar"] * 16 + h["step"] for h in grid) == expected and all(abs(h["offset_ms"]) < 20 for h in grid)
+    # and the stem is not hat-like, which is what the option is for: nearly all of its energy lies under 4 kHz
+    assert off["hat_like"] < 0.01 and on["hat_like"] == off["hat_like"]
+
+
+def test_grid_onsets_on_the_hat_stem_find_only_hats_and_the_stem_reads_hat_like(hat_stem):
+    # the same stem as the first test, the search on: nothing is added (every 16th has a hit), and the stem is hat-like
+    r = run(hat_stem, grid_onsets=True)
+    assert r["grid_hits"] == 0 and len(r["hits"]) == 128 and r["hat_like"] > 0.9
+
+
+# ---------------------------------------------------------------- pitch: toms an octave or a fifth apart
+
+@pytest.mark.parametrize("semitones", [12.0, 7.0])
+def test_two_toms_an_octave_or_a_fifth_apart_are_two_groups(semitones):
+    # beats 1 and 3 a tom at 150 Hz, beats 2 and 4 the same drum `semitones` up: the spectral distance alone puts toms an
+    # octave apart in one group (review: 0.65 / 1.06 / 1.55 for 7 / 12 / 19 semitones on a 100 Hz tom); their body pitches
+    # are clusters 7 and 12 semitones apart
+    hi = 150.0 * 2 ** (semitones / 12)
+    rng = np.random.default_rng(4)
+    ev = [(at(i), tom_hit(rng.uniform(-2, 2), f=150.0 if (i // 4) % 2 == 0 else hi)) for i in range(0, 48, 4)]
+    r = run(stem(ev, 3))
+    lo_g, hi_g = sorted(r["groups"], key=lambda g: g["pattern"].index(1.0))
+    assert len(r["groups"]) == 2 and lo_g["count"] == hi_g["count"] == 6
+    assert [s for s, p in enumerate(lo_g["pattern"]) if p] == [0, 8] and [s for s, p in enumerate(hi_g["pattern"]) if p] == [4, 12]
+    assert lo_g["pattern"][0] == lo_g["pattern"][8] == hi_g["pattern"][4] == hi_g["pattern"][12] == 1.0
+
+
+def test_one_tom_with_a_third_of_a_semitone_of_jitter_stays_one_group():
+    rng = np.random.default_rng(5)
+    ev = [(at(i), tom_hit(rng.uniform(-2, 2), f=150.0 * 2 ** (rng.uniform(-0.3, 0.3) / 12))) for i in range(0, 48, 4)]
+    r = run(stem(ev, 3))
+    assert len(r["groups"]) == 1 and r["groups"][0]["count"] == 12
+
+
+# ---------------------------------------------------------------- stability, tentative groups
+
+def test_well_separated_sounds_are_stable_and_a_decay_continuum_is_not():
+    r = run(stem(hat_events(4), 4), stability_runs=2)
+    assert [g["stability"] for g in r["groups"]] == [1.0, 1.0] and not any(g["tentative"] for g in r["groups"])
+    # hats of tau 6 to 30 ms in 2 ms steps in a shuffled order: distances run on from 0.5 to 3 with no gap, so the
+    # cut lies where the sample puts it and a regrouping with the sample moved does not find the same groups
+    taus = np.random.default_rng(6).permutation(np.tile(np.arange(6, 31, 2) * 1e-3, 5))[:64]
+    ev = [(at(i), noise_hit(i, float(tau))) for i, tau in enumerate(taus)]
+    c = run(stem(ev, 4), stability_runs=2)
+    assert c["groups"] and min(g["stability"] for g in c["groups"]) < 0.8, [(g["count"], g["stability"]) for g in c["groups"]]
+    assert all(0.0 <= g["stability"] <= 1.0 for g in c["groups"])
+    assert run(stem(hat_events(4), 4))["groups"][0]["stability"] is None             # not measured when not asked for
+
+
+def test_a_group_of_under_4_hits_is_tentative():
+    ev = [(at(i), noise_hit(i, 0.025 if i in (10, 38) else 0.005)) for i in range(64)]
+    r = run(stem(ev, 4), sample=8)
+    assert [(g["count"], g["tentative"]) for g in r["groups"]] == [(62, False), (2, True)]
+
+
+# ---------------------------------------------------------------- review round 1: tests that pin the clustering
+
+def test_a_decay_continuum_shuffled_three_times_gives_one_partition():
+    # hats of tau 6 to 30 ms (distances 0.5 to 3, no gap): the groups depend on where the sample falls, so they only agree
+    # when the hits are put in time order first and the same hits are sampled whatever order they came in
+    taus = np.random.default_rng(8).permutation(np.tile(np.arange(6, 31, 2) * 1e-3, 3))[:32]
+    cuts = [noise_hit(i, float(tau))[:int(STEP * SR), None] for i, tau in enumerate(taus)]
+
+    def partition(order):
+        groups, rest = drumroles.group_cuts([cuts[i] for i in order], [order[i] for i in range(len(order))], SR, sample=8)
+        return sorted(sorted(order[i] for i in g["members"]) for g in groups), sorted(order[i] for i in rest)
+    base = partition(list(range(32)))
+    assert 1 < len(base[0]) < 8                              # the continuum is cut into a few groups, not one and not all
+    for seed in (1, 2, 3):
+        order = [int(i) for i in np.random.default_rng(seed).permutation(32)]
+        assert partition(order) == base
+
+
+def test_the_medoid_is_the_most_central_hit_not_the_first_and_the_outlier_is_the_furthest():
+    # nine hats of one kind in one group, the earliest of them a little different (tau 20 ms against 12: about 1 away,
+    # inside the threshold): the medoid is one of the others and the outlier is the member furthest from it
+    cuts = [noise_hit(i, 0.02 if i == 0 else 0.012)[:int(STEP * SR), None] for i in range(9)]
+    groups, rest = drumroles.group_cuts(cuts, list(range(9)), SR)
+    g, = groups
+    assert rest == [] and sorted(g["members"]) == list(range(9))
+    assert g["medoid"] != 0 and g["distance"][0] == max(g["distance"].values()) and g["distance"][0] > 0.8
+
+
+def test_a_hit_25_db_under_its_neighbours_is_faint_and_is_counted_where_it_fell():
+    # a ghost note on a hat stem: 31 hats and one 25 dB under them (bar 0, step 13). It is not grouped (it may be a
+    # bed or bleed), it is not dropped: the stem says where it fell (`unmeasured_pattern`) and why
+    ev = [(at(i), noise_hit(i, 0.005, -25.0 if i == 13 else 0.0)) for i in range(32)]
+    r = run(stem(ev, 2))
+    ghost = r["hits"][13]
+    assert ghost["status"] == "faint" and ghost["group"] is None and "ghost" in ghost["reason"]
+    assert all(h["status"] == "grouped" for h in r["hits"] if h["id"] != 13) and r["groups"][0]["count"] == 31
+    assert r["unmeasured_pattern"] == [0.5 if s == 13 else 0.0 for s in range(16)]
+    assert r["unmeasured"] == [{"hit": 13, "status": "faint", "reason": ghost["reason"]}]
+    assert r["groups"][0]["pattern"][13] == 0.5
+
+
+def test_more_sounds_than_max_groups_leave_the_rest_ungrouped_and_say_so():
+    # a hat on beats 1 and 3, a tom on beat 2, a snare on beat 4, 3 bars: three sounds, two groups allowed
+    ev = []
+    for b in range(3):
+        ev += [(at(16 * b), noise_hit(b, 0.005)), (at(16 * b + 4), tom_hit()), (at(16 * b + 8), noise_hit(10 + b, 0.005)),
+               (at(16 * b + 12), snare_hit(20 + b))]
+    x = stem(ev, 3)
+    assert len(run(x)["groups"]) == 3
+    r = run(x, max_groups=2)
+    left = [h for h in r["hits"] if h["status"] == "ungrouped"]
+    assert len(r["groups"]) == 2 and left and "not forced" in left[0]["reason"]
+    assert len({h["step"] for h in left}) <= 2 and {h["id"] for h in left}.isdisjoint(i for g in r["groups"] for i in g["members"])
+    assert sum(g["count"] for g in r["groups"]) + len(left) == len(r["hits"]) == 12
+
+
+def test_bars_0_to_3_alone_and_inside_16_bars_give_the_same_groups_on_separated_sounds():
+    big = run(stem(hat_events(16), 16), sections=[{"name": "a", "start_bar": 0, "bars": 4}])
+    small = run(stem(hat_events(4), 4))
+    keep = lambda groups: [(g["count"], g["pattern"], g["bars_with"], g["off_grid"], g["tentative"]) for g in groups]  # noqa: E731
+    assert keep(big["sections"][0]["groups"]) == keep(small["groups"])
+    assert [g["count"] for g in big["groups"]] == [192, 64] and [g["count"] for g in small["groups"]] == [48, 16]
