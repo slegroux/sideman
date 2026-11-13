@@ -271,29 +271,46 @@ twelfth apart on the same partials are one line, not a pitch difference.
 
 `sample_compare` also returns `distance`: one number for how far apart two
 hits sound, the score an optimiser can minimise when matching a synth patch
-to a sample. It is `auraloss`'s `MultiResolutionSTFTLoss` with its default
-settings, rewritten in numpy: at FFT sizes 512, 1024 and 2048 (windows of
-240, 600 and 1200 samples), spectral convergence (how much of the loud
-spectrum differs) plus the mean log-magnitude difference (how much of the quiet
-spectrum differs: tail, noise floor, highs), averaged over the sizes and split
-in `distance_terms`. It is symmetric in the two hits (auraloss divides by the
-target alone; here it is the mean of both divisions). Before measuring, what
-is not timbre is equalised: DC removed, the two onsets aligned, both scaled to
-the same loudest 1 ms (its RMS, not the sample peak, which one click would
-set), and both cut to the longer of the two (at most 2 s), the shorter counting
-as silent after its end, so a longer tail on one side costs. A hit at another
-sample rate is compared at the lower rate. On synthetic drums (a 200 Hz tone
-with two harmonics, a kick with a pitch glide, a noise hat), 0 is the same hit, also read
-5 ms late or at another gain (under 1e-9); 0.014 is the same tone started
-between two samples; 0.19 is a decay 25 % longer (tau 50 against 40 ms) and
-0.79 one 2.5 times longer; 0.29 is one semitone and 0.94 seven; 0.18 is noise
-60 dB under the tone and 1.9 noise at 20 dB under; 3.7 is a kick against a hat.
-It says how far apart two hits are and not which property differs: for that
-read `readings`. It counts the raw level too when asked (`match_level=False` in
-`oneshot.spectral_distance`), and the windows are in samples, so a score is
-comparable between files at one sample rate, not between 44.1 and 96 kHz.
-A tail that ends in digital silence on one side and in a noise floor on the
-other costs through the log term, even where both are inaudible.
+to a sample. It is the multi-resolution STFT loss of `auraloss`
+(`MultiResolutionSTFTLoss`, default settings) rewritten in numpy: at FFT sizes
+512, 1024 and 2048 (windows of 240, 600 and 1200 samples), spectral
+convergence (how much of the loud spectrum differs) plus the mean
+log-magnitude difference (how much of the quieter spectrum differs: tail,
+noise, highs), averaged over the sizes and split in `distance_terms`. At the
+default it differs from `auraloss` in two ways. It is symmetric (`auraloss`
+divides the convergence by the target alone; here it is the mean of both
+divisions). And the log term clamps magnitudes at 60 dB under the loudest STFT
+magnitude of either hit at that resolution (`floor_db`, 60) instead of at an
+absolute 1e-4, about 120 dB down. On the Bodzin one-shots the absolute floor
+let the log term swing from 0.4 to 3.6 with how much inaudible tail one hit
+had against the other's silence or padding (a kick read 4.8 from a snare whose
+40 dB fall is 508 ms, and closer to a hi tom): the term then measured the
+files' noise floors, not the sounds. `floor_db=None` in
+`oneshot.spectral_distance` is the `auraloss` definition (symmetry aside).
+Before measuring, what is not timbre is equalised: DC removed, the two onsets
+aligned, both scaled to the same loudest 1 ms (its RMS, not the sample peak,
+which one click would set), and both cut to the longer of the two (at most
+2 s), the shorter counting as silent after its end, so a longer tail on one
+side costs, in proportion to how far it rises above the floor (one that has
+fallen 60 dB costs nothing). A hit at another sample rate is compared at the
+lower rate. On synthetic drums (a 200 Hz tone with two harmonics, a kick with
+a pitch glide, a noise hat), 0 is the same hit, also read 5 ms late or at
+another gain (under 1e-9); 0.004 is the same tone started between two samples;
+0.16 is a decay 25 % longer (tau 50 against 40 ms) and 0.68 one 2.5 times
+longer; 0.27 is one semitone and 0.88 seven; noise under the tone's own
+envelope reads 0.016 at 40 dB under, 0.07 at 30 and 0.26 at 20, and a constant
+noise floor 80 dB under the peak 0.0004 (30 dB under: 1.4); a tail cut to
+silence where it is 70 dB down reads 0.0003, where it is 20 dB down 0.11; 2.0
+is a kick against a hat. On nine real Bodzin one-shots unrelated pairs read
+1.5 to 2.2 and the closest pairs about 1.0 to 1.3 (rim and low tom 1.04, closed
+and open hat 1.33). It says how far apart two hits are and not which property
+differs: for that read `readings`. The convergence term is linear and
+saturates near 1.4 for two spectra that do not overlap, so two pitches an
+octave apart are about as far as two unrelated drums: it ranks by spectral
+overlap, not by how near a pitch is, and the optimiser must start from the
+measured pitch. It counts the raw level too when asked (`match_level=False`),
+and the windows are in samples, so a score is comparable between files at one
+sample rate, not between 44.1 and 96 kHz.
 
 **Limits** (known, not yet handled):
 
