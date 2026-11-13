@@ -61,8 +61,10 @@ Choices that are not obvious from the code:
   A glide smears its fundamental, so a sweeping attack reads noisier than
   the same tone held still.
 - distance_terms / spectral_distance are the one number an optimiser can
-  minimise: the multi-resolution STFT loss (Yamamoto et al. 2019) in numpy, with the default settings of its PyTorch reference (see
-  distance_terms for what is equalised first and where it differs).
+  minimise: the multi-resolution STFT loss (Yamamoto et al. 2019) in numpy,
+  with the default settings of its PyTorch reference plus a dynamic-range
+  floor and a symmetric convergence term (see distance_terms for what is
+  equalised first and where it differs).
 """
 from __future__ import annotations
 
@@ -1187,6 +1189,7 @@ def compare(a: dict, b: dict) -> dict:
 MRSTFT = ((1024, 120, 600), (2048, 240, 1200), (512, 50, 240))   # (FFT size, hop, window) in samples: the reference's defaults
 STFT_EPS = 1e-8          # the reference clamps the power |STFT|^2 here (a magnitude floor of 1e-4) before every log
 DIST_MAX_S = 2.0         # the distance reads at most this long from the onset
+DIST_FLOOR_DB = 60.0     # the log term clamps magnitudes this far under the loudest STFT magnitude of either hit
 DIST_RMS = 0.1           # level-matched hits are scaled to this loudest-1-ms RMS (-20 dBFS, programme level)
 
 
@@ -1203,16 +1206,22 @@ def _stft_mag(x: np.ndarray, fft: int, hop: int, win: int) -> np.ndarray:
     return np.sqrt(np.maximum(spec.real ** 2 + spec.imag ** 2, STFT_EPS))
 
 
-def _mrstft(x: np.ndarray, y: np.ndarray) -> list[tuple[float, float, float]]:
+def _mrstft(x: np.ndarray, y: np.ndarray, floor_db: float | None = None) -> list[tuple[float, float, float]]:
     """Per resolution of MRSTFT, the reference's two terms for x [batch, n] against y: (spectral convergence
     ||X - Y||_F / ||Y||_F, the same over ||X||_F (the reference's is not symmetric: it divides by the target), mean
-    |log X - log Y|). Both are over every frame and bin together, as its torch.norm and L1Loss are."""
+    |log X - log Y|). Both are over every frame and bin together, as its torch.norm and L1Loss are. With
+    `floor_db` the log term (only) reads magnitudes no lower than `floor_db` under the largest of X and Y at that
+    resolution; None is the reference's definition exactly."""
     out = []
     for fft, hop, win in MRSTFT:
         mx, my = _stft_mag(x, fft, hop, win), _stft_mag(y, fft, hop, win)
         gap = float(np.linalg.norm(mx - my))
+        lx, ly = mx, my
+        if floor_db is not None:
+            floor = max(float(mx.max()), float(my.max())) * 10 ** (-floor_db / 20)
+            lx, ly = np.maximum(mx, floor), np.maximum(my, floor)
         out.append((gap / float(np.linalg.norm(my)), gap / float(np.linalg.norm(mx)),
-                    float(np.mean(np.abs(np.log(mx) - np.log(my))))))
+                    float(np.mean(np.abs(np.log(lx) - np.log(ly))))))
     return out
 
 
@@ -1225,14 +1234,23 @@ def _loudest_ms(x: np.ndarray, sr: int) -> float:
 
 
 def distance_terms(a: np.ndarray, b: np.ndarray, sr: int, match_level: bool = True,
-                   max_s: float = DIST_MAX_S) -> dict:
+                   max_s: float = DIST_MAX_S, floor_db: float | None = DIST_FLOOR_DB) -> dict:
     """The multi-resolution STFT distance between two hits a and b ([n] or [n, channels], one sample rate), and
     its parts. It is the MultiResolutionSTFTLoss of the PyTorch reference implementation with its default
     settings (MRSTFT, in samples; a hit is read from its start, so a take with several hits must be cut to one
     first: see hit_audio): per resolution
     the spectral convergence plus the mean absolute log-magnitude difference, averaged over the resolutions.
-    One difference: the reference divides the convergence by the norm of the target only, so d(a, b) != d(b, a); here
-    it is the mean of the two divisions, so the distance is symmetric.
+    Two differences from the reference at the default settings (floor_db=None gives its definition back, but the
+    convergence stays symmetric):
+      - symmetry: the reference divides the convergence by the norm of the target only, so d(a, b) != d(b, a);
+        here it is the mean of the two divisions;
+      - dynamic-range floor: the log term clamps every magnitude at `floor_db` (DIST_FLOOR_DB, 60) under the
+        largest STFT magnitude of either hit at that resolution, instead of at the reference's absolute 1e-4.
+        An absolute epsilon sits ~120 dB down, so the log term mostly measured how much inaudible tail or noise
+        floor one hit had against the other's silence or padding (on real one-shots that swung it from 0.4 to
+        3.6 and outweighed the body). With the floor, a difference counts in proportion to how far it rises above
+        the floor, and anything more than `floor_db` under the loudest part is not read. The convergence term
+        is linear, so it is not affected.
 
     The hits are put on equal terms first, so that only timbre is left:
       - DC offsets are removed (as sample_analyze does);
@@ -1243,8 +1261,9 @@ def distance_terms(a: np.ndarray, b: np.ndarray, sr: int, match_level: bool = Tr
         the level of the body and read as a level difference). match_level=False keeps the raw level
         difference, which the distance then counts;
       - the same length: the longer of the two, at most `max_s` seconds, the shorter padded with digital
-        silence. A longer tail on one side therefore costs: the log-magnitude of a tail against silence
-        (the reference's floor, magnitude 1e-4) is large, in proportion to how much of the window it fills.
+        silence. A longer tail on one side therefore costs, in proportion to how much of it rises above the
+        floor (a tail against silence reads as the floor): a tail that has fallen `floor_db` under the hit costs
+        nothing, one just above it costs a little, one 20 dB down costs a lot.
         A file that was merely cut short counts as a hit that ended there; cut both to the same length first
         when the cut is not what is compared.
     Hits of different channel counts are both averaged to mono; with equal counts the channels are batch
@@ -1279,7 +1298,7 @@ def distance_terms(a: np.ndarray, b: np.ndarray, sr: int, match_level: bool = Tr
         raise ValueError("the hits are too short for the distance (%d samples after the onset; it needs more than %d)"
                          % (n, max(f // 2 for f, _, _ in MRSTFT)))
     xa, xb = (np.concatenate([x[:n], np.zeros((max(0, n - len(x)), x.shape[1]))]).T for x in cut)
-    rows = _mrstft(xa, xb)
+    rows = _mrstft(xa, xb, floor_db)
     parts = [{"fft": f, "convergence": 0.5 * (sc_ab + sc_ba), "log_magnitude": lg}
              for (f, _, _), (sc_ab, sc_ba, lg) in zip(MRSTFT, rows)]
     conv = sum(p["convergence"] for p in parts) / len(parts)
@@ -1289,9 +1308,9 @@ def distance_terms(a: np.ndarray, b: np.ndarray, sr: int, match_level: bool = Tr
 
 
 def spectral_distance(a: np.ndarray, b: np.ndarray, sr: int, match_level: bool = True,
-                      max_s: float = DIST_MAX_S) -> float:
+                      max_s: float = DIST_MAX_S, floor_db: float | None = DIST_FLOOR_DB) -> float:
     """distance_terms(...)["distance"]: 0 for the same hit, larger as the timbre moves away."""
-    return distance_terms(a, b, sr, match_level, max_s)["distance"]
+    return distance_terms(a, b, sr, match_level, max_s, floor_db)["distance"]
 
 
 def hit_audio(x: np.ndarray, sr: int, hit: int) -> np.ndarray:
@@ -1323,7 +1342,8 @@ def _resample(x: np.ndarray, sr0: int, sr1: int) -> np.ndarray:
     return np.fft.irfft(spec, n1, axis=0)[:int(round(n * sr1 / sr0))] * n1 / len(padded)
 
 
-def profile_distance(a: dict, b: dict, match_level: bool = True, max_s: float = DIST_MAX_S) -> dict:
+def profile_distance(a: dict, b: dict, match_level: bool = True, max_s: float = DIST_MAX_S,
+                     floor_db: float | None = DIST_FLOOR_DB) -> dict:
     """distance_terms of the two hits that profiles `a` and `b` (from profile(): they name their file and hit)
     describe. Hits at different sample rates are compared at the lower one, the other cut to it
     (band-limited), so the highs the lower rate cannot hold are not counted against the other."""
@@ -1333,4 +1353,4 @@ def profile_distance(a: dict, b: dict, match_level: bool = True, max_s: float = 
         xs.append((hit_audio(x, sr, p["hit"]), sr))
     sr = min(sr for _, sr in xs)
     xa, xb = (x if r == sr else _resample(x, r, sr) for x, r in xs)
-    return distance_terms(xa, xb, sr, match_level, max_s)
+    return distance_terms(xa, xb, sr, match_level, max_s, floor_db)
