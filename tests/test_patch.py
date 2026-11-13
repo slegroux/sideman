@@ -496,6 +496,38 @@ def test_guess_reads_the_tone_decay_long_when_the_noise_outlasts_the_tone():
     assert 1.25 < ratio < 1.6, ratio
 
 
+def reading(**kw) -> dict:
+    """A hand-made profile of a pitched hit (the keys operator_guess reads), for rules checked from construction."""
+    p = {"sample_rate": 48000, "pitched": True, "pitch_body_hz": 100.0, "pitch_drop_st": 0.0, "pitch_settle_ms": None,
+         "pitch_start_hz": None, "pitch_start_at_ms": None, "pitch_track_hz": {}, "attack_ms": 3.0, "fall_20_ms": 100.0,
+         "fall_40_ms": 200.0, "noise_db": {"attack": None, "body": None}, "peak_db": -6.0, "bands_db": None}
+    p.update(kw)
+    return p
+
+
+def test_guess_treats_a_drop_over_in_under_5_ms_as_a_click_and_takes_the_settled_pitch_as_the_carrier():
+    click = patch.operator_guess(reading(pitch_drop_st=17.0, pitch_settle_ms=3.0, pitch_start_hz=270.0, pitch_start_at_ms=0.3))
+    assert click["patch"]["pitch_drop_st"] == 0.0 and click["structure"]["pitch_env_on"] is False
+    assert "click" in click["sources"]["pitch_drop_st"]["reading"]
+    glide = patch.operator_guess(reading(pitch_body_hz=51.1, pitch_drop_st=19.9, pitch_settle_ms=74.0, pitch_start_hz=161.7,
+                                         pitch_start_at_ms=2.6,
+                                         pitch_track_hz={5: 126.8, 10: 90.0, 20: 68.5, 40: 55.7, 80: 51.9, 150: 48.0, 300: 47.9}))
+    assert glide["patch"]["carrier_hz"] == pytest.approx(47.95, abs=0.1) and glide["structure"]["pitch_env_on"] is True
+    assert "late track" in glide["sources"]["carrier_hz"]["reading"] or "fitted" in glide["sources"]["carrier_hz"]["reading"]
+
+
+def test_guess_takes_the_noise_decay_from_a_tail_longer_than_an_exponential_and_notes_a_non_exponential_decay():
+    snare = patch.operator_guess(reading(fall_20_ms=111.0, fall_40_ms=508.0, noise_db={"attack": -6.9, "body": -6.9}))
+    tail_t = (508.0 - 111.0) / math.log(10) / TAU_FROM_T            # Operator T of the 20 dB between the two falls
+    assert snare["patch"]["noise_decay_ms"] == pytest.approx(tail_t, rel=1e-6)
+    assert snare["patch"]["tone_decay_ms"] == pytest.approx(111.0 / 0.29)
+    assert any("not exponential" in n and "falls short" in n for n in snare["notes"])
+    gated = patch.operator_guess(reading(fall_20_ms=48.5, fall_40_ms=56.3))
+    assert any("not exponential" in n and "rings on" in n for n in gated["notes"])
+    plain = patch.operator_guess(reading())
+    assert not [n for n in plain["notes"] if "exponential" in n]
+
+
 def test_guess_for_an_unpitched_hit_is_noise_led():
     true = TRUE["hat"]
     for seed in range(1, 6):
