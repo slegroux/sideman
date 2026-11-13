@@ -301,9 +301,11 @@ longer; 0.27 is one semitone and 0.88 seven; noise under the tone's own
 envelope reads 0.016 at 40 dB under, 0.07 at 30 and 0.26 at 20, and a constant
 noise floor 80 dB under the peak 0.0004 (30 dB under: 1.4); a tail cut to
 silence where it is 70 dB down reads 0.0003, where it is 20 dB down 0.11; 2.0
-is a kick against a hat. On nine real Bodzin one-shots unrelated pairs read
-1.5 to 2.2 and the closest pairs about 1.0 to 1.3 (rim and low tom 1.04, closed
-and open hat 1.33). It says how far apart two hits are and not which property
+is a kick against a hat. On 108 real one-shots sorted into role folders (kicks,
+claps and snares, hats, toms, percussion), the nearest other sample is in the
+same folder for 76 % of them, against 21 % expected by chance (every kick's
+nearest is a kick); within-folder pairs read 1.2 on average against 2.1 across
+folders, and unrelated pairs 1.5 to 2.2. It says how far apart two hits are and not which property
 differs: for that read `readings`. The convergence term is linear and
 saturates near 1.4 for two spectra that do not overlap, so two pitches an
 octave apart are about as far as two unrelated drums: it ranks by spectral
