@@ -136,11 +136,14 @@ SEP_OTHERS = 12          # ...against this many of the nearest other group's
 # Role names (name_roles). The reasons for each number are in docs/CONVENTIONS.md, "Drum roles".
 NAME_MIN_HITS = TENTATIVE_N   # a group is named from at least this many measured hits (the reviewer's rule, round 2)
 NAME_STABILITY = 0.75    # ...a measured stability of at least this (Flare hh: 0.79-0.91 named, 0.13-0.69 not)
-STEP_MIN = 0.25          # a 16th is "in use" when the group plays there in this share of its own bars (chosen: one bar in four)
+STEP_MIN = 0.25          # a 16th is "in use" when the group plays there in this share of the own bars it was observable in (chosen: one in four)
 OFFBEAT_SHARE = 0.9      # hh offbeat: this share of the group's on-grid hits fall on the offbeats (steps 2, 6, 10, 14)...
 OFFBEAT_STEPS = 3        # ...and at least this many of the 4 offbeats are in use
 ODD_STEPS = 6            # hh 16th: at least this many of the 8 odd 16ths (the "e" and "a" of each beat) are in use (4 let a hat
 #                          that plays only the "e" of each beat, Flare hh group 2, take the name)
+OBSERVE_MIN = 4          # a 16th observable in fewer bars than this is unknown: it counts neither for nor against the pattern
+OFFBEAT_KNOWN = 2        # the offbeat rule needs at least this many of the 4 offbeats known (half)
+ODD_KNOWN = 4            # the 16th rule needs at least this many of the 8 odd 16ths known (half)
 OPEN_FALL_20_MS = 140.0  # hh open: the clean hit takes this long to fall 20 dB (library: closed hats 18-130 ms, open 15-269)
 RIM_FALL_20_MS = 30.0    # rim: it falls 20 dB in under this (library: 3 rims 5-28 ms, the other 28 snares and claps 35-167)
 SNARE_NOISE_DB = -1.0    # snare: the noise share of the body is at most this (a tone under the noise; library: 9 snares, 0 claps)
@@ -481,9 +484,11 @@ def _scope(x: np.ndarray, sr: int, hits: list, found: list, hidden: set, ids: se
     lost = [h for h in (hits[i] for i in ids) if h["on_grid"] and first <= h["bar"] < first + bars and h["status"] in (
         "overlapped", "too_short", "no_lead", "ungrouped", "faint")]
     pat = lambda hs: [len({h["bar"] for h in hs if h["step"] == s}) / bars if bars else 0.0 for s in range(steps)]  # noqa: E731
-    return {"hits": len(ids), "bars": bars, "groups": groups, "unmeasured_pattern": pat(lost),
+    return {"hits": len(ids), "bars": bars, "first_bar": first, "groups": groups, "unmeasured_pattern": pat(lost),
             "hidden_pattern": [len({b for b in range(first, first + bars) if (b, s) in hidden}) / bars if bars else 0.0
                                for s in range(steps)],
+            "hidden_cells": sorted([b, s] for b, s in hidden if first <= b < first + bars),
+            "unmeasured_cells": sorted([b, st] for b, st in {(h["bar"], h["step"]) for h in lost}),
             "unmeasured": [{"hit": i, "status": hits[i]["status"], "reason": hits[i]["reason"]}
                            for i in sorted(ids) if hits[i]["status"] not in ("grouped", "assigned")]}
 
@@ -544,7 +549,8 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
 
     Returns {"sample_rate", "tempo", "t0", "threshold", "linkage": "average", "max_cut_s", "grid_onsets", "hat_like"
     (the share of the stem's energy above 4 kHz), "grid_hits" (hits found by `grid_onsets`), "hits", "groups",
-    "unmeasured_pattern", "hidden_pattern", "unmeasured", "sections", "notes"}.
+    "unmeasured_pattern", "hidden_pattern", "unmeasured", "sections", "notes", "bars", "first_bar", "hidden_cells",
+    "unmeasured_cells"}.
     A hit is {"id", "source" ("segment" or "grid"), "onset_s", "bar", "step" (16th, 0-15, of the nearest grid line),
     "offset_ms" (onset minus that line), "on_grid" (within 20 ms of it), "level_db" (loudest ms, dBFS), "lead_db" (the
     10 ms before the hit against its loudest ms; None at the start of the stem), "through" (16th lines inside its cut
@@ -583,7 +589,10 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     assigned, too short, without a lead, faint or ungrouped) leaves out the hits that were never found: a hit inside another's
     tail is not a hit to the detector. `hidden_pattern` (per 16th, the share of the scope's bars in which that line falls
     inside the tail of a hit, `through`, with no hit found at it) is where such hits could be; with `grid_onsets` on it
-    is what is left after the search."""
+    is what is left after the search. The same two, per bar rather than per 16th, for the roles' judgement of which steps a
+    group could be seen playing at: `first_bar` and `bars` (the scope: the bars from the first real hit's, or the
+    section's) and `hidden_cells` / `unmeasured_cells`, the [bar, step] pairs that were hidden under a tail, or held an
+    on-grid hit that was not measured (the statuses of `unmeasured_pattern`). The sections carry their own."""
     if not (tempo > 0 and math.isfinite(tempo)) or not math.isfinite(t0):
         raise ValueError("tempo must be above 0 and t0 a number of seconds, got %r and %r" % (tempo, t0))
     if beats_per_bar < 1 or sample < 2 or max_groups < 1 or threshold <= 0 or stability_runs < 0:
@@ -606,7 +615,8 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     x = oneshot._undc(x, sr)
     out = {"sample_rate": sr, "tempo": tempo, "t0": t0, "threshold": threshold, "linkage": "average",
            "max_cut_s": max_cut_s, "grid_onsets": grid_onsets, "hat_like": None, "grid_hits": 0, "hits": [],
-           "groups": [], "unmeasured_pattern": [], "hidden_pattern": [], "unmeasured": [], "sections": [], "notes": []}
+           "groups": [], "unmeasured_pattern": [], "hidden_pattern": [], "unmeasured": [], "sections": [], "notes": [],
+           "bars": 0, "first_bar": 0, "hidden_cells": [], "unmeasured_cells": []}
     if not len(x) or float(np.abs(x).max()) <= 0:
         out["notes"].append("the stem is silent: no hits")
         return out
@@ -718,7 +728,8 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     real = [h["bar"] for h in hits if h["status"] not in ("faint", "silent", "no_lead")]
     first, last = (min(real), max(real)) if real else (0, 0)
     whole = _scope(x, sr, hits, found, hidden, {h["id"] for h in hits}, first, last - first + 1, steps)
-    out.update({k: whole[k] for k in ("groups", "unmeasured_pattern", "hidden_pattern", "unmeasured")})
+    out.update({k: whole[k] for k in ("groups", "unmeasured_pattern", "hidden_pattern", "unmeasured", "bars", "first_bar",
+                                      "hidden_cells", "unmeasured_cells")})
     for sec in sections or []:
         a, b = sec["start_bar"], sec["start_bar"] + sec["bars"]
         got = _scope(x, sr, hits, found, hidden, {h["id"] for h in hits if a <= h["bar"] < b}, a, sec["bars"], steps)
@@ -733,16 +744,32 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
 # ---------------------------------------------------------------- role names
 
 def _use(result: dict, g: dict) -> dict:
-    """How a group plays on the grid, from its measured and assigned hits that sit on it: "counts" (hits per 16th),
-    "share" (per 16th, the share of the group's own bars `bars_with` that have a hit there) and "n" (their number)."""
+    """How a group plays on the grid, from its measured and assigned hits that sit on it: "counts" (hits per 16th), "n"
+    (their number) and "steps", one row per 16th: the bars the group plays there (`played`), the bars in which that
+    16th could be seen (`observable`), and the shares of the group's own bars (every bar it has a hit in) and of the
+    observable ones. A bar is not observable at a 16th when the line fell inside another hit's tail with no hit found
+    at it (`hidden_cells`: a hat hidden under an open hat's tail cannot be seen playing there), or held an on-grid hit
+    that was not measured (`unmeasured_cells`: overlapped, too short, without a lead, faint or ungrouped; it may be this
+    group's), and the group does not play there. Only the group's own bars count (the bars in which it plays at
+    all), as in `bars_with`, so a group that lives in one section is judged over that section. A 16th observable in
+    fewer than OBSERVE_MIN bars is "unknown"; otherwise "in use" when its share of observable bars is at least STEP_MIN."""
     steps = max(len(g["pattern"]), 1)
-    on = [h for h in (result["hits"][i] for i in g["members"] + g["assigned_members"]) if h["on_grid"]]
-    bars = max(g["bars_with"], 1)
-    counts, share = np.zeros(steps), np.zeros(steps)
-    for s in range(steps):
-        at = [h for h in on if h["step"] == s]
-        counts[s], share[s] = len(at), len({h["bar"] for h in at}) / bars
-    return {"counts": counts, "share": share, "n": int(counts.sum())}
+    hits = [result["hits"][i] for i in g["members"] + g["assigned_members"]]
+    on = [h for h in hits if h["on_grid"]]
+    own = {h["bar"] for h in hits}
+    blind = {(b, st) for b, st in list(result.get("hidden_cells", [])) + list(result.get("unmeasured_cells", []))}
+    counts, rows = np.zeros(steps), []
+    for st in range(steps):
+        at = [h for h in on if h["step"] == st]
+        played = {h["bar"] for h in at}
+        seen = len(own) - len([b for b in own if (b, st) in blind and b not in played])
+        share_obs = len(played) / seen if seen else None
+        counts[st] = len(at)
+        rows.append({"step": st, "played_bars": len(played), "own_bars": len(own), "observable_bars": seen,
+                     "share_all": round(len(played) / len(own), 3) if own else 0.0,
+                     "share_observable": None if share_obs is None else round(share_obs, 3),
+                     "state": "unknown" if seen < OBSERVE_MIN else "in use" if share_obs >= STEP_MIN else "not in use"})
+    return {"counts": counts, "n": int(counts.sum()), "steps": rows}
 
 
 def _clean_measures(g: dict, sr: int) -> tuple[dict | None, str | None]:
@@ -758,25 +785,40 @@ def _clean_measures(g: dict, sr: int) -> tuple[dict | None, str | None]:
             "pitch_hz": p["pitch_body_hz"], "noise_body_db": (p["noise_db"] or {}).get("body")}, None
 
 
-def _pattern_numbers(use: dict) -> tuple[float, int, int]:
-    """(share of the on-grid hits on the offbeats, offbeats in use, odd 16ths in use)."""
-    steps = range(len(use["counts"]))
-    off = [s for s in steps if s % 4 == 2]
-    share_off = float(use["counts"][off].sum() / use["n"]) if use["n"] else 0.0
-    return (share_off, sum(use["share"][s] >= STEP_MIN for s in off),
-            sum(use["share"][s] >= STEP_MIN for s in steps if s % 2 == 1))
+def _pattern_numbers(use: dict) -> dict:
+    """The pattern numbers the hh rules read: "share_off" (share of the on-grid hits on the offbeats), and for the offbeats
+    ("off") and the odd 16ths ("odd") (in use, unknown, known, the number of 16ths of that kind)."""
+    rows = use["steps"]
+    kind = lambda pick: [r for r in rows if pick(r["step"])]  # noqa: E731
+    off, odd = kind(lambda st: st % 4 == 2), kind(lambda st: st % 2 == 1)
+    count = lambda rs: (sum(r["state"] == "in use" for r in rs), sum(r["state"] == "unknown" for r in rs),  # noqa: E731
+                        sum(r["state"] != "unknown" for r in rs), len(rs))
+    return {"share_off": float(sum(use["counts"][r["step"]] for r in off) / use["n"]) if use["n"] else 0.0,
+            "off": count(off), "odd": count(odd)}
+
+
+def _enough(in_use: int, known: int, total: int, needed: int, known_min: int) -> bool:
+    """`needed` of `total` 16ths in use, judged over the known ones: at least `known_min` known and at least the same share
+    of them (rounded up) in use, so an unknown 16th counts neither for nor against."""
+    return known >= known_min and in_use >= math.ceil(needed / total * known - 1e-9)
+
+
+def _unknown_text(unknown: int, what: str) -> str:
+    return "" if not unknown else " (%d of the %s unknown: observable in under %d bars)" % (unknown, what, OBSERVE_MIN)
 
 
 def _apply_rules(kind: str, use: dict, m: dict | None) -> tuple[str | None, str | None]:
     """(name, the rule that gave it) from the first rule of stem `kind` that fits, else (None, None). A rule that needs
     the clean hit's readings does not fire without them. "tom" is ranked low / mid / high by name_roles."""
-    share_off, off_used, odd_used = _pattern_numbers(use)
+    pn = _pattern_numbers(use)
     fall = None if m is None else m["fall_20_ms"]
     if kind == "hh":
-        if share_off >= OFFBEAT_SHARE and off_used >= OFFBEAT_STEPS:
-            return "hh offbeat", "%.0f %% of its hits on the offbeats, %d of 4 offbeats in use" % (100 * share_off, off_used)
-        if odd_used >= ODD_STEPS:
-            return "hh 16th", "%d of 8 odd 16ths in use" % odd_used
+        (off_used, off_unk, off_known, _), (odd_used, odd_unk, odd_known, _) = pn["off"], pn["odd"]
+        if pn["share_off"] >= OFFBEAT_SHARE and _enough(off_used, off_known, 4, OFFBEAT_STEPS, OFFBEAT_KNOWN):
+            return "hh offbeat", "%.0f %% of its hits on the offbeats, %d of %d known offbeats in use%s" % (
+                100 * pn["share_off"], off_used, off_known, _unknown_text(off_unk, "offbeats"))
+        if _enough(odd_used, odd_known, 8, ODD_STEPS, ODD_KNOWN):
+            return "hh 16th", "%d of %d known odd 16ths in use%s" % (odd_used, odd_known, _unknown_text(odd_unk, "odd 16ths"))
         if fall is not None and fall >= OPEN_FALL_20_MS:
             return "hh open", "falls 20 dB in %.0f ms (at least %.0f)" % (fall, OPEN_FALL_20_MS)
     elif kind == "snare" and m is not None:
@@ -798,9 +840,12 @@ def _no_rule(kind: str, use: dict, m: dict | None, why_no_clean: str | None) -> 
         return "the stem kind %r has no rules" % (kind,)
     parts = []
     if kind == "hh":
-        share_off, off_used, odd_used = _pattern_numbers(use)
-        parts.append("%.0f %% of its hits on the offbeats, %d of 4 offbeats and %d of 8 odd 16ths in use (a name needs %.0f %% "
-                     "and %d, or %d)" % (100 * share_off, off_used, odd_used, 100 * OFFBEAT_SHARE, OFFBEAT_STEPS, ODD_STEPS))
+        pn = _pattern_numbers(use)
+        (off_used, off_unk, off_known, _), (odd_used, odd_unk, odd_known, _) = pn["off"], pn["odd"]
+        parts.append("%.0f %% of its hits on the offbeats, %d of %d known offbeats%s and %d of %d known odd 16ths%s in use over the "
+                     "bars they could be seen in (a name needs %.0f %% and %d of 4, or %d of 8; at least %d and %d known)" % (
+                         100 * pn["share_off"], off_used, off_known, _unknown_text(off_unk, "offbeats"), odd_used, odd_known,
+                         _unknown_text(odd_unk, "odd 16ths"), 100 * OFFBEAT_SHARE, OFFBEAT_STEPS, ODD_STEPS, OFFBEAT_KNOWN, ODD_KNOWN))
     if m is None:
         parts.append("no clean hit to measure: %s" % why_no_clean)
     else:
@@ -859,7 +904,13 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
 
     Returns {"stem", "groups": [{"id", "name", "named", "rule", "reason" (why neutral), "bleed", "role" (index into
     "roles", None for bleed), "measures", "note"}], "roles": [{"name", "named", "rule", "groups", "count", "assigned",
-    "level_db", "pattern", "variants" (None, or one entry per group), "possibly_also"}], "notes"}."""
+    "level_db", "pattern", "steps", "note", "variants" (None, or one entry per group), "possibly_also"}], "notes"}.
+    "measures" holds, per 16th, `steps` (see `_use`): the bars the group plays there, the bars it could be seen in, and the
+    shares of its own bars and of the observable ones, with "in use", "not in use" or "unknown" (observable in under
+    OBSERVE_MIN bars: it counts neither for nor against); the hh pattern rules judge in-use over the known 16ths only
+    (at least ODD_STEPS of 8, or the same share of the known ones rounded up, with ODD_KNOWN known; the offbeats the same),
+    and a name that was given with unknown 16ths says how many in `note`. A result without `hidden_cells` and
+    `unmeasured_cells` has nothing hidden: every bar the group plays in is observable."""
     thr, sr = result["threshold"], result["sample_rate"]
     kind = stem_kind if stem_kind in ("hh", "snare", "toms", "kick") else None
     label = stem_kind if isinstance(stem_kind, str) and stem_kind else "group"
@@ -874,7 +925,9 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
         e = {"id": gid, "name": "%s %d" % (label, gid + 1), "named": False, "rule": None, "reason": None,
              "bleed": bool(bleed.get(gid, {}).get("bleed")), "role": None, "note": None,
              "measures": {"hits": g["count"] + g["assigned"], "measured": g["count"], "assigned": g["assigned"],
-                          "offbeat_share": round(_pattern_numbers(u)[0], 3), **(m or {"clean_hit": why_clean})}}
+                          "offbeat_share": round(_pattern_numbers(u)["share_off"], 3), "steps": u["steps"],
+                          "unknown_steps": [r["step"] for r in u["steps"] if r["state"] == "unknown"],
+                          **(m or {"clean_hit": why_clean})}}
         info[gid] = e
         if e["bleed"]:
             e["reason"] = "marked as bleed: %s" % bleed[gid]["why"]
@@ -888,6 +941,13 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
             e["reason"] = _no_rule(stem_kind, u, m, why_clean)
         else:
             e["name"], e["named"], e["rule"] = name, True, rule
+            pn = _pattern_numbers(u)
+            unk = {"hh offbeat": ("off", "offbeats"), "hh 16th": ("odd", "odd 16ths")}.get(name)
+            if unk and pn[unk[0]][1]:
+                e["note"] = "named without %d of the %d %s: %s, each observable in under %d bars (hidden under a tail or held an " \
+                            "unmeasured hit), so they counted neither for nor against" % (
+                                pn[unk[0]][1], pn[unk[0]][3], unk[1], [r["step"] for r in u["steps"] if r["state"] == "unknown"
+                                                                       and (r["step"] % 4 == 2 if unk[0] == "off" else r["step"] % 2 == 1)], OBSERVE_MIN)
     live = [g for g in result["groups"] if not info[g["id"]]["bleed"]]
     parent = {g["id"]: g["id"] for g in live}
 
@@ -922,6 +982,7 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
         roles.append({"name": e["name"], "named": e["named"], "rule": e["rule"], "groups": sorted(ids),
                       "count": sum(g["count"] for g in gs), "assigned": sum(g["assigned"] for g in gs),
                       "level_db": big["level_db"], "pattern": [float(min(1.0, v)) for v in total],
+                      "steps": info[big["id"]]["measures"]["steps"], "note": e["note"] if e["named"] else None,
                       "variants": None if len(ids) == 1 else [
                           {"group": g["id"], "count": g["count"], "level_db": g["level_db"],
                            "stability": g["stability"], "separation": g["separation"],

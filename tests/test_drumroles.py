@@ -646,13 +646,18 @@ def click_hit(f=400.0, tau=0.003, seconds=0.3):
 
 def fake_result(specs, n_bars=8, threshold=drumroles.THRESHOLD):
     """A hit_groups-shaped result built by hand: each spec is {steps, bars, audio (the clean hit, [n] or None), level (dB),
-    stability, separation, nearest, assigned (steps whose hits count as assigned, not measured)}. Group i has id i; its
+    stability, separation, nearest, assigned (steps whose hits count as assigned, not measured), hidden / unmeasured
+    ((bar, step) cells with no hit that are listed as hidden under a tail / as holding an unmeasured hit)}. Group i has id i; its
     hits sit exactly on the 16th of every bar in `bars` at each step."""
-    hits, groups = [], []
+    hits, groups, hidden, unmeasured = [], [], [], []
     for gid, s in enumerate(specs):
         members, assigned = [], []
+        hidden += [list(c) for c in s.get("hidden", [])]              # (bar, step) cells the group is not seen in: under a tail
+        unmeasured += [list(c) for c in s.get("unmeasured", [])]      # ...or held an unmeasured hit
         for b in s.get("bars", range(n_bars)):
             for st in s["steps"]:
+                if (b, st) in s.get("hidden", ()) or (b, st) in s.get("unmeasured", ()):
+                    continue
                 h = {"id": len(hits), "bar": b, "step": st, "on_grid": True, "onset_s": at(b * 16 + st),
                      "level_db": s.get("level", -10.0), "status": "grouped", "group": gid}
                 (assigned if st in s.get("assigned", ()) else members).append(h["id"])
@@ -669,7 +674,8 @@ def fake_result(specs, n_bars=8, threshold=drumroles.THRESHOLD):
             "assigned_members": assigned, "off_grid": 0,
             "clean_hit": None if audio is None else {"hit": members[0], "audio": np.asarray(audio)[:, None]},
             "clean_note": "none of the members tried is complete" if audio is None else None})
-    return {"sample_rate": SR, "tempo": BPM, "t0": T0, "threshold": threshold, "hits": hits, "groups": groups}
+    return {"sample_rate": SR, "tempo": BPM, "t0": T0, "threshold": threshold, "hits": hits, "groups": groups,
+            "bars": n_bars, "first_bar": 0, "hidden_cells": sorted(hidden), "unmeasured_cells": sorted(unmeasured)}
 
 
 OFFBEATS, ODDS = [2, 6, 10, 14], [1, 3, 5, 7, 9, 11, 13, 15]
@@ -699,9 +705,96 @@ def test_names_hh_offbeat_16th_and_open_each_by_its_rule_and_a_group_no_rule_fit
 def test_names_a_hat_that_plays_one_16th_of_each_beat_is_not_a_16th_hat():
     # 1, 5, 9, 13 (the "e" of each beat) are 4 of the 8 odd 16ths; a hat on 6 of them is a 16th hat, a hat on 4 is not
     on_e = fake_result([{"steps": [1, 5, 9, 13], "audio": noise_hit(1, 0.005)}])
-    assert names(on_e, "hh")[0] == ["hh 1"] and "4 of 8 odd 16ths" in names(on_e, "hh")[1]["groups"][0]["reason"]
+    assert names(on_e, "hh")[0] == ["hh 1"] and "4 of 8 known odd 16ths" in names(on_e, "hh")[1]["groups"][0]["reason"]
     six = fake_result([{"steps": [1, 3, 5, 7, 9, 11], "audio": noise_hit(1, 0.005)}])
-    assert names(six, "hh")[0] == ["hh 16th"] and "6 of 8 odd 16ths" in names(six, "hh")[1]["groups"][0]["rule"]
+    assert names(six, "hh")[0] == ["hh 16th"] and "6 of 8 known odd 16ths" in names(six, "hh")[1]["groups"][0]["rule"]
+
+
+def odd_steps(r, gid=0):
+    return {row["step"]: row for row in drumroles.name_roles(r, "hh")["groups"][gid]["measures"]["steps"] if row["step"] % 2 == 1}
+
+
+def test_names_judge_a_step_over_the_bars_it_could_be_seen_in_closed_hats_under_an_open_hats_tail():
+    # 20 bars of closed hats on every 16th but the offbeats (the beats and all 8 odd 16ths, 12 steps a bar); an open hat on the
+    # offbeats whose tail hides the 16th after it (3, 7, 11, 15, the "a" of each beat) in 16 of the 20 bars, where no hat can
+    # be seen at that line. The hat is seen at those 4 steps in 4 bars only: 4 of 20 (20 %) over all bars, 4 of 4 over the
+    # bars they were observable in
+    hide = [(b, s) for b in range(4, 20) for s in (3, 7, 11, 15)]
+    r = fake_result([{"steps": ODDS + [0, 4, 8, 12], "audio": noise_hit(1, 0.012), "hidden": hide}], n_bars=20)
+    rows = odd_steps(r)
+    for s in (3, 7, 11, 15):
+        assert (rows[s]["played_bars"], rows[s]["observable_bars"], rows[s]["share_all"], rows[s]["share_observable"]) == (4, 4, 0.2, 1.0)
+        assert rows[s]["state"] == "in use"
+    for s in (1, 5, 9, 13):
+        assert (rows[s]["played_bars"], rows[s]["observable_bars"], rows[s]["share_all"], rows[s]["share_observable"]) == (20, 20, 1.0, 1.0)
+    # judged over all bars (what the rule read before) it is 4 of 8 odd 16ths: no name; over the observable bars it is 8 of 8
+    assert sum(rows[s]["share_all"] >= drumroles.STEP_MIN for s in rows) == 4
+    got, out = names(r, "hh")
+    assert got == ["hh 16th"] and "8 of 8 known odd 16ths in use" in out["groups"][0]["rule"] and out["groups"][0]["note"] is None
+    assert out["roles"][0]["steps"] == out["groups"][0]["measures"]["steps"] and out["groups"][0]["measures"]["unknown_steps"] == []
+
+
+def test_names_a_group_that_plays_only_the_a_steps_with_every_step_observable_is_not_a_16th_hat():
+    # 3, 7, 11, 15 and the beats, in every bar, nothing hidden: the "e" steps (1, 5, 9, 13) were observable in all 20 bars and
+    # not played in any of them, so they count against: 4 of 8 odd 16ths
+    r = fake_result([{"steps": [3, 7, 11, 15, 0, 4, 8, 12], "audio": noise_hit(1, 0.012)}], n_bars=20)
+    rows = odd_steps(r)
+    assert all(rows[s]["observable_bars"] == 20 and rows[s]["state"] == "not in use" for s in (1, 5, 9, 13))
+    got, out = names(r, "hh")
+    assert got == ["hh 1"] and "4 of 8 known odd 16ths" in out["groups"][0]["reason"]
+
+
+def test_names_a_step_observable_in_too_few_bars_is_unknown_counts_for_nothing_and_the_note_says_so():
+    # the "e" steps 1 and 5 are under a tail in 6 of 8 bars: seen in 2 bars (unknown, under 4); the other six odd 16ths are
+    # played in every bar: 6 of the 6 known are in use, so it is a 16th hat, named without 2 of 8, and says which
+    hide = [(b, s) for b in range(2, 8) for s in (1, 5)]
+    r = fake_result([{"steps": ODDS + [0, 4, 8, 12], "audio": noise_hit(1, 0.012), "hidden": hide}])
+    rows = odd_steps(r)
+    assert [rows[s]["state"] for s in (1, 5)] == ["unknown", "unknown"] and rows[1]["observable_bars"] == 2 and rows[1]["played_bars"] == 2
+    got, out = names(r, "hh")
+    e = out["groups"][0]
+    assert got == ["hh 16th"] and e["measures"]["unknown_steps"] == [1, 5]
+    assert "named without 2 of the 8 odd 16ths: [1, 5]" in e["note"] and "under 4 bars" in e["note"] and e["note"] == out["roles"][0]["note"]
+    assert "6 of 6 known odd 16ths in use (2 of the odd 16ths unknown" in e["rule"]
+    # an unknown step counts neither for nor against: a group that plays only 3 of its 6 known odd 16ths is not named
+    # with 2 unknown, 5 of the 6 known in use is 3/4 of them (6 of 8 asked, scaled to the known ones): named; 4 of 6 is not
+    five = fake_result([{"steps": [7, 9, 11, 13, 15, 0, 4, 8, 12], "audio": noise_hit(1, 0.012), "hidden": hide}])
+    assert names(five, "hh")[0] == ["hh 16th"] and "5 of 6 known odd 16ths in use" in names(five, "hh")[1]["groups"][0]["rule"]
+    four = fake_result([{"steps": [7, 9, 11, 13, 0, 4, 8, 12], "audio": noise_hit(1, 0.012), "hidden": hide}])
+    assert names(four, "hh")[0] == ["hh 1"]
+    few = fake_result([{"steps": [3, 7, 11, 0, 4, 8, 12], "audio": noise_hit(1, 0.012), "hidden": hide}])
+    assert names(few, "hh")[0] == ["hh 1"]
+    # too few known (3 of 8: the other 5 unknown) is not enough to name it, whatever the three show
+    hid5 = [(b, s) for b in range(2, 8) for s in (1, 3, 5, 7, 9)]
+    scarce = fake_result([{"steps": ODDS + [0, 4, 8, 12], "audio": noise_hit(1, 0.012), "hidden": hid5}])
+    got, out = names(scarce, "hh")
+    assert got == ["hh 1"] and "at least 2 and 4 known" in out["groups"][0]["reason"] and len(out["groups"][0]["measures"]["unknown_steps"]) == 5
+
+
+def test_names_an_unmeasured_hit_at_a_16th_makes_that_bar_unobservable_there_like_a_hidden_one():
+    # the "e" step 1 held an unmeasured hit (overlapped, say) in 4 of 8 bars: it may have been this group's, so those bars do not
+    # count against: played in 4, observable in 4, in use
+    r = fake_result([{"steps": ODDS + [0, 4, 8, 12], "audio": noise_hit(1, 0.012), "unmeasured": [(b, 1) for b in range(4, 8)]}])
+    row = odd_steps(r)[1]
+    assert (row["played_bars"], row["observable_bars"], row["share_all"], row["share_observable"]) == (4, 4, 0.5, 1.0)
+
+
+def test_observable_cells_of_a_real_stem_are_the_hidden_and_unmeasured_lines():
+    # open hats (tau 120 ms) on the offbeats, closed hats (12 ms) on the 96 other 16ths of 8 bars: the 16th after each open hat
+    # lies in its tail with no hit found (without the search every such line, steps 3, 7, 11, 15, in all 8 bars), and with the
+    # search the hits it finds there are overlapped hits: unmeasured_cells are exactly their cells
+    ev = hat_events(8, open_tau=0.12, closed_tau=0.012)
+    off = run(stem(ev, 8))
+    assert off["bars"] == 8 and off["first_bar"] == 0 and off["unmeasured_cells"] == []
+    assert {(b, s) for b, s in off["hidden_cells"] if s in (3, 7, 11, 15)} == {(b, s) for b in range(8) for s in (3, 7, 11, 15)}
+    assert all(off["hidden_pattern"][s] == len({b for b, c in off["hidden_cells"] if c == s}) / 8 for s in range(16))
+    on = run(stem(ev, 8), grid_onsets=True)
+    lost = {(h["bar"], h["step"]) for h in on["hits"] if h["on_grid"] and h["status"] in ("overlapped", "too_short", "no_lead", "ungrouped", "faint")}
+    assert lost and {tuple(c) for c in on["unmeasured_cells"]} == lost
+    assert all(on["unmeasured_pattern"][s] == len({b for b, c in on["unmeasured_cells"] if c == s}) / 8 for s in range(16))
+    # a section carries its own
+    sec = run(stem(ev, 8), sections=[{"name": "b", "start_bar": 4, "bars": 4}])["sections"][0]
+    assert sec["first_bar"] == 4 and sec["bars"] == 4 and all(4 <= b < 8 for b, _ in sec["hidden_cells"]) and sec["hidden_cells"]
 
 
 def test_names_count_assigned_hits_in_the_pattern_and_say_how_many():
@@ -805,16 +898,16 @@ def test_names_leave_out_a_group_marked_as_bleed_and_it_stays_in_the_output():
 
 @pytest.mark.slow
 def test_names_on_a_real_hat_stem_closed_16ths_and_a_short_hat_on_the_offbeats():
-    # 3 bars of hat_events: a tau 25 ms hat on the offbeats, tau 5 ms on the other 16ths (48 measured hits, so the sample
+    # 4 bars of hat_events (the least a 16th can be known over: OBSERVE_MIN): a tau 25 ms hat on the offbeats, tau 5 ms on the other 16ths (64 measured hits, so the sample
     # moves and stability is measured); two sounds 2.9 apart. The offbeat hat falls 20 dB in 60 ms: not "open" (140 ms)
-    r = run(stem(hat_events(3), 3), stability_runs=2)
+    r = run(stem(hat_events(4), 4), stability_runs=2)
     got, out = names(r, "hh")
     by_count = sorted(r["groups"], key=lambda g: -g["count"])
-    assert [g["count"] for g in by_count] == [36, 12] and all(g["stability"] == 1.0 for g in by_count)
+    assert [g["count"] for g in by_count] == [48, 16] and all(g["stability"] == 1.0 for g in by_count)
     assert {g["id"]: n for g, n in zip(r["groups"], got)} == {by_count[0]["id"]: "hh 16th", by_count[1]["id"]: "hh offbeat"}
     assert [role["name"] for role in out["roles"]] == ["hh 16th", "hh offbeat"] and all(g["named"] for g in out["groups"])
     # the same stem asked for no regrouping has no stability: both stay neutral, with the reason
-    quiet = names(run(stem(hat_events(3), 3)), "hh")
+    quiet = names(run(stem(hat_events(4), 4)), "hh")
     assert quiet[0] == ["hh 1", "hh 2"] and all("stability is not measured" in g["reason"] for g in quiet[1]["groups"])
 
 
