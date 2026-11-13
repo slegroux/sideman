@@ -954,6 +954,7 @@ def test_tom_roles_at_the_same_pitch_share_a_rank_they_are_not_split_low_and_hig
     assert sorted(got) == ["tom high", "tom high 2", "tom low"] and got[0] == "tom low"
 
 
+@pytest.mark.slow
 def test_the_measurement_rules_read_up_to_eight_members_and_name_only_when_two_thirds_agree():
     # a snare stem group whose clean hit reads a rim and whose 8 members read 3 snares (a tone under the noise), 3 rims and 2
     # noise hits: none reaches 6 of 8 (two thirds of 8 is 5.33), so it stays neutral and the reason has the counts
