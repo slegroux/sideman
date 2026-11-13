@@ -330,6 +330,8 @@ FALL20_PER_T = 0.227     # Operator Ae Decay T: the amp envelope of a device fro
 #                          The 0.29 of 2026-11-09 and 11 was measured on a kit built through the preset XML with
 #                          DecaySlope 1; the slope is not a LOM parameter, so the device a LOM session gets has its own.
 TAU_PER_FALL20 = 1.0 / math.log(10.0)       # tau = fall_20 / ln(10), for an exponential amplitude decay
+FALL20_PER_T_NOISE = 0.216   # the same for Be Decay (the noise's amp envelope): ONE measurement, 2026-11-12: Be Decay 500 ms read a
+#                          20 dB fall of 108 ms. The tone's 0.227 has two (300 and 1000 ms); the noise decays use this one.
 T_PER_TAU = math.log(10.0) / FALL20_PER_T   # Operator T = 10.1 tau: the amp curve is 88 dB down at T
 PE_DECAY_PER_TAU = 7.94  # Pe Decay = tau * this, measured 2026-11-12 on a scratch device and NOT the amp envelope's
 #                          constant (10.1): Pe Init = Peak 12 st, Pe Decay 400 ms read 11.0 / 8.5 / 5.85 / 2.6 / 1.69 /
@@ -371,7 +373,7 @@ Z_AMPLITUDE_DB = 20.0 / math.log(10.0)      # 8.686 dB per neper of amplitude
 
 CHECKED = (          # read or measured on a scratch Operator (Live 12.4.6) on 2026-11-12; live-assumptions-2026-11-12.md
     "Amp decay: exponential and linear in dB; 20 dB in 0.227 T (Ae Decay 300 ms: fall 10/20/40 dB = 34.2 / 68.3 / 135.9 "
-    "ms; 1000 ms: 113.7 / 226.6 / 452.5 ms), for noise 0.216 T (Be Decay 500 ms: 108 ms). The decay slope is not a LOM "
+    "ms; 1000 ms: 113.7 / 226.6 / 452.5 ms), for noise 0.216 T (Be Decay 500 ms: 108 ms, ONE measurement; FALL20_PER_T_NOISE). The decay slope is not a LOM "
     "parameter; this is the device insert_device gives (the 0.29 of the XML kit, DecaySlope 1, does not apply).",
     "Pe Decay = tau * 7.94 holds within the search's range (7.0 to 8.4): Pe Init = Peak 12 st, Pe Decay 400 ms read 11.0 / "
     "8.5 / 5.85 / 2.6 / 1.69 / 0.56 / 0.18 st at 5 / 20 / 40 / 80 / 100 / 150 / 200 ms (tau 58 falling to 49 ms); the "
@@ -569,7 +571,7 @@ def noise_onset_db(patch: dict) -> float:
     the onset along the two decays, at most ONSET_CLAMP_DB either way (a long reach back from a decay estimate is not
     to be trusted: the reference times are a window's centre, and a short hit has a short window)."""
     tau_t = patch["tone_decay_ms"] * FALL20_PER_T * TAU_PER_FALL20
-    tau_n = patch["noise_decay_ms"] * FALL20_PER_T * TAU_PER_FALL20
+    tau_n = patch["noise_decay_ms"] * FALL20_PER_T_NOISE * TAU_PER_FALL20
     back = Z_AMPLITUDE_DB * patch.get("noise_ref_ms", NOISE_REF_MS) * (1.0 / tau_n - 1.0 / tau_t)
     return patch["noise_level_ref_db"] + max(-ONSET_CLAMP_DB, min(ONSET_CLAMP_DB, back))
 
@@ -616,7 +618,7 @@ def operator_guess(profile: dict) -> dict:
                      + 1/tau_tone; (3) otherwise a fifth of the tone's (default, searched within a factor of 4). The
                      result is shortened until tone + noise fall 40 dB no more than 25 % after the measured fall_40_ms
                      (unless the tone alone does: a gated shape). Noise-led: the larger of fall_20_ms and
-                     fall_40_ms / 2, over 0.227 (when the hit falls more slowly later the late fall is the noise's)
+                     fall_40_ms / 2, over 0.216 (FALL20_PER_T_NOISE: one measurement; when the hit falls more slowly later the late fall is the noise's)
       noise_attack_ms attack_ms, at least NOISE_ATTACK_FLOOR_MS
       noise_filter_hz  high-pass for a noise-led hit whose bands are empty low (see _noise_filter)
       output_db      Volume: the sample's peak_db minus the peak of one oscillator at 0 dB (+3.7 tone, +8 noise)
@@ -700,7 +702,7 @@ def operator_guess(profile: dict) -> dict:
             tau_noise, default_decay, tail_reach = None, False, None
             noisy_tail = b is not None and b >= BODY_NOISE_DB and f40 and f40 > TAIL_RATIO * fall20
             if noisy_tail and (flat.get("body") or 0.0) < FLAT_BODY:        # a flat body is noise; a band-limited one reads 0.0 too
-                tail_reach = (f40 - fall20) / FALL20_PER_T                  # the decay a flat tail would give, kept in reach
+                tail_reach = (f40 - fall20) / FALL20_PER_T_NOISE            # the decay a flat tail would give, kept in reach
             if noisy_tail and tail_reach is None:
                 tau_noise = (f40 - fall20) * TAU_PER_FALL20
                 reading, conf = "fall_40_ms - fall_20_ms (a body %.0f dB noisy, and a tail %.1f times the first 20 dB, "\
@@ -720,7 +722,7 @@ def operator_guess(profile: dict) -> dict:
                 tone_only = {"tone_decay_ms": fall20 / FALL20_PER_T, "noise_level_ref_db": ratio_a, "noise_ref_ms": t_a}
                 shrunk = False
                 for _ in range(20):
-                    tone_only["noise_decay_ms"] = tau_noise / (FALL20_PER_T * TAU_PER_FALL20)
+                    tone_only["noise_decay_ms"] = tau_noise / (FALL20_PER_T_NOISE * TAU_PER_FALL20)
                     onset = noise_onset_db(tone_only)
                     if _model_fall_ms(tau_tone, tau_noise, onset) <= CONSISTENT * f40:
                         break
@@ -728,7 +730,7 @@ def operator_guess(profile: dict) -> dict:
                     shrunk = True
                 if shrunk:
                     reading += "; shortened so tone + noise fall 40 dB within %.0f %% of fall_40_ms" % (100 * (CONSISTENT - 1))
-            put("noise_decay_ms", tau_noise / (FALL20_PER_T * TAU_PER_FALL20), reading, conf)
+            put("noise_decay_ms", tau_noise / (FALL20_PER_T_NOISE * TAU_PER_FALL20), reading, conf)
             put("noise_attack_ms", max(NOISE_ATTACK_FLOOR_MS, attack), "attack_ms, floored at %.1f ms" % NOISE_ATTACK_FLOOR_MS,
                 "measured" if attack >= NOISE_ATTACK_FLOOR_MS else "default")
             if a > NOISE_FREE_DB and evidence:
@@ -765,9 +767,9 @@ def operator_guess(profile: dict) -> dict:
     else:
         structure["noise_on"] = True
         late = f40
-        decay_ms = max(fall20, late / 2.0 if late else 0.0) / FALL20_PER_T
-        put("noise_decay_ms", decay_ms, "the larger of fall_20_ms and fall_40_ms / 2, over %.2f (when the hit falls more "
-            "slowly later, the late fall is the noise's: a tone in the first 20 dB decays faster)" % FALL20_PER_T,
+        decay_ms = max(fall20, late / 2.0 if late else 0.0) / FALL20_PER_T_NOISE
+        put("noise_decay_ms", decay_ms, "the larger of fall_20_ms and fall_40_ms / 2, over %.3f (when the hit falls more "
+            "slowly later, the late fall is the noise's: a tone in the first 20 dB decays faster)" % FALL20_PER_T_NOISE,
             "derived")
         put("noise_attack_ms", max(NOISE_ATTACK_FLOOR_MS, attack), "attack_ms, floored at %.1f ms" % NOISE_ATTACK_FLOOR_MS,
             "measured" if attack >= NOISE_ATTACK_FLOOR_MS else "default")
