@@ -1196,7 +1196,7 @@ def _bleed_pair(res_a: dict, ga: dict, res_b: dict, gbs: list, span: int, sr: in
     n = len(hits_a)
     ev = {"source_stem": None, "source_group": gbs[0]["id"], "source_groups": [g["id"] for g in gbs], "union": len(gbs) > 1,
           "hits": n, "coincide": 0, "rate": 0.0, "expected": None, "own_expected": None, "own_bars": 0, "p_evidence": None, "p": None, "louder_db": None, "louder_share": None,
-          "distance": None, "distances": None, "co_located": False, "louder_min_db": BLEED_LOUDER_DB,
+          "distance": None, "distances": None, "co_located": False, "strict": False, "louder_min_db": BLEED_LOUDER_DB,
           "louder_min_share": BLEED_LOUDER_SHARE, "distance_max": BLEED_DISTANCE, "failed": "coincidence"}
     if not n or not hits_b:
         return ev
@@ -1221,7 +1221,8 @@ def _bleed_pair(res_a: dict, ga: dict, res_b: dict, gbs: list, span: int, sr: in
               p=_tail(chance, len(pairs)) if pairs else 1.0, own_expected=float(np.mean(chance_own)), own_bars=len(own))
     ev["p_evidence"] = abs(ev["rate"] - ev["own_expected"]) > OWN_CLOSE
     co = ev["co_located"] = ev["expected"] >= CO_EXPECTED
-    louder_db, louder_share, limit = (CO_LOUDER_DB, CO_LOUDER_SHARE, CO_DISTANCE) if co else (
+    strict = ev["strict"] = co or ev["own_expected"] >= CO_EXPECTED     # over its own bars the other group is there almost always
+    louder_db, louder_share, limit = (CO_LOUDER_DB, CO_LOUDER_SHARE, CO_DISTANCE) if strict else (
         BLEED_LOUDER_DB, BLEED_LOUDER_SHARE, BLEED_DISTANCE)
     ev.update(louder_min_db=louder_db, louder_min_share=louder_share, distance_max=limit)
     if pairs:                                   # measured even when the coincidence fails, so the report can say it
@@ -1265,6 +1266,8 @@ def _bleed_why(ev: dict) -> str:
         "group's own bars the other group plays at these 16ths about as often as they coincide")
     if ev["co_located"]:
         co = "co-located: chance cannot tell (%s); judged on level and likeness alone" % co
+    elif ev["strict"]:
+        co = "%s; over this group's own bars the other group is there almost always, so the level and likeness limits are the strict ones" % co
     lv = ("the level of that group against this group's hits is %+.1f dB (median; %.0f %% of the pairs at %+.0f dB or more)"
           % (ev["louder_db"], 100 * ev["louder_share"], ev["louder_min_db"])) if ev["louder_db"] is not None else ""
     if ev["failed"] == "coincidence":
@@ -1300,6 +1303,9 @@ def mark_bleed(results_by_stem: dict) -> dict:
     When `expected` is at least CO_EXPECTED the coincidence cannot tell a leak from two parts that share a pattern
     ("co_located" in the evidence): the group is then marked on level (CO_LOUDER_DB in CO_LOUDER_SHARE of the pairs) and
     likeness (CO_DISTANCE) alone, with at least CO_RATE of its hits coincident.
+    When that chance over the group's own bars (below) is at least CO_EXPECTED too ("strict" in the evidence), the level and
+    likeness limits are the co-located ones (CO_LOUDER_DB in CO_LOUDER_SHARE, CO_DISTANCE) though the coincidence test is the
+    ordinary one: a sectional fill copied 20 dB down stays provable, the same sound only 8 dB under does not.
     The same chance is also reported over the bars the group itself plays in (`own_expected`, `own_bars`), and `p_evidence`
     is False when that is within OWN_CLOSE of the observed rate: `p` is then over the track's bars, not over the group's, and
     says only that both parts live in the same bars. The test itself keeps the track-wide chance: a leak is only there in the bars

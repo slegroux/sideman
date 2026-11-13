@@ -685,7 +685,17 @@ louder by **at least 12 dB** in at least 90 % of the coincident pairs (a
 separator leak is 15 to 30 dB down; 8 dB under is a part doubling another, and
 the 6 dB of the ordinary test would mark it), and the clean hits are within the
 grouping threshold (**1.5**: the same sound, not a similar one). A different
-sound that shares the pattern fails the likeness. The numbers are chosen, from
+sound that shares the pattern fails the likeness. **The 1.5 can miss a leak that
+the separator has low-passed heavily:** the same snare leak low-passed at 1000 and
+400 Hz reads 1.24 and 1.39 against the full-band copy and is marked, at 200 Hz it
+reads 1.58 and is not. Such a group stays an unmarked, neutral group with the
+numbers in its `why`.
+
+The same strict limits (12 dB in 90 %, 1.5) apply when the **chance over the
+group's own bars** is 90 % or more (the other group is there at the group's 16ths
+in nearly every bar the group plays in), though the coincidence test stays the
+ordinary one: a sectional tom fill copied 20 dB down is still marked, the same sound
+8 dB under, or a 1.79-apart one, is not. The evidence says `strict`. The numbers are chosen, from
 the cases built for them (20 dB and 8 dB down, a kick against a hat); on Flare
 no group has an expected rate of 90 %, so nothing changes there.
 

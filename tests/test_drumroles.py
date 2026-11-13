@@ -1380,6 +1380,31 @@ def test_the_level_of_the_other_group_is_the_median_of_the_pairs_not_the_mean():
     assert ev["louder_db"] == pytest.approx(20.0) and ev["louder_share"] == pytest.approx(2 / 3)
 
 
+def sectional_pair(x_audio, x_level, y_audio, y_level):
+    """x plays the beats of bars 4-7 and y those beats and a 16th it never shares elsewhere in a 20-bar track: the chance of x's hits
+    over the track is 20 %, over the 4 bars x plays in 100 %."""
+    beats = [(b, s) for b in range(4, 8) for s in (0, 4, 8, 12)]
+    y = beats + [(b, 14) for b in list(range(4)) + list(range(8, 20))]
+    return drumroles.mark_bleed(bleed_pair(x_audio, beats, x_level, y_audio, y, y_level, n_bars=20))["x"][0]
+
+
+def test_when_the_other_group_is_there_in_the_groups_own_bars_the_level_and_likeness_limits_are_the_strict_ones():
+    # a sectional fill (x only in bars 4-7, where y plays too): over the track 20 %, over x's bars 100 %
+    ev = sectional_pair(tom_hit() * 0.1, -30.0, tom_hit(), -10.0)               # the same tom 20 dB down: still marked
+    assert ev["bleed"] and ev["evidence"]["strict"] and not ev["evidence"]["co_located"] and ev["evidence"]["distance"] < 1.0
+    assert ev["evidence"]["louder_min_db"] == drumroles.CO_LOUDER_DB and "strict ones" in ev["why"]
+    # the same sound only 8 dB under: it would pass the 6 dB of the ordinary limits, not the 12 dB of the strict ones
+    ev = sectional_pair(tom_hit() * 0.1, -18.0, tom_hit(), -10.0)
+    assert not ev["bleed"] and ev["evidence"]["failed"] == "level" and ev["evidence"]["louder_db"] == pytest.approx(8.0)
+    # a sound 1.79 from it (a 500 Hz tom against a 150 Hz one) 20 dB under passes the 2.0 of the ordinary limits, not the 1.5
+    ev = sectional_pair(tom_hit(f=500.0) * 0.1, -30.0, tom_hit(), -10.0)
+    assert not ev["bleed"] and ev["evidence"]["failed"] == "likeness" and 1.5 < ev["evidence"]["distance"] < 2.0
+    # the control: x in every bar of the track (own chance 50 %, track 50 %): the ordinary limits, 8 dB and 1.79 are enough
+    for audio in (tom_hit() * 0.1, tom_hit(f=500.0) * 0.1):
+        ev = drumroles.mark_bleed(bleed_pair(audio, CELLS, -18.0, tom_hit(), CELLS, -10.0))["x"][0]
+        assert ev["bleed"] and not ev["evidence"]["strict"] and ev["evidence"]["louder_min_db"] == drumroles.BLEED_LOUDER_DB
+
+
 def split_source_pair(second_audio):
     """Stem x (a kick on step 0 of 16 bars, and a tom copy 20 dB down on step 2 of bars 0-7) against stem y, where the tom
     fill that the copy comes from is split over two groups: step 2 in bars 0-3 and step 2 in bars 4-7."""
