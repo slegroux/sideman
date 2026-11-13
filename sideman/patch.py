@@ -1343,3 +1343,150 @@ class OperatorRenderer(LiveRenderer):
     def bind(self, structure: dict) -> "OperatorRenderer":
         self.structure = structure
         return self
+
+
+# ---- patch_render, repeat_check, patch_match: the functions on top of a renderer
+
+def patch_render(patches: list, renderer, structure: dict | None = None) -> list:
+    """One hit per semantic patch through `renderer` (a LiveRenderer; `structure` binds an OperatorRenderer first).
+    Failed candidates are empty arrays (the reasons are in renderer.takes[-1])."""
+    if structure is not None:
+        renderer.bind(structure)
+    return renderer.render(patches)
+
+
+def repeat_check(renderer, patch: dict, n: int = 16, structure: dict | None = None, target: np.ndarray | None = None,
+                 sr: int | None = None, **distance_kw) -> dict:
+    """Render the same patch `n` times in one batch and measure how much the renders differ: the number `search`'s
+    margin has to be read against. Returns {"n", "ok" (hits rendered), "pairwise": {"median", "max", "mean", "min",
+    "count"} (spectral_distance over every pair), "readings": {key: {"median", "std", "min", "max"}} (profile_array
+    of each hit: peak_db, attack_ms, fall_20/40_ms, pitch_body_hz, click_db), "repeat_spread" (the std of the distance
+    to `target`, which is what search's repeat_spread is, when a target is given, else None), "failures", "take"}.
+    Raises RuntimeError when fewer than 2 hits came back."""
+    hits = patch_render([patch] * n, renderer, structure)
+    take = renderer.takes[-1] if getattr(renderer, "takes", None) else None
+    sr = sr or getattr(renderer, "sample_rate", None)
+    good = [h for h in hits if len(h)]
+    if len(good) < 2 or not sr:
+        raise RuntimeError("repeat_check got %d hit(s) of %d: %s" % (len(good), n, take["failures"] if take else "no log"))
+    d = np.array([spectral_distance(a, b, sr, **distance_kw) for i, a in enumerate(good) for b in good[i + 1:]])
+    readings = {}
+    profs = [oneshot.profile_array(h, sr, single=True) for h in good]
+    for key in PARAM_KEYS:
+        v = np.array([p[key] for p in profs if p.get(key) is not None], dtype=float)
+        if len(v):
+            readings[key] = {"median": float(np.median(v)), "std": float(np.std(v, ddof=1)) if len(v) > 1 else 0.0,
+                             "min": float(v.min()), "max": float(v.max())}
+    spread = None
+    if target is not None:
+        scores = [spectral_distance(h, target, sr, **distance_kw) for h in good]
+        spread = float(np.std(scores, ddof=1))
+    return {"n": n, "ok": len(good), "pairwise": {"median": float(np.median(d)), "max": float(d.max()), "mean": float(d.mean()),
+                                                  "min": float(d.min()), "count": len(d)},
+            "readings": readings, "repeat_spread": spread, "failures": take["failures"] if take else [], "take": take}
+
+
+MIN_FLOOR_DB = 20.0        # patch_match never sets the distance's floor under this (it would ignore most of the spectrum)
+FLOOR_MARGIN_DB = 3.0
+
+
+def noise_floor_db(x: np.ndarray, sr: int, profile: dict) -> tuple[float, str]:
+    """(floor_db for spectral_distance, how it was estimated) for a sample file x [n, channels]. The floor is how far
+    under the loudest STFT magnitude the distance's log term clamps; to leave the sample's own noise bed unmatched it
+    is set FLOOR_MARGIN_DB shallower than the bed's depth under the hit's loudest millisecond (so the clamp sits that
+    far over the bed), between MIN_FLOOR_DB and 60. The bed is read, in this order, from: the file's tail (the last
+    0.1 s, when the profile has a fall_40_ms and the file runs 3 x fall_40_ms + 0.15 s past the onset: by then an
+    exponential hit is 120 dB down and what is left is the bed), the lead before the onset (when at least 50 ms long),
+    else there is no bed to measure and the floor stays 60. Depth is taken in
+    the time domain; for a tonal hit the bed is deeper in the spectrum than here (a tone concentrates in a bin),
+    so the clamp sits higher over it, which is the safe side."""
+    mono = np.asarray(x, dtype=np.float64).mean(axis=1)
+    frame = max(1, int(round(0.001 * sr)))
+    c = np.concatenate([[0.0], np.cumsum(mono ** 2)])
+    rms = np.sqrt((c[frame:] - c[:-frame]) / frame) if len(mono) > frame else np.array([math.sqrt(c[-1] / max(1, len(mono)))])
+    peak = float(rms.max())
+    onset = (profile.get("onset_ms") or 0.0) / 1000.0
+    f40 = profile.get("fall_40_ms")
+    bed, how = None, "no bed to measure (no tail past the hit, under 50 ms of lead): the floor stays 60 dB"
+    if f40 is not None and onset + 3.0 * f40 / 1000.0 + 0.15 <= len(mono) / sr:
+        seg = mono[-int(0.1 * sr):]
+        bed, how = float(np.sqrt(np.mean(seg ** 2))), "the file's last 0.1 s, well after the hit fell"
+    elif onset - 0.01 >= 0.05:
+        seg = mono[:int((onset - 0.01) * sr)]
+        bed, how = float(np.sqrt(np.mean(seg ** 2))), "the %.0f ms before the onset" % (1000 * (onset - 0.01))
+    if not bed or bed <= 0 or peak <= 0:
+        return 60.0, how if bed is None else "the bed is digital silence: the floor stays 60 dB"
+    depth = 20.0 * math.log10(peak / bed)
+    floor = max(MIN_FLOOR_DB, min(60.0, depth - FLOOR_MARGIN_DB))
+    return floor, "%s: %.1f dB under the loudest millisecond, floor = that - %.0f dB, within %.0f to 60" % (
+        how, depth, FLOOR_MARGIN_DB, MIN_FLOOR_DB)
+
+
+def patch_match(sample_path, renderer, rounds: int = 8, population: int = 16, seed: int = 0, sr: int | None = None,
+                hit_s: float | None = None, floor_db: float | None = None, units: dict | None = None) -> dict:
+    """Match an Operator patch to the one-shot at `sample_path` by search through `renderer`: profile the sample,
+    operator_guess, search_arguments (start, bounds, probes), the distance's floor_db from the sample's own noise
+    bed (noise_floor_db, at most 60; `floor_db` overrides), then `search` with the renderer's `render`.
+    `renderer` is a LiveRenderer / OperatorRenderer (bound to the guess's structure here) or any callable
+    render(patches) -> hits (then `sr`, the renders' sample rate, is required unless it has a `sample_rate`
+    attribute set; a renderer that does not know its rate yet is asked for one hit of the start first). The hit
+    is compared over `hit_s` seconds (default: the sample's duration, at most oneshot.DIST_MAX_S; also set on a
+    renderer that has `hit_s`).
+    Returns {"best" (semantic patch), "live" (Live's values for it, through to_live), "distance", "start_distance",
+    "per_round", "rounds", "renders", "takes" (the renderer's takes used), "repeat_spread", "stalled", "floor_db",
+    "floor_reading", "readings" (oneshot.compare of the best render against the sample: past-threshold lines),
+    "guess", "search" (the SearchResult), "best_render"}."""
+    import soundfile as sf
+    units = units if units is not None else operator_units()
+    profile = oneshot.profile(sample_path)
+    guess = operator_guess(profile)
+    args = search_arguments(guess, units)
+    x, sr0 = sf.read(str(sample_path), dtype="float64", always_2d=True)
+    onset = (profile.get("onset_ms") or 0.0) / 1000.0
+    dur = profile.get("duration_ms")
+    if hit_s is None:
+        hit_s = min(oneshot.DIST_MAX_S, (dur / 1000.0 + 0.1) if dur else max(0.1, len(x) / sr0 - onset))
+    if hasattr(renderer, "bind"):
+        renderer.bind(guess["structure"])
+    if hasattr(renderer, "hit_s"):
+        renderer.hit_s = hit_s
+    takes0 = len(getattr(renderer, "takes", []))
+    render = renderer.render if hasattr(renderer, "render") else renderer
+    sr = sr or getattr(renderer, "sample_rate", None)
+    if sr is None:
+        render([args["start"]])                                    # one hit of the start, to learn the recording's rate
+        sr = getattr(renderer, "sample_rate", None)
+        if sr is None:
+            raise ValueError("the renderer does not know its sample rate: pass sr=")
+    cut, _ = oneshot.hit_cut(x, sr0, onset, hit_s)
+    target = oneshot._resample(cut, sr0, sr) if sr != sr0 else cut
+    if floor_db is None:
+        floor_db, how = noise_floor_db(x, sr0, profile)
+    else:
+        how = "given"
+    cache = {}
+
+    def key(p):
+        return tuple(sorted(p.items()))
+
+    def recording(patches):
+        hits = render(patches)
+        for p, h in zip(patches, hits):
+            if len(h):
+                cache[key(p)] = h
+        return hits
+
+    res = search(args["start"], args["bounds"], recording, target, sr, rounds=rounds, population=population, seed=seed,
+                 floor_db=floor_db, probes=args.get("probes"))
+    best_hit = cache.get(key(res.best))
+    if best_hit is None:
+        best_hit = next((h for h in render([res.best]) if len(h)), None)
+    readings = None
+    if best_hit is not None:
+        readings = oneshot.compare(oneshot.profile_array(best_hit, sr, single=True), profile)["readings"]
+    live = to_live(operator_live(res.best, guess["structure"])["params"], units)
+    return {"best": res.best, "live": live, "distance": res.distance, "start_distance": res.start_distance,
+            "per_round": res.per_round, "rounds": res.rounds, "renders": res.renders,
+            "takes": len(getattr(renderer, "takes", [])) - takes0, "repeat_spread": res.repeat_spread, "stalled": res.stalled,
+            "floor_db": floor_db, "floor_reading": how, "readings": readings, "guess": guess, "search": res,
+            "best_render": best_hit}

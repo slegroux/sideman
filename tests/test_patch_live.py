@@ -386,3 +386,81 @@ def test_the_constructor_refuses_a_margin_smaller_than_the_lead(tmp_path):
     fake, clock = make(tmp_path)
     with pytest.raises(ValueError, match="margin_s"):
         renderer(fake, clock, g, margin_s=0.05, lead_s=0.15)
+
+
+# ---- repeat_check
+
+def test_repeat_check_is_zero_on_a_deterministic_renderer_and_the_standins_spread_with_fresh_noise(tmp_path):
+    g = guess_of("tom")
+    p = g["patch"]
+    fake, clock = make(tmp_path)
+    flat = patch.repeat_check(renderer(fake, clock, g), p, n=6)
+    assert flat["ok"] == 6 and flat["pairwise"]["max"] < 1e-3 and flat["readings"]["fall_20_ms"]["std"] < 0.5
+    fresh, clock2 = make(tmp_path / "fresh")
+    fresh.fresh_noise = True
+    got = patch.repeat_check(renderer(fresh, clock2, g), p, n=6)
+    play = standin_from_live(patch.operator_live(p, g["structure"]))
+    direct = [standin(play, 1000 + k) for k in range(6)]
+    want = np.array([dist(a, b) for i, a in enumerate(direct) for b in direct[i + 1:]])
+    assert got["pairwise"]["count"] == 15 and want.max() > 0.01                      # fresh noise does make them differ
+    assert got["pairwise"]["median"] == pytest.approx(float(np.median(want)), rel=0.2, abs=0.01)
+    assert got["pairwise"]["max"] == pytest.approx(float(want.max()), rel=0.2, abs=0.01)
+    target = standin(dict(play, noise_db=-80.0), TARGET_SEED)
+    steady = renderer(*make(tmp_path / "t"), g)
+    assert patch.repeat_check(steady, p, n=4, target=target)["repeat_spread"] == pytest.approx(0.0, abs=1e-3)
+
+
+# ---- patch_match
+
+def _sample(tmp_path, kind="kick"):
+    x = np.concatenate([np.zeros(int(0.05 * SR)), standin(TRUE[kind], TARGET_SEED), np.zeros(int(0.05 * SR))])
+    path = tmp_path / "sample.wav"
+    sf.write(str(path), x, SR, subtype="FLOAT")
+    return path
+
+
+def test_noise_floor_is_read_from_the_tail_the_lead_or_not_at_all():
+    sr = 24000
+    t = np.arange(int(1.4 * sr)) / sr
+    rng = np.random.default_rng(3)
+    hit = np.sin(2 * np.pi * 200 * t) * np.exp(-t / 0.02) * 0.5
+    bed = rng.standard_normal(len(t)) * 0.5 / math.sqrt(2) * 10 ** (-50 / 20)       # white, 50 dB under the hit's peak RMS
+    x = (hit + bed)[:, None]
+    f, how = patch.noise_floor_db(x, sr, oneshot.profile_array(x, sr, single=True))
+    assert 44.0 <= f <= 50.0 and "last 0.1 s" in how, (f, how)          # depth 50 dB (a sine's 1 ms RMS is a bit under its peak): 47 +- 3
+    lead = np.concatenate([bed[:int(0.2 * sr), None], (hit[:int(0.8 * sr)] + 0 * bed[:int(0.8 * sr)])[:, None]])
+    p = {"onset_ms": 200.0, "fall_40_ms": None}
+    f2, how2 = patch.noise_floor_db(lead, sr, p)
+    assert 44.0 <= f2 <= 50.0 and "before the onset" in how2, (f2, how2)
+    f3, how3 = patch.noise_floor_db(x[:int(0.3 * sr)], sr, {"onset_ms": 0.0, "fall_40_ms": None})
+    assert f3 == 60.0 and "no bed" in how3
+    quiet = patch.noise_floor_db(np.concatenate([bed[:int(0.2 * sr), None] * 1e3, hit[:int(0.8 * sr), None]]), sr, p)
+    assert quiet[0] == patch.MIN_FLOOR_DB or quiet[0] >= patch.MIN_FLOOR_DB     # never under the minimum
+
+
+def test_patch_match_on_the_fake_improves_on_its_start_and_reports_its_takes(tmp_path):
+    sample = _sample(tmp_path, "tom")
+    g = patch.operator_guess(oneshot.profile(str(sample)))
+    fake, clock = make(tmp_path / "x")
+    res = patch.patch_match(str(sample), renderer(fake, clock, g), rounds=3, population=8)
+    assert res["distance"] < res["start_distance"] and all(a >= b - 1e-12 for a, b in zip(res["per_round"], res["per_round"][1:]))
+    assert res["rounds"] == 3 and res["renders"] == 24
+    assert res["takes"] == res["rounds"] + 1 and len(fake.calls and [c for c in fake.calls if c[1] == "call" and c[3] == "fire"]) == 2 * res["takes"]
+    assert set(res["live"]) == set(patch.operator_live(res["best"], res["guess"]["structure"])["params"])
+    assert 20.0 <= res["floor_db"] <= 60.0 and res["floor_reading"] and isinstance(res["readings"], list)
+    assert len(res["best_render"]) and res["search"].failures == []
+    assert fake.solo == [False] * 4 and fake.playing is False
+
+
+def test_patch_match_takes_any_renderer(tmp_path):
+    sample = _sample(tmp_path, "kick")
+    g = patch.operator_guess(oneshot.profile(str(sample)))
+    seeds = itertools.count(7 * 10 ** 6)
+
+    def render(patches):
+        return [standin(standin_from_live(patch.operator_live(p, g["structure"])), next(seeds))[:, None] for p in patches]
+    res = patch.patch_match(str(sample), render, rounds=2, population=6, sr=SR)
+    assert math.isfinite(res["distance"]) and res["takes"] == 0 and res["renders"] == 12      # fresh noise per render: no ordering to assert
+    assert set(res["best"]) == set(g["patch"]) and len(res["best_render"])
+    with pytest.raises(ValueError, match="sample rate"):
+        patch.patch_match(str(sample), render, rounds=1, population=4)
