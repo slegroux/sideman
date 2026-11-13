@@ -465,10 +465,12 @@ def test_well_separated_sounds_are_stable_and_a_decay_continuum_is_not():
     assert run(stem(hat_events(2), 2))["groups"][0]["stability"] is None             # not measured when not asked for
 
 
-def test_a_group_of_under_4_hits_is_tentative():
-    ev = [(at(i), noise_hit(i, 0.025 if i in (10, 38) else 0.005)) for i in range(64)]
-    r = run(stem(ev, 4), sample=8)
-    assert [(g["count"], g["tentative"]) for g in r["groups"]] == [(62, False), (2, True)]
+def test_a_group_of_under_4_hits_is_tentative_and_has_no_stability():
+    # 30 short hats and 2 longer ones, a sample of 8 (it can move, 32 hits against 8): the pair is tentative, with no figure
+    ev = [(at(i), noise_hit(i, 0.025 if i in (10, 26) else 0.005)) for i in range(32)]
+    r = run(stem(ev, 2), sample=8, stability_runs=2)
+    assert [(g["count"], g["tentative"]) for g in r["groups"]] == [(30, False), (2, True)]
+    assert r["groups"][0]["stability"] is not None and r["groups"][1]["stability"] is None
 
 
 # ---------------------------------------------------------------- review round 1: tests that pin the clustering
@@ -519,7 +521,13 @@ def test_more_sounds_than_max_groups_leave_the_rest_ungrouped_and_say_so():
         ev += [(at(16 * b), noise_hit(b, 0.005)), (at(16 * b + 4), tom_hit()), (at(16 * b + 8), noise_hit(10 + b, 0.005)),
                (at(16 * b + 12), snare_hit(20 + b))]
     x = stem(ev, 3)
-    assert len(run(x)["groups"]) == 3
+    r3 = run(x)
+    assert len(r3["groups"]) == 3
+    # separation: the tom (beat 2) and the snare (beat 4) are each other's nearest group (1.7 apart), the hats are 5.7 from
+    # the tom: a group's nearest is the group with the nearest medoid, not the farthest
+    by_step = {[st for st, p in enumerate(g["pattern"]) if p][0]: g for g in r3["groups"]}
+    assert by_step[4]["nearest_group"] == by_step[12]["id"] and by_step[12]["nearest_group"] == by_step[4]["id"]
+    assert by_step[0]["nearest_group"] in (by_step[4]["id"], by_step[12]["id"]) and by_step[0]["separation"] > 3 * by_step[4]["separation"]
     r = run(x, max_groups=2)
     left = [h for h in r["hits"] if h["status"] == "ungrouped"]
     assert len(r["groups"]) == 2 and left and "not forced" in left[0]["reason"]
