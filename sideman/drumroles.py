@@ -171,6 +171,7 @@ CHANCE_FLOOR = 0.02      # a 16th the other group never plays in the track still
 BLEED_LOUDER_DB = 6.0    # the other group is louder by at least this at the coincident hits...
 BLEED_LOUDER_SHARE = 0.75  # ...in at least this share of them
 BLEED_DISTANCE = 2.0     # the two clean hits sound alike: spectral distance at most this
+OWN_CLOSE = 0.10         # `p` is not evidence of leakage when the chance over the group's own bars is within this of the observed rate
 # When the patterns give the coincidence away (the other group plays at the group's 16ths in almost every bar) the
 # coincidence test cannot tell a leak from two parts that share a pattern: p is 1 whatever the group is, the margin cannot be
 # met. The group is then judged on level and likeness alone, each stricter than above, and the evidence says "co-located".
@@ -1157,7 +1158,7 @@ def _bleed_pair(res_a: dict, ga: dict, res_b: dict, gbs: list, span: int, sr: in
     hits_b = [res_b["hits"][i] for i in owner]
     n = len(hits_a)
     ev = {"source_stem": None, "source_group": gbs[0]["id"], "source_groups": [g["id"] for g in gbs], "union": len(gbs) > 1,
-          "hits": n, "coincide": 0, "rate": 0.0, "expected": None, "p": None, "louder_db": None, "louder_share": None,
+          "hits": n, "coincide": 0, "rate": 0.0, "expected": None, "own_expected": None, "own_bars": 0, "p_evidence": None, "p": None, "louder_db": None, "louder_share": None,
           "distance": None, "distances": None, "co_located": False, "louder_min_db": BLEED_LOUDER_DB,
           "louder_min_share": BLEED_LOUDER_SHARE, "distance_max": BLEED_DISTANCE, "failed": "coincidence"}
     if not n or not hits_b:
@@ -1177,8 +1178,11 @@ def _bleed_pair(res_a: dict, ga: dict, res_b: dict, gbs: list, span: int, sr: in
         if h["on_grid"]:
             cells.setdefault(h["step"], set()).add(h["bar"])
     chance = [max(CHANCE_FLOOR, len(cells.get(h["step"], ())) / span) for h in hits_a]
+    own = {h["bar"] for h in hits_a}                    # the bars this group plays in: the same question over them
+    chance_own = [max(CHANCE_FLOOR, len(cells.get(h["step"], set()) & own) / len(own)) for h in hits_a]
     ev.update(coincide=len(pairs), rate=len(pairs) / n, expected=float(np.mean(chance)),
-              p=_tail(chance, len(pairs)) if pairs else 1.0)
+              p=_tail(chance, len(pairs)) if pairs else 1.0, own_expected=float(np.mean(chance_own)), own_bars=len(own))
+    ev["p_evidence"] = abs(ev["rate"] - ev["own_expected"]) > OWN_CLOSE
     co = ev["co_located"] = ev["expected"] >= CO_EXPECTED
     louder_db, louder_share, limit = (CO_LOUDER_DB, CO_LOUDER_SHARE, CO_DISTANCE) if co else (
         BLEED_LOUDER_DB, BLEED_LOUDER_SHARE, BLEED_DISTANCE)
@@ -1215,9 +1219,13 @@ def _bleed_why(ev: dict) -> str:
     """One line for the evidence of one pair (the reason it was not marked, or the proof that it was)."""
     src = ("the union of groups %s of `%s`" % (ev["source_groups"], ev["source_stem"]) if ev["union"]
            else "group %d of `%s`" % (ev["source_group"], ev["source_stem"]))
-    co = "%d of %d hits coincide with %s (%.0f %%; the two patterns give %s by chance, p %s)" % (
+    co = "%d of %d hits coincide with %s (%.0f %%; the two patterns give %s by chance over the track's bars%s, p %s%s)" % (
         ev["coincide"], ev["hits"], src, 100 * ev["rate"],
-        "-" if ev["expected"] is None else "%.0f %%" % (100 * ev["expected"]), "-" if ev["p"] is None else "%.3g" % ev["p"])
+        "-" if ev["expected"] is None else "%.0f %%" % (100 * ev["expected"]),
+        "" if ev["own_expected"] is None else " and %.0f %% over the %d bars this group plays in" % (100 * ev["own_expected"], ev["own_bars"]),
+        "-" if ev["p"] is None else "%.3g" % ev["p"],
+        "" if ev["p_evidence"] is not False else "; p is over the track's bars and is not evidence of leakage here: over this "
+        "group's own bars the other group plays at these 16ths about as often as they coincide")
     if ev["co_located"]:
         co = "co-located: chance cannot tell (%s); judged on level and likeness alone" % co
     lv = ("the level of that group against this group's hits is %+.1f dB (median; %.0f %% of the pairs at %+.0f dB or more)"
@@ -1252,6 +1260,16 @@ def mark_bleed(results_by_stem: dict) -> dict:
     at least as many coincidences (Poisson-binomial). If the other group plays every beat, a group that sits on the beats
     coincides with it every time and the chance rate is 100 %: that is not evidence. The track's bars run from the first to
     the last hit of any stem. Hits that are not on the grid count in the observed rate and get the chance of their nearest 16th.
+    When `expected` is at least CO_EXPECTED the coincidence cannot tell a leak from two parts that share a pattern
+    ("co_located" in the evidence): the group is then marked on level (CO_LOUDER_DB in CO_LOUDER_SHARE of the pairs) and
+    likeness (CO_DISTANCE) alone, with at least CO_RATE of its hits coincident.
+    The same chance is also reported over the bars the group itself plays in (`own_expected`, `own_bars`), and `p_evidence`
+    is False when that is within OWN_CLOSE of the observed rate: `p` is then over the track's bars, not over the group's, and
+    says only that both parts live in the same bars. The test itself keeps the track-wide chance: a leak is only there in the bars
+    where its source plays, so a chance taken over the group's own bars has the answer built in (a leak of a tom fill would
+    always read 100 %) and no leak of a sectional source could be proved; the track-wide chance asks the question the
+    test is for, whether the group's hits would fall on the other group's 16ths if they did not come from it. What the own
+    bars add is the warning that, for a part that lives in one section, the track-wide `p` overstates.
     Second test, reported separately: a separator may split one source over several groups of its stem, so that no single
     group is coincident enough. A group that fails (a) against EVERY group of another stem is also tested against the union
     of that stem's groups that the first test did not mark (at least two), the chance rate computed the same way from the

@@ -1237,6 +1237,26 @@ def test_a_different_sound_that_only_shares_the_pattern_is_not_marked_and_the_sa
     assert ev["evidence"]["louder_db"] == pytest.approx(8.0, abs=2.0) and "it needs +12 dB" in ev["why"]
 
 
+def test_the_chance_is_reported_over_the_groups_own_bars_too_and_p_is_not_evidence_when_the_two_agree():
+    # x plays the 4 beats in bars 4-7 (16 hits), 20 dB under y, the same tom; y plays them in those bars and a 16th it never shares
+    # elsewhere in bars 0-3 and 8-19, so the track runs over 20 bars. Over the track y is at each beat in 4 of 20 bars (20 %); over
+    # the 4 bars x plays in, in all 4 (100 %), which is the rate observed: p (tiny, over the track) says only that both live in
+    # bars 4-7. The test keeps the track-wide chance, so x is marked, and the evidence says what p is worth
+    beats = [(b, s) for b in range(4, 8) for s in (0, 4, 8, 12)]
+    y = beats + [(b, 14) for b in list(range(4)) + list(range(8, 20))]
+    ev = drumroles.mark_bleed(bleed_pair(tom_hit() * 0.1, beats, -30.0, tom_hit(), y, -10.0, n_bars=20))["x"][0]
+    e = ev["evidence"]
+    assert ev["bleed"] and e["rate"] == 1.0 and e["expected"] == pytest.approx(4 / 20) and e["own_expected"] == 1.0 and e["own_bars"] == 4
+    assert e["p"] < drumroles.BLEED_P and e["p_evidence"] is False
+    assert "20 % by chance over the track's bars and 100 % over the 4 bars this group plays in" in ev["why"]
+    assert "not evidence of leakage here" in ev["why"]
+    # a group that plays in every bar of the track has the same chance over its bars as over the track, and 8 hits that all
+    # coincide against 50 % are evidence (p 0.004)
+    ev = drumroles.mark_bleed(bleed_pair(tom_hit() * 0.1, CELLS, -30.0, tom_hit(), CELLS, -10.0))["x"][0]
+    assert ev["bleed"] and ev["evidence"]["own_expected"] == ev["evidence"]["expected"] == 0.5 and ev["evidence"]["p_evidence"] is True
+    assert "not evidence of leakage" not in ev["why"]
+
+
 def split_source_pair(second_audio):
     """Stem x (a kick on step 0 of 16 bars, and a tom copy 20 dB down on step 2 of bars 0-7) against stem y, where the tom
     fill that the copy comes from is split over two groups: step 2 in bars 0-3 and step 2 in bars 4-7."""

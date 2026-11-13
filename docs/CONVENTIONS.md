@@ -609,12 +609,27 @@ group is marked bleed of a group in another stem only when **all three** hold:
    Chance, for each hit of the group at 16th s: the share of the track's bars
    (first to last hit of any stem) in which the other group plays at s, at least
    2 %; the hits taken as independent, `expected` is their mean and the chance
-   of at least as many coincidences is a Poisson-binomial tail. A group that
-   plays the beats against a group that plays every beat coincides every time
-   and the chance rate is 100 %: that is the base rate, and the first builder
-   called such groups bleed from a 96 % coincidence. The three numbers each
-   guard a case: the rate a partial overlap, the margin a long stem where a
-   small excess is "significant", the p value a few hits.
+   of at least as many coincidences is a Poisson-binomial tail (`p`, over the
+   track's bars, the bars from the first to the last hit of any stem). **A 100 %
+   chance rate means the patterns explain the coincidence completely**: a group
+   that plays the beats against a group that plays every beat coincides every
+   time whatever it is, so the coincidence is no evidence either way, and the
+   first builder called such groups bleed from a 96 % coincidence. It is not a
+   pass either; from an expected rate of 90 % the question goes to level and
+   likeness (co-located, below). The three numbers each guard a case: the rate
+   a partial overlap, the margin a long stem where a small excess is
+   "significant", the p value a few hits.
+   `p` is over the **track's** bars, which overstates the evidence for a part
+   that lives in one section (on Flare the kick stem's second group coincides
+   with the snare in 93 % of the bars it plays in, 38 % over the track). The
+   evidence therefore also gives the chance over the bars the group itself plays
+   in (`own_expected`, `own_bars`), and says "not evidence of leakage here" when
+   that is within 10 points of the observed rate. The test itself keeps the
+   track-wide chance: a leak is only there in the bars where its source plays,
+   so a chance over the group's own bars has the answer built in (a leaked tom
+   fill would always read 100 %) and no leak of a sectional source could be
+   proved. A group marked while `p_evidence` is False is marked on the level and
+   likeness conditions with the coincidence only a consistency check.
 2. *Louder there.* The other group's hits are louder at the coincident moments
    (`level_db`, loudest ms) by at least 6 dB in at least 75 % of the pairs. 6 dB
    is chosen (half the amplitude); on Flare the snare stem's groups are louder
@@ -659,7 +674,9 @@ roles. A group that is not marked says which test it failed and the numbers. A
 group with one to three hits can hardly pass the first test: three hits where
 the other plays in a quarter of the bars is a 1.6 % chance. A lone bled hit
 (the Flare replica's 81 Hz hit in the kick stem) is not found this way; it stays
-a neutral group, and its note says why it was not marked.
+a neutral group. Why a group was not marked is in `mark_bleed`'s `why` and
+`evidence` for that group, not in `name_roles`: there its `reason` is the one
+for not being named (or "marked as bleed: ..." when it is).
 
 ## Racks and plug-ins
 
