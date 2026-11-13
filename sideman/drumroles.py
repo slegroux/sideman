@@ -419,21 +419,36 @@ def _evenly(ids: list, n: int) -> list:
 
 
 def _separation(x: np.ndarray, sr: int, hits: list, found: list) -> None:
-    """Sets g["separation"] and g["nearest_group"] on each group of `found`: the nearest other group is the one whose
-    medoid is nearest this group's medoid (spectral distance, ties to the lower id); separation is the mean distance from
-    SEP_MEMBERS of this group's measured members to SEP_OTHERS of that group's, both taken evenly spaced in time (the first
-    and the last included). None for a lone group. One distance per pair of groups plus at most 192 per group."""
+    """Sets g["separation"], g["nearest_group"], g["separation_any"] and g["nearest_any"] on each group of `found`. The
+    nearest other group is the one whose medoid is nearest this group's medoid (spectral distance, ties to the lower id);
+    separation is the mean distance from SEP_MEMBERS of this group's measured members to SEP_OTHERS of that group's, both
+    taken evenly spaced in time (the first and the last included). `separation_any` / `nearest_any` are measured against any
+    other group; `separation` / `nearest_group` against the nearest group that is not tentative (at least TENTATIVE_N
+    measured hits), because a one-to-three hit satellite beside a big group says nothing about whether two sounds are apart.
+    None when there is no such group (a lone group, or only tentative ones). One distance per pair of groups plus at most
+    192 per group and nearest group."""
     cut = lambda i: x[hits[i]["start"]:hits[i]["end"]]  # noqa: E731
-    for gid, g in found:
-        others = [(o, og) for o, og in found if o != gid]
-        if not others:
-            g["separation"], g["nearest_group"] = None, None
-            continue
-        mine = cut(g["medoid"])
-        o, og = min(others, key=lambda t: (_pair_distance(mine, cut(t[1]["medoid"]), sr), t[0]))
+
+    def mean_distance(g: dict, og: dict) -> float:
         ds = [_pair_distance(cut(i), cut(j), sr) for i in _evenly(g["members"], SEP_MEMBERS)
               for j in _evenly(og["members"], SEP_OTHERS)]
-        g["separation"], g["nearest_group"] = round(float(np.mean(ds)), 3), o
+        return round(float(np.mean(ds)), 3)
+
+    for gid, g in found:
+        g["separation"] = g["nearest_group"] = g["separation_any"] = g["nearest_any"] = None
+        mine = cut(g["medoid"])
+        ranked = sorted(((_pair_distance(mine, cut(og["medoid"]), sr), o, og) for o, og in found if o != gid),
+                        key=lambda t: (t[0], t[1]))
+        if not ranked:
+            continue
+        _, o, og = ranked[0]
+        g["nearest_any"], g["separation_any"] = o, mean_distance(g, og)
+        big = [t for t in ranked if len(t[2]["members"]) >= TENTATIVE_N]
+        if big:
+            if big[0][1] == o:
+                g["nearest_group"], g["separation"] = o, g["separation_any"]
+            else:
+                g["nearest_group"], g["separation"] = big[0][1], mean_distance(g, big[0][2])
 
 
 def _scope(x: np.ndarray, sr: int, hits: list, found: list, hidden: set, ids: set, first: int, bars: int, steps: int) -> dict:
@@ -453,7 +468,8 @@ def _scope(x: np.ndarray, sr: int, hits: list, found: list, hidden: set, ids: se
         dists = [g["distance"][i] for i in mine]
         groups.append({
             "id": gid, "count": len(mine), "assigned": len(extra), "tentative": len(mine) < TENTATIVE_N,
-            "stability": g["stability"], "separation": g["separation"], "nearest_group": g["nearest_group"], "bars_with": len({hits[i]["bar"] for i in mine + extra}),
+            "stability": g["stability"], "separation": g["separation"], "nearest_group": g["nearest_group"],
+            "separation_any": g["separation_any"], "nearest_any": g["nearest_any"], "bars_with": len({hits[i]["bar"] for i in mine + extra}),
             "pattern": [len({h["bar"] for h in on if h["step"] == s}) / bars if bars else 0.0 for s in range(steps)],
             "assigned_pattern": [len({h["bar"] for h in on_assigned if h["step"] == s}) / bars if bars else 0.0
                                  for s in range(steps)],
@@ -537,7 +553,7 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     "faint", "overlapped", "silent" or "ungrouped"), "reason" (why not grouped), "group", "distance" (to its group's
     medoid, over the window that was compared)}.
     A group is {"id", "count" (measured members), "assigned" (overlapped hits placed in it), "tentative" (under 4 measured
-    members), "stability", "separation", "nearest_group" (see below), "bars_with" (bars it plays in), "pattern" (per 16th, the share of the scope's
+    members), "stability", "separation", "nearest_group", "separation_any", "nearest_any" (see below), "bars_with" (bars it plays in), "pattern" (per 16th, the share of the scope's
     bars it plays at, on-grid hits, assigned ones included), "assigned_pattern" (the same for the assigned hits alone),
     "level_db" (median), "spread" ({"median", "max"} of the members' distances to the medoid), "off_grid", "members"
     (hit ids), "assigned_members", "clean_hit" ({"hit", "start", "end", "onset_s", "level_db", "audio"} or None; never
@@ -552,12 +568,15 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     where the sample puts the cut, and reads well under 1; the figure is for the stem as a whole, section groups carry it
     unchanged. It is None, with a note, when the sample cannot move (no more measured hits than `sample`: every regrouping
     is then identical, and none is run), for a tentative group, and with `stability_runs=0`.
-    `separation` is how far the group lies from its neighbour: the nearest other group is the one whose medoid is
-    nearest this group's medoid (ties to the lower id), its id is `nearest_group`, and `separation` is the mean spectral
-    distance from 16 of this group's measured members to 12 of that group's, each set evenly spaced in time with the
-    first and the last included (all of them when fewer). Above `threshold`: the two sounds are apart; near or under it:
-    they are a continuum the threshold cut. None for a lone group. It is measured on the final groups, so a pitch split
-    is included.
+    `separation` is how far the group lies from its neighbour: the nearest other group that is not tentative (at least 4
+    measured hits) is the one whose medoid is nearest this group's medoid (ties to the lower id), its id is `nearest_group`,
+    and `separation` is the mean spectral distance from 16 of this group's measured members to 12 of that group's, each set
+    evenly spaced in time with the first and the last included (all of them when fewer). Above `threshold`: the two sounds
+    are apart; near or under it: they are a continuum the threshold cut. A one-to-three hit group is not a neighbour: it is
+    a stray that the sample left out, and a big group sitting 1.2 from a 3-hit satellite had read as "not apart". The figure
+    against ANY other group, tentative ones included, is kept as `separation_any` with `nearest_any`. `separation` is None
+    when there is no non-tentative neighbour (a lone group, or only tentative others): such a group has no rival, and
+    `name_roles` treats it as it treats a lone group. It is measured on the final groups, so a pitch split is included.
     `groups` is the whole stem (its bars run from the first real hit's bar to the last's); each of `sections` has the same
     groups restricted to its bars, with the section's own count, pattern over its `bars`, level, spread and clean hit.
     `unmeasured_pattern` (per 16th, the share of the scope's bars with an on-grid hit there that is overlapped and not
@@ -790,10 +809,11 @@ def _no_rule(kind: str, use: dict, m: dict | None, why_no_clean: str | None) -> 
     return "no rule of the %s stem fits: %s" % (kind, "; ".join(parts))
 
 
-def _eligibility(g: dict, threshold: float, by_id: dict) -> list[str]:
+def _eligibility(g: dict, threshold: float) -> list[str]:
     """Why the group may not be named (an empty list when it may): fewer than NAME_MIN_HITS measured hits, stability not
-    measured or under NAME_STABILITY, separation not over the grouping threshold. A lone group (separation None) has no
-    neighbour to be taken for."""
+    measured or under NAME_STABILITY, separation not over the grouping threshold. `separation` is measured against the
+    nearest group of at least TENTATIVE_N measured hits; a group with none (separation None: a lone group, or only
+    tentative others) has no rival to be taken for and passes that test."""
     why = []
     if g["count"] < NAME_MIN_HITS:
         why.append("only %d measured hit%s (a name needs %d)" % (g["count"], "" if g["count"] == 1 else "s", NAME_MIN_HITS))
@@ -803,11 +823,8 @@ def _eligibility(g: dict, threshold: float, by_id: dict) -> list[str]:
     elif g["stability"] < NAME_STABILITY:
         why.append("stability %.2f is under %.2f" % (g["stability"], NAME_STABILITY))
     if g["separation"] is not None and g["separation"] <= threshold:
-        near = by_id.get(g["nearest_group"])
-        why.append("separation %.2f is not over the grouping threshold %.2f (nearest group %s%s)" % (
-            g["separation"], threshold, g["nearest_group"],
-            ", which has %d measured hit%s" % (near["count"], "" if near["count"] == 1 else "s")
-            if near is not None and near["count"] < NAME_MIN_HITS else ""))
+        why.append("separation %.2f is not over the grouping threshold %.2f (nearest group %s)" % (
+            g["separation"], threshold, g["nearest_group"]))
     return why
 
 
@@ -831,7 +848,7 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
     no role. `result` is not changed; sections are not named (they carry the stem's group ids).
 
     A group is NAMED only when it is eligible: at least NAME_MIN_HITS measured hits, `stability` measured and at least
-    NAME_STABILITY, `separation` over the result's grouping threshold. Then the first rule of its stem that fits gives
+    NAME_STABILITY, `separation` (against the nearest group of at least 4 measured hits; None passes) over the result's grouping threshold. Then the first rule of its stem that fits gives
     the name: hh: "hh offbeat", "hh 16th", "hh open"; snare: "rim", "snare"; toms: "tom" ("tom low" / "tom mid" /
     "tom high" by body pitch, when several roles are toms); kick: "kick". The pattern counts the measured hits and the
     ones assigned to the group under another hit's tail (`assigned` says how many). A group that is not eligible, or that
@@ -862,7 +879,7 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
         if e["bleed"]:
             e["reason"] = "marked as bleed: %s" % bleed[gid]["why"]
             continue
-        why = _eligibility(g, thr, by_id)
+        why = _eligibility(g, thr)
         if why:
             e["reason"] = "not named: " + "; ".join(why)
             continue

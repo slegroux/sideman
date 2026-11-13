@@ -465,6 +465,24 @@ def test_well_separated_sounds_are_stable_and_a_decay_continuum_is_not():
     assert run(stem(hat_events(2), 2))["groups"][0]["stability"] is None             # not measured when not asked for
 
 
+def test_a_tentative_satellite_is_not_the_neighbour_separation_is_measured_against():
+    # 16 closed hats (tau 5 ms) on the beats, 16 longer ones (25 ms) on the offbeats, and 2 hats of tau 12.5 ms (1.63 from the
+    # closed ones, 1.69 from the longer ones) at steps 1 and 9 of bar 0. The pair is a group of 2 (tentative): the nearest group
+    # of the closed hats by medoid, but not a neighbour for `separation`, which is measured against the longer hats (2.9 away)
+    ev = [(at(i), noise_hit(i, 0.005)) for i in range(0, 64, 4)] + [(at(i), noise_hit(100 + i, 0.025)) for i in range(2, 64, 4)]
+    ev += [(at(1), noise_hit(200, 0.0125)), (at(9), noise_hit(201, 0.0125))]
+    r = run(stem(ev, 4))
+    closed, = [g for g in r["groups"] if g["pattern"][0] > 0]                 # the beats
+    longer, = [g for g in r["groups"] if g["pattern"][2] > 0]                 # the offbeats
+    sat, = [g for g in r["groups"] if g["tentative"]]
+    assert (closed["count"], longer["count"]) == (16, 16) and len(r["groups"]) == 3
+    assert sat["tentative"] and sat["count"] == 2 and not closed["tentative"] and not longer["tentative"]
+    assert closed["nearest_any"] == sat["id"] and closed["separation_any"] < 2.0           # the satellite is the nearest of all
+    assert closed["nearest_group"] == longer["id"] and closed["separation"] > 2.5          # the nearest that counts is the other big group
+    assert longer["nearest_group"] == closed["id"] and longer["separation"] > 2.5
+    assert sat["nearest_group"] in (closed["id"], longer["id"]) and sat["separation"] is not None
+
+
 def test_a_group_of_under_4_hits_is_tentative_and_has_no_stability():
     # 30 short hats and 2 longer ones, a sample of 8 (it can move, 32 hits against 8): the pair is tentative, with no figure
     ev = [(at(i), noise_hit(i, 0.025 if i in (10, 26) else 0.005)) for i in range(32)]
@@ -524,10 +542,15 @@ def test_more_sounds_than_max_groups_leave_the_rest_ungrouped_and_say_so():
     r3 = run(x)
     assert len(r3["groups"]) == 3
     # separation: the tom (beat 2) and the snare (beat 4) are each other's nearest group (1.7 apart), the hats are 5.7 from
-    # the tom: a group's nearest is the group with the nearest medoid, not the farthest
+    # the tom: a group's nearest is the group with the nearest medoid, not the farthest. That is `nearest_any` / `separation_any`.
+    # The tom and the snare have 3 hits each (tentative), so a neighbour that counts for `separation` is the hat group (6
+    # hits), 5.7 away; the hats have no neighbour of 4 hits or more: separation None
     by_step = {[st for st, p in enumerate(g["pattern"]) if p][0]: g for g in r3["groups"]}
-    assert by_step[4]["nearest_group"] == by_step[12]["id"] and by_step[12]["nearest_group"] == by_step[4]["id"]
-    assert by_step[0]["nearest_group"] in (by_step[4]["id"], by_step[12]["id"]) and by_step[0]["separation"] > 3 * by_step[4]["separation"]
+    assert by_step[4]["nearest_any"] == by_step[12]["id"] and by_step[12]["nearest_any"] == by_step[4]["id"]
+    assert by_step[0]["nearest_any"] in (by_step[4]["id"], by_step[12]["id"]) and by_step[0]["separation_any"] > 3 * by_step[4]["separation_any"]
+    assert by_step[4]["separation_any"] < 2.5
+    assert by_step[4]["nearest_group"] == by_step[12]["nearest_group"] == by_step[0]["id"] and by_step[4]["separation"] > 2.5
+    assert by_step[0]["nearest_group"] is None and by_step[0]["separation"] is None
     r = run(x, max_groups=2)
     left = [h for h in r["hits"] if h["status"] == "ungrouped"]
     assert len(r["groups"]) == 2 and left and "not forced" in left[0]["reason"]
