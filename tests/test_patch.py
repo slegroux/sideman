@@ -434,7 +434,10 @@ def test_search_takes_a_step_override():
 
 # ---- the first guess: operator_guess, operator_live, to_live / from_live, and the bridge to the search ----
 
-TAU_FROM_T = patch.FALL20_PER_T / math.log(10.0)       # tau (ms) = Operator Decay time T (ms) * this
+AE_20DB_PER_T = 0.227        # a device from insert_device: the amp envelope falls 20 dB in 0.227 T (Live 12.4.6, 2026-11-12)
+#                              hard-coded here, not read from patch.FALL20_PER_T, so that a wrong constant moves the guess
+TAU_FROM_T = AE_20DB_PER_T / math.log(10.0)            # tau (ms) = Operator Decay time T (ms) * this: exp(-T / tau) = -20 dB at 0.227 T
+T_PER_TAU = math.log(10.0) / AE_20DB_PER_T             # and the inverse, Decay time of a given tau
 VARIANT = {"pitch_hz": 70.0, "pitch_st": 8.0, "pitch_tau": 0.040, "decay": 0.060, "noise_db": -6.0,
            "noise_decay": 0.030}     # noise half as long as the tone and 6 dB under it: a body noise reading above the floor
 
@@ -446,8 +449,8 @@ def profile_of(true: dict, seed: int, **kw) -> dict:
 noise_onset_db = patch.noise_onset_db
 
 
-PE_DECAY_PER_TAU = 7.94      # Pe Decay / tau: the same constant as the amp envelope's, 1 / (0.29 / ln 10), hard-coded
-#                              here so that a wrong patch.PE_DECAY_PER_TAU changes what the stand-in plays
+PE_DECAY_PER_TAU = 7.94      # Pe Decay / tau, measured on a scratch device (7.0 to 8.4; not the amp envelope's 10.1),
+#                              hard-coded here so that a wrong patch.PE_DECAY_PER_TAU changes what the stand-in plays
 
 
 def standin_from_live(live: dict) -> dict:
@@ -483,7 +486,7 @@ def test_guess_gives_back_the_known_values_within_the_phase_21_thresholds(kind):
         assert abs(12 * math.log2(q["carrier_hz"] / true["pitch_hz"])) <= oneshot.PITCH_ST
         assert abs(q["pitch_drop_st"] - true["pitch_st"]) <= oneshot.DROP_ST
         assert abs(q["pitch_tau_ms"] / (true["pitch_tau"] * 1000) - 1) <= oneshot.TIME_RATIO, seed
-        assert abs(q["tone_decay_ms"] * patch.FALL20_PER_T / (true["decay"] * 1000 * math.log(10)) - 1) <= oneshot.TIME_RATIO
+        assert abs(q["tone_decay_ms"] * AE_20DB_PER_T / (true["decay"] * 1000 * math.log(10)) - 1) <= oneshot.TIME_RATIO
         if kind == "kick":       # the default noise decay: its extrapolation back to the onset is only good to 6 dB
             assert g["sources"]["noise_decay_ms"]["confidence"] == "default"
             assert abs(noise_onset_db(q) - true["noise_db"]) <= 6.0, (seed, noise_onset_db(q))
@@ -528,7 +531,7 @@ def test_guess_takes_the_noise_decay_from_a_tail_longer_than_an_exponential_and_
                                          click_db=-7.8, flatness={"attack": 0.075, "body": 0.069}))
     tail_t = (508.0 - 111.0) / math.log(10) / TAU_FROM_T            # Operator T of the 20 dB between the two falls
     assert snare["patch"]["noise_decay_ms"] == pytest.approx(tail_t, rel=1e-6)
-    assert snare["patch"]["tone_decay_ms"] == pytest.approx(111.0 / 0.29)
+    assert snare["patch"]["tone_decay_ms"] == pytest.approx(111.0 / AE_20DB_PER_T)
     assert any("not exponential" in n and "falls short" in n for n in snare["notes"])
     gated = patch.operator_guess(reading(fall_20_ms=48.5, fall_40_ms=56.3))
     assert any("not exponential" in n and "rings on" in n for n in gated["notes"])
@@ -846,21 +849,21 @@ def test_every_structure_converts_through_a_generous_table_and_back():
 
 
 def test_operator_live_values_against_hand_computed_ones():
-    q = {"carrier_hz": 100.0, "pitch_drop_st": 12.0, "pitch_tau_ms": 30.0, "tone_attack_ms": 1.5, "tone_decay_ms": 397.0,
-         "tone_level_db": 0.0, "noise_level_ref_db": -12.0, "noise_ref_ms": 10.0, "noise_decay_ms": 198.5,
+    q = {"carrier_hz": 100.0, "pitch_drop_st": 12.0, "pitch_tau_ms": 30.0, "tone_attack_ms": 1.5, "tone_decay_ms": 500.0,
+         "tone_level_db": 0.0, "noise_level_ref_db": -12.0, "noise_ref_ms": 10.0, "noise_decay_ms": 250.0,
          "noise_attack_ms": 0.1, "output_db": -6.0}
     s = {"tone_on": True, "noise_on": True, "pitch_env_on": True, "filter_on": False}
     live = patch.operator_live(q, s)
     p = live["params"]
     # note: MIDI 42 (92.50 Hz) is the one 1 to 2 semitones under 100 Hz; ratio 1.0811 = Coarse 1, Fine 81
     assert live["note"] == 42 and p["A Coarse"] == 1 and p["A Fine"] == 81
-    # tau_tone = 397 * 0.29 / ln 10 = 50.0 ms, tau_noise = 25.0 ms: back = 8.686 * 10 * (1/25 - 1/50) = 1.737 dB
-    assert p["Osc-B Level"] == pytest.approx(-12.0 + 1.737, abs=0.01) and p["Osc-A Level"] == 0.0
-    assert p["Pe Decay"] == pytest.approx(30.0 * math.log(10) / 0.29, rel=1e-9)               # 238.2 ms: tau * 7.94
+    # tau_tone = 500 * 0.227 / ln 10 = 49.29 ms, tau_noise = 24.65 ms: back = 8.686 * 10 * (1/24.65 - 1/49.29) = 1.762 dB
+    assert p["Osc-B Level"] == pytest.approx(-12.0 + 1.762, abs=0.01) and p["Osc-A Level"] == 0.0
+    assert p["Pe Decay"] == pytest.approx(30.0 * 7.94, rel=1e-9)               # 238.2 ms: tau * 7.94, the Pe constant
     assert p["Pe Init"] == p["Pe Peak"] == 12.0 and p["Pe Amt A"] == 100.0 and p["Volume"] == -6.0
-    assert p["Ae Decay"] == p["Ae Release"] == 397.0 and p["Be Decay"] == 198.5 and p["Ae Sustain"] == -math.inf
+    assert p["Ae Decay"] == p["Ae Release"] == 500.0 and p["Be Decay"] == 250.0 and p["Ae Sustain"] == -math.inf
     louder = patch.operator_live(dict(q, noise_level_ref_db=2.0), s)["params"]              # noise above the tone: the tone goes down
-    assert louder["Osc-B Level"] == 0.0 and louder["Osc-A Level"] == pytest.approx(-(2.0 + 1.737), abs=0.01)
+    assert louder["Osc-B Level"] == 0.0 and louder["Osc-A Level"] == pytest.approx(-(2.0 + 1.762), abs=0.01)
 
 
 def test_operator_live_needs_coarse_above_1_only_for_carriers_the_note_range_cannot_reach():
@@ -882,7 +885,7 @@ def test_the_glide_range_reaches_either_reading_of_the_pe_decay_mapping():
     for kind in ("kick", "tom"):
         g = patch.operator_guess(profile_of(TRUE[kind], 1))
         q, (lo, hi, _) = g["patch"], g["free"]["pitch_tau_ms"]
-        other = q["pitch_tau_ms"] * patch.PE_DECAY_PER_TAU / math.log(abs(q["pitch_drop_st"]) / oneshot.SETTLE_ST)
+        other = q["pitch_tau_ms"] * PE_DECAY_PER_TAU / math.log(abs(q["pitch_drop_st"]) / oneshot.SETTLE_ST)
         assert lo <= q["pitch_tau_ms"] and lo <= other <= hi and hi >= q["pitch_tau_ms"] * 3.9
 
 
@@ -913,20 +916,20 @@ def test_the_tone_decay_may_fall_by_3_when_the_noise_outlasts_the_tone_and_a_sho
     long_noise = patch.operator_guess(prof48(sine_hit(f=200.0, tau=0.045, ndb=-6.0, ntau=0.090)))
     q, (lo, hi, _) = long_noise["patch"], long_noise["free"]["tone_decay_ms"]
     assert q["noise_decay_ms"] >= 0.8 * q["tone_decay_ms"] and lo == pytest.approx(q["tone_decay_ms"] / patch.SLOW_NOISE_LOW_FACTOR)
-    true_t = 0.045 * 1000 * patch.T_PER_TAU
+    true_t = 0.045 * 1000 * T_PER_TAU
     assert lo <= true_t <= hi                       # the true tone decay is inside the searched range (it was 1.98 to 2.75 off)
     for tau, ntau in ((0.060, 0.006), (0.050, 0.005)):         # noise a tenth of the tone: the default is a fifth
         g = patch.operator_guess(prof48(sine_hit(f=180.0, tau=tau, ndb=-6.0, ntau=ntau)))
         if g["structure"]["noise_on"]:
             lo, hi, _ = g["free"]["noise_decay_ms"]
-            assert lo <= ntau * 1000 * patch.T_PER_TAU <= hi, (tau, ntau, lo, hi)
+            assert lo <= ntau * 1000 * T_PER_TAU <= hi, (tau, ntau, lo, hi)
 
 
 def test_guess_edge_cases():
     for bad in (0.0, -3.0, None):
         with pytest.raises(ValueError, match="20 dB fall"):
             patch.operator_guess(reading(fall_20_ms=bad))
-    assert patch.operator_guess(reading(peak_db=None))["patch"]["output_db"] == -3.0
+    assert patch.operator_guess(reading(peak_db=None))["patch"]["output_db"] == pytest.approx(0.0 - 3.7)       # a 0 dBFS peak minus the sine's +3.7 dB
     g = patch.operator_guess({k: v for k, v in reading(pitched=False, bands_db={"sub": -30.0}).items() if k != "sample_rate"})
     assert "noise_filter_hz" not in g["patch"]
     capped = patch.operator_guess(reading(pitch_drop_st=72.0, pitch_settle_ms=60.0, pitch_start_hz=6400.0, pitch_start_at_ms=0.5))
@@ -949,10 +952,10 @@ def test_search_arguments_pulls_bounds_inside_the_units_tables():
     plain = patch.search_arguments(g)
     assert plain["bounds"] == dict(g["free"])
     narrow = dict(GENEROUS)
-    narrow["Ae Decay"] = [[0.0, 150.0, "ms"], [1.0, 450.0, "ms"]]            # tone T of the tom is about 380 ms: x1.5 leaves the table
+    narrow["Ae Decay"] = [[0.0, 150.0, "ms"], [1.0, 700.0, "ms"]]            # tone T of the tom is 50 ms * 10.14 = 507 ms: x1.5 leaves the table
     args = patch.search_arguments(g, narrow)
     lo, hi, _ = args["bounds"]["tone_decay_ms"]
-    assert 150.0 <= lo <= g["patch"]["tone_decay_ms"] <= hi <= 450.0 and hi < g["free"]["tone_decay_ms"][1]
+    assert 150.0 <= lo <= g["patch"]["tone_decay_ms"] <= hi <= 700.0 and hi < g["free"]["tone_decay_ms"][1]
     assert args["bounds"]["carrier_hz"] == g["free"]["carrier_hz"]
     for end in (lo, hi):
         patch.to_live(patch.operator_live(dict(args["start"], tone_decay_ms=end), g["structure"])["params"], narrow)
@@ -1085,9 +1088,9 @@ def test_to_live_merges_only_adjacent_rows_with_the_same_display_so_a_table_with
 
 
 def test_the_end_to_end_stand_in_reads_pe_decay_by_the_amp_envelopes_constant():
-    """standin_from_live divides Pe Decay by a constant written in this file (7.94), so a patch.PE_DECAY_PER_TAU that
-    is not the amp envelope's 1 / (0.29 / ln 10) makes the stand-in glide for the wrong time. A glide of tau 40 ms
-    must come back as 40 ms."""
+    """standin_from_live divides Pe Decay by a constant written in this file (7.94, measured on a scratch device), so a
+    patch.PE_DECAY_PER_TAU that is not 7.94 makes the stand-in glide for the wrong time. A glide of tau 40 ms must
+    come back as 40 ms."""
     q = {"carrier_hz": 100.0, "pitch_drop_st": 12.0, "pitch_tau_ms": 40.0, "tone_attack_ms": 1.5, "tone_decay_ms": 300.0,
          "tone_level_db": 0.0, "output_db": -6.0}
     st = {"tone_on": True, "noise_on": False, "pitch_env_on": True, "filter_on": False}

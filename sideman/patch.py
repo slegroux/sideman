@@ -324,20 +324,25 @@ def search(start: dict, bounds: dict, render, target: np.ndarray, sr: int, round
 #   patch --operator_live--> every Live parameter the voice owns, as a physical value (the formulas below)
 #   that --to_live(units)--> Live parameter name -> Live's value
 
-FALL20_PER_T = 0.29      # Operator Ae Decay T: the amp envelope falls 20 dB in 0.29 T, measured 2026-11-09 and 11 on
-#                          the Bodzin kit (memory match-synth-to-sample-by-recording; bzkit.py: "T ~ 3.5 x the
-#                          measured -20 dB time"). Measured with the decay slope set to 1 through the preset XML;
-#                          whether the LOM-only device has that slope by default is an assumption (ASSUMPTIONS 1).
+FALL20_PER_T = 0.227     # Operator Ae Decay T: the amp envelope of a device from insert_device falls 20 dB in 0.227 T
+#                          (Live 12.4.6, 2026-11-12: Ae Decay 300 ms read 20 dB in 68.3 ms, 1000 ms in 226.6 ms: 0.2277
+#                          and 0.2266; exponential, linear in dB; noise, Be Decay 500 ms: 0.216; live-assumptions report).
+#                          The 0.29 of 2026-11-09 and 11 was measured on a kit built through the preset XML with
+#                          DecaySlope 1; the slope is not a LOM parameter, so the device a LOM session gets has its own.
 TAU_PER_FALL20 = 1.0 / math.log(10.0)       # tau = fall_20 / ln(10), for an exponential amplitude decay
-T_PER_TAU = math.log(10.0) / FALL20_PER_T   # Operator T = 7.94 tau: the curve is about 69 dB down at T
-PE_DECAY_PER_TAU = T_PER_TAU                # Pe Decay = tau * this, an ASSUMPTION (2) checked against one take
+T_PER_TAU = math.log(10.0) / FALL20_PER_T   # Operator T = 10.1 tau: the amp curve is 88 dB down at T
+PE_DECAY_PER_TAU = 7.94  # Pe Decay = tau * this, measured 2026-11-12 on a scratch device and NOT the amp envelope's
+#                          constant (10.1): Pe Init = Peak 12 st, Pe Decay 400 ms read 11.0 / 8.5 / 5.85 / 2.6 / 1.69 /
+#                          0.56 / 0.18 st at 5 / 20 / 40 / 80 / 100 / 150 / 200 ms, an exponential of tau 58 ms early and
+#                          49 ms late (ratio 6.9 to 8.2; 7.0 to 8.4 over the takes); the glide is steeper than one exponential
+#                          late and reaches 0 at T. 7.94 sits inside the range the search's glide factor (4) covers.
 ATTACK_FLOOR_MS = 1.5    # a tone attack of 0.1 ms clicks (measured 2026-11-11): never less
 NOISE_ATTACK_FLOOR_MS = 0.1   # noise has no tone to click: the hand-built hats and claps use 0.1 ms
 CLICK_MS = 10.0          # a pitch drop over in less than this is a click, not a glide. oneshot's own bound is its
 #                          FAST_SETTLE_MS (5 ms); Tom_BOAVISTA's 17 st in 8 ms is a click too, so the guess uses 10
 TAIL_MS = 100.0          # track readings from here on, when they agree, are the carrier the glide settled on
 PITCH_BOUND_ST = 0.5     # the carrier may move this far either way in the search
-PE_MAX_ST = 48.0         # a pitch drop is capped at this (ASSUMPTIONS 4: Operator's Pe range, to read from Live)
+PE_MAX_ST = 48.0         # a pitch drop is capped at this (Operator's Pe range is -48 to 48 st: CHECKED)
 MIN_CARRIER_HZ = 8.2     # MIDI note 0 (8.18 Hz): lower carriers cannot be played with Coarse 1
 NOISE_REF_MS = 15.0      # fallback reference time of the attack noise reading (a profile without attack_window_ms)
 NOISE_BODY_FRAC = 0.36   # where the body reading's weight sits, as a share into body_window_ms: 80 ms in 40-150
@@ -359,7 +364,8 @@ DEFAULT_NOISE_FACTOR = 4.0      # ...4 when the noise decay is a default
 SLOW_NOISE_LOW_FACTOR = 3.0     # the tone decay may fall by this factor when the noise outlasts the tone (its 20 dB fall is the noise's)
 GLIDE_FACTOR = 4.0       # the glide's tau may move by this factor: either reading of the Pe Decay mapping is inside it
 DROP_WIDTH_ST = 2.0      # the free pitch drop may move by max(this, 40 %) either way
-PEAK_DB_AT_0DB = {"tone": 3.0, "noise": 11.0}   # peak of a voice at osc level 0 dB, velocity 100 (measured 2026-11-11)
+PEAK_DB_AT_0DB = {"tone": 3.7, "noise": 8.0}    # peak of a voice at osc level 0 dB over Volume (dB), 2026-11-12, Volume -12 dB:
+#                          a sine reads +3.7 (two takes, +3.6 to +4.0); noise +7.5 and +8.6 (two takes: 8 is their middle)
 NOTE_VELOCITY = 100      # the velocity every level was measured at
 Z_AMPLITUDE_DB = 20.0 / math.log(10.0)      # 8.686 dB per neper of amplitude
 
@@ -573,7 +579,7 @@ def operator_guess(profile: dict) -> dict:
                      click: over in under CLICK_MS), at most PE_MAX_ST
       pitch_tau_ms   time constant of the glide, exponential
       tone_attack_ms attack_ms, at least ATTACK_FLOOR_MS (0.1 ms clicks)
-      tone_decay_ms  Operator's Decay time T = fall_20_ms / FALL20_PER_T (0.29: Operator, slope 1, measured)
+      tone_decay_ms  Operator's Decay time T = fall_20_ms / FALL20_PER_T (0.227: a device from insert_device, measured)
       tone_level_db  0 (the reference: the noise is set against it)
       noise_level_ref_db  the noise layer's level against the tone at noise_ref_ms: the attack-window reading
                      (noise_db.attack, a share of the total) as a power ratio, share / (1 - share)
@@ -587,10 +593,10 @@ def operator_guess(profile: dict) -> dict:
                      + 1/tau_tone; (3) otherwise a fifth of the tone's (default, searched within a factor of 4). The
                      result is shortened until tone + noise fall 40 dB no more than 25 % after the measured fall_40_ms
                      (unless the tone alone does: a gated shape). Noise-led: the larger of fall_20_ms and
-                     fall_40_ms / 2, over 0.29 (when the hit falls more slowly later the late fall is the noise's)
+                     fall_40_ms / 2, over 0.227 (when the hit falls more slowly later the late fall is the noise's)
       noise_attack_ms attack_ms, at least NOISE_ATTACK_FLOOR_MS
       noise_filter_hz  high-pass for a noise-led hit whose bands are empty low (see _noise_filter)
-      output_db      Volume: the sample's peak_db minus the peak of one oscillator at 0 dB (+3 tone, +11 noise)
+      output_db      Volume: the sample's peak_db minus the peak of one oscillator at 0 dB (+3.7 tone, +8 noise)
     A noise layer is added to a pitched hit whenever its attack reading is above the leakage floor. Its level is PINNED
     only with evidence: the attack's energy above 2 kHz (click_db) within HF_MARGIN_DB of the reading, and a flat
     part in the spectrum (flatness.attack), and the reading itself over NOISE_FREE_DB. Without the evidence (a glide, a
@@ -643,7 +649,7 @@ def operator_guess(profile: dict) -> dict:
         structure["pitch_env_on"] = abs(pe["drop_st"]) > oneshot.DROP_ST
         put("tone_attack_ms", max(ATTACK_FLOOR_MS, attack), "attack_ms, floored at %.1f ms (0.1 ms clicks)" % ATTACK_FLOOR_MS,
             "measured" if attack >= ATTACK_FLOOR_MS else "default")
-        put("tone_decay_ms", fall20 / FALL20_PER_T, "fall_20_ms / %.2f" % FALL20_PER_T, "derived")
+        put("tone_decay_ms", fall20 / FALL20_PER_T, "fall_20_ms / %.3f" % FALL20_PER_T, "derived")
         put("tone_level_db", 0.0, "reference level", "default")
         nz = p.get("noise_db") or {}
         a, b, click = nz.get("attack"), nz.get("body"), p.get("click_db")
@@ -721,7 +727,7 @@ def operator_guess(profile: dict) -> dict:
             notes.append("noise_db.attack is %s: no noise layer" % ("missing" if a is None else "%.1f dB, under the %.0f dB floor "
                                                                     "(a decaying tone reads that from window leakage)" % (a, oneshot.NOISE_FLOOR_DB)))
         put("output_db", min(0.0, peak_db - PEAK_DB_AT_0DB["tone"]),
-            "peak_db minus %.0f dB (one sine at 0 dB peaks at +3 dBFS)" % PEAK_DB_AT_0DB["tone"], "default")
+            "peak_db minus %.1f dB (a sine at Osc-A Level 0 dB peaks at Volume + 3.7 dB: measured)" % PEAK_DB_AT_0DB["tone"], "default")
         free["carrier_hz"] = (patch["carrier_hz"] * 2 ** (-PITCH_BOUND_ST / 12), patch["carrier_hz"] * 2 ** (PITCH_BOUND_ST / 12), "log")
         if structure["pitch_env_on"]:
             d = patch["pitch_drop_st"]
@@ -748,7 +754,7 @@ def operator_guess(profile: dict) -> dict:
             put("noise_filter_hz", flt[0], flt[1], "derived")
             pinned["noise_filter_hz"] = "set from the band balance, not searched"
         put("output_db", min(0.0, peak_db - PEAK_DB_AT_0DB["noise"]),
-            "peak_db minus %.0f dB (noise voices peak at +9 to +13 dBFS at 0 dB)" % PEAK_DB_AT_0DB["noise"], "default")
+            "peak_db minus %.0f dB (noise at Osc-B Level 0 dB peaks at Volume + 7.5 to 8.6 dB: two takes)" % PEAK_DB_AT_0DB["noise"], "default")
         free["noise_decay_ms"] = (patch["noise_decay_ms"] / DECAY_FACTOR, patch["noise_decay_ms"] * DECAY_FACTOR, "log")
         pinned["noise_attack_ms"] = pinned["output_db"] = "set from the reading, not searched"
         notes.append("unpitched: the voice is noise only (tone off); the profile's partials are not rendered")
