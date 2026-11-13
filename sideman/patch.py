@@ -1058,7 +1058,9 @@ class LiveRenderer:
     one included) starts with a guard op, a harmless call on the device's first parameter carrying
     expect={"id": its _live_ptr, read at capture}, and is sent with stop_on_error: Live checks `expect` before the
     call (remote_script handlers._guard, _target_identity) and a mismatch halts the transaction before any set. The take
-    is then aborted and the cleanup raises "moved"; no parameter reaches another track's device.
+    is then aborted and the cleanup raises "moved"; no parameter reaches another track's device. The setup and fire
+    transactions, which also touch the record track and its slots, carry a second guard on the record track's volume
+    (its _live_ptr read at capture) and so does the restore: an insertion BETWEEN the scratch tracks is caught there.
 
     EVERY request to Live costs about 0.4 to 0.7 s of wall time whatever it holds (measured 2026-11-13: one `get`
     599 ms, a `transaction` of 1 to 38 sets 400 to 710 ms). The schedule is built on that:
@@ -1090,8 +1092,9 @@ class LiveRenderer:
 
     The file. Launch quantization starts the record slot and the clip on the grid (`clip_trigger_quantization`,
     read in the state batch), and the two fires are two requests apart: the record slot can start one or more grid
-    steps before the clip (or, with no quantization, by the time between the two fires). The first onset in the file
-    is note 0 (the record slot is fired first). Its shift against the expected time is applied only when it is no more
+    steps before the clip, when the two fires are two requests (`fire_together=False`; with the default one transaction
+    both start in the same step, on the same boundary, with no gap, and `fire_window_s` is 0). The first onset in the
+    file is note 0 (the record slot is fired first). Its shift against the expected time is applied only when it is no more
     than the time the two fires took (`fire_window_s`) or within `shift_tol_s` (30 ms) of a whole number of grid steps and, when it
     is as long as a spacing or longer (which is also what a missing note 0 looks like: the first onset is then note 1),
     every note has an onset where the shift puts it (a count of onsets would be defeated by one extra); otherwise the take is rejected with a reason, every
@@ -1103,11 +1106,15 @@ class LiveRenderer:
     `onset_early_s` (40 ms) before to `onset_late_s` (100 ms) after it, the file must run hit_s past it, the cut must
     not be silent. Single mode (batch=False): one take per candidate, the manual way, each at the next empty slot.
 
-    Requests per take: 3 guards (+ 2 counts the first time), notes_remove, notes_add, one transaction (record
-    track solo and arm, clip looping and length, and candidate 0's parameters), 2 fires, the sync (1 or 2), one
-    write per further candidate, then the identity / solo / arm re-read, stop of the record slot, stop_playing, a
-    restore transaction (only the differences from the state before the take) and file_path. The clip slot is
-    not stopped separately: stop_playing stops it.
+    Requests per take: 3 guards (+ 2 counts the first time), ONE setup transaction (identity guards, the clip's notes
+    removed and rewritten, the record track's solo and arm, the clip's looping and length, candidate 0's parameters),
+    ONE fire transaction (guards, the record slot, the clip; `fire_together=False` sends two plain calls instead), the
+    sync (1 or 2), one write per further candidate, then the identity / solo / arm re-read, stop of the record slot,
+    stop_playing, a restore transaction (a guard on the record track's volume, then only the differences the take made)
+    and file_path. The clip slot is not stopped separately: stop_playing stops it. The notes are removed and added
+    INSIDE the guarded setup transaction: a track inserted since the state batch loses none of its clip's notes.
+    (The ops are `notes_remove` and `notes_add` of handlers.OPS; whether notes_remove on an EMPTY clip is an error
+    is not known: it would halt the setup and abort the take with that error.)
 
     Guards, each before anything is changed: the Set must not be playing (read twice: the second time in the state
     batch, a few seconds before the first write) and Arrangement Record (`record_mode`) must be off; the identity
@@ -1133,7 +1140,7 @@ class LiveRenderer:
                  lead_floor_s: float = 0.5, min_lead_s: float = 0.03, margin_s: float | None = None,
                  spacing_beats: float | None = None, onset_early_s: float = 0.04, onset_late_s: float = 0.10,
                  settle_s: float = 0.3, sync_timeout_s: float | None = None, velocity: int = 100,
-                 repoll_ratio: float = 1.25, shift_tol_s: float = 0.03, expect: dict | None = None, capture: bool = True,
+                 repoll_ratio: float = 1.25, shift_tol_s: float = 0.03, fire_together: bool = True, expect: dict | None = None, capture: bool = True,
                  sleep=None, clock=None):
         if hit_s <= 0 or start_beat <= 0 or lead_factor < 1.0 or lead_floor_s < 0 or min_lead_s < 0 or repoll_ratio < 1.0:
             raise ValueError("need hit_s > 0, start_beat > 0, lead_factor >= 1, lead_floor_s >= 0, min_lead_s >= 0 and repoll_ratio >= 1")
@@ -1148,12 +1155,15 @@ class LiveRenderer:
         self.client, self.device, self.clip, self.record_track = client, device, clip, mrec.group(0)
         self.midi_track = mdev.group(0)
         self.guard_path = "%s parameters 0" % device.strip()        # the device's first parameter: the identity guard of every write
+        self.record_guard_path = "%s mixer_device volume" % mrec.group(0)      # the record track's volume: the guard of the restore
+        self.warnings: list = []                                    # things found at capture or at the first take that the user should know
         self.units, self.to_params = units, to_params
         self.names = list(names) if names is not None else list(operator_parameters())
         self.convert = convert or (lambda params: to_live(params, units))
         self.batch, self.hit_s, self.start_beat = batch, hit_s, start_beat
         self.lead_factor, self.lead_floor_s, self.min_lead_s, self.margin_s = lead_factor, lead_floor_s, min_lead_s, margin_s
         self.spacing_beats, self.repoll_ratio, self.shift_tol_s = spacing_beats, repoll_ratio, shift_tol_s
+        self.fire_together = fire_together
         self.onset_early_s, self.onset_late_s, self.settle_s, self.sync_timeout_s = onset_early_s, onset_late_s, settle_s, sync_timeout_s
         self.velocity = velocity
         self.sleep = sleep or _time.sleep
@@ -1172,17 +1182,32 @@ class LiveRenderer:
             self.capture()
 
     # ---------------------------------------------------------------- the public face
+    def _ident_specs(self) -> list:
+        return [{"path": self.record_track, "property": "name"}, {"path": self.midi_track, "property": "name"},
+                {"path": self.device, "property": "class_name"}, {"path": self.guard_path, "property": "_live_ptr"},
+                {"path": self.record_guard_path, "property": "_live_ptr"}]
+
+    @staticmethod
+    def _ident(values: list) -> dict:
+        return {"record": values[0], "midi": values[1], "device": values[2], "device_id": values[3], "record_id": values[4]}
+
     def capture(self) -> dict:
-        """Read the record track's name, the MIDI track's name, the device's class_name and the identity (_live_ptr) of
-        the device's first parameter (one request) and keep them as the identity every take is checked against, and
-        every write is guarded by."""
-        res = self.client.get_batch([{"path": self.record_track, "property": "name"}, {"path": self.midi_track, "property": "name"},
-                                     {"path": self.device, "property": "class_name"},
-                                     {"path": self.guard_path, "property": "_live_ptr"}])["results"]
-        got = {"record": _value(res[0]), "midi": _value(res[1]), "device": _value(res[2]), "device_id": _value(res[3])}
+        """Read the record track's name, the MIDI track's name, the device's class_name, the identity (_live_ptr) of the
+        device's first parameter (the guard of every parameter write) and of the record track's volume (the guard of the
+        restore), in one request, and keep them as the identity every take is checked against. The record track's solo
+        and arm are read with them: if it is already soloed or armed (a leftover of a run that was interrupted) that is
+        noted in `warnings` and in every take's `capture_warnings`, and the state is then the baseline the cleanup
+        restores to: the track stays that way."""
+        res = self.client.get_batch(self._ident_specs() + [{"path": self.record_track, "property": "solo"},
+                                                          {"path": self.record_track, "property": "arm"}])["results"]
+        got = self._ident([_value(x) for x in res[:5]])
         if any(v is None for v in got.values()):
-            raise RuntimeError("could not read the track names and the device class (%s): the paths are wrong, or Live refused" % got)
+            raise RuntimeError("could not read the track names, the device class and the guard identities (%s): the paths are wrong, or Live refused" % got)
         self.expect = got
+        for what, v in (("soloed", _value(res[5])), ("armed", _value(res[6]))):
+            if v:
+                self.warnings.append("the record track %s is already %s at capture (a leftover of an interrupted run?): it is taken as the "
+                                     "baseline and left %s after every take" % (self.record_track, what, what))
         return got
 
     def render(self, patches: list) -> list:
@@ -1231,13 +1256,12 @@ class LiveRenderer:
             raise RuntimeError("clear_takes needs the identity of the scratch tracks and nothing was captured: call capture() first "
                                "(or build the renderer with capture=True or expect=)")
         count = self.client.get(self.record_track, "clip_slots", limit=1)["value"]["count"]
-        specs = [{"path": self.record_track, "property": "name"}, {"path": self.midi_track, "property": "name"},
-                 {"path": self.device, "property": "class_name"}, {"path": self.guard_path, "property": "_live_ptr"}]
+        specs = self._ident_specs()
         specs += [{"path": "%s clip_slots %d" % (self.record_track, k), "property": "has_clip"} for k in range(count)]
         specs += [{"path": "%s clip_slots %d clip" % (self.record_track, k), "property": "name"} for k in range(count)]
         res = self.client.get_batch(specs)["results"]
-        self._check_identity({"record": _value(res[0]), "midi": _value(res[1]), "device": _value(res[2]), "device_id": _value(res[3])})
-        doomed = [(k, _value(res[4 + count + k])) for k in range(count) if _value(res[4 + k])]
+        self._check_identity(self._ident([_value(x) for x in res[:5]]))
+        doomed = [(k, _value(res[5 + count + k])) for k in range(count) if _value(res[5 + k])]
         unnamed = [k for k, name in doomed if name is None]
         if unnamed:
             raise RuntimeError("could not read the name of the clip in slot(s) %s: nothing was deleted" % unnamed)
@@ -1251,9 +1275,11 @@ class LiveRenderer:
             if any(v is None for v in got.values()):
                 raise RuntimeError("could not read the track names and the device class (%s)" % got)
             self.expect = dict(got)
-        elif self.expect.get("device_id") is None and got.get("device_id") is not None and \
-                {k: v for k, v in got.items() if k != "device_id"} == {k: v for k, v in self.expect.items() if k != "device_id"}:
-            self.expect["device_id"] = got["device_id"]           # an expect given without the id: the first read supplies it
+        elif any(self.expect.get(k) is None for k in ("device_id", "record_id")) and \
+                all(got.get(k) == v for k, v in self.expect.items() if v is not None):
+            for k in ("device_id", "record_id"):                      # an expect given without the ids: the first read supplies them
+                if self.expect.get(k) is None and got.get(k) is not None:
+                    self.expect[k] = got[k]
         elif got != self.expect:
             raise RuntimeError("the scratch tracks are not where they were: expected %s, found %s (a track was inserted, deleted or "
                                "renamed above them?): nothing was written" % (self.expect, got))
@@ -1266,6 +1292,16 @@ class LiveRenderer:
     def _param_ops(self, live_values: dict) -> list:
         return [{"op": "set", "path": "%s parameters %d" % (self.device, self.names.index(n)), "property": "value", "value": v}
                 for n, v in live_values.items()]
+
+    def _guard_ops(self, record: bool = False) -> list:
+        """The identity guards: the device's (always) and, when the transaction touches the record track or its slots, the
+        record track's: harmless calls (str_for_value 0.0) on the device's first parameter and on the record track's
+        volume, each carrying expect={"id": its _live_ptr}."""
+        ops = [self._guard_op()]
+        if record:
+            ops.append({"op": "call", "path": self.record_guard_path, "function": "str_for_value", "args": [0.0],
+                        "expect": {"id": self.expect["record_id"]}})
+        return ops
 
     def _guard_op(self) -> dict:
         """The first op of every write transaction: a harmless call (str_for_value 0.0) on the device's first parameter that
@@ -1309,10 +1345,8 @@ class LiveRenderer:
 
     def _state_specs(self) -> list:
         nt, ns = self._ntracks, self._nslots
-        specs = [{"path": self.record_track, "property": "name"}, {"path": self.midi_track, "property": "name"},
-                 {"path": self.device, "property": "class_name"}, {"path": self.guard_path, "property": "_live_ptr"},
-                 {"path": "live_set", "property": "is_playing"}, {"path": "live_set", "property": "record_mode"},
-                 {"path": "live_set", "property": "clip_trigger_quantization"}]
+        specs = self._ident_specs() + [{"path": "live_set", "property": "is_playing"}, {"path": "live_set", "property": "record_mode"},
+                                       {"path": "live_set", "property": "clip_trigger_quantization"}]
         specs += [{"path": "live_set tracks %d" % i, "property": "solo"} for i in range(nt)]
         specs += [{"path": "live_set tracks %d" % i, "property": "arm"} for i in range(nt)]
         specs += [{"path": "%s clip_slots %d" % (self.record_track, k), "property": "has_clip"} for k in range(ns)]
@@ -1351,23 +1385,28 @@ class LiveRenderer:
         nt = self._ntracks
         state, t3 = self._timed(cl.get_batch, self._state_specs())
         v = [_value(r) for r in state["results"]]
-        ident = {"record": v[0], "midi": v[1], "device": v[2], "device_id": v[3]}
-        if v[4]:
-            raise RuntimeError("the Set is playing: not starting a take (it started after the first check)")
+        ident = self._ident(v[:5])
         if v[5]:
+            raise RuntimeError("the Set is playing: not starting a take (it started after the first check)")
+        if v[6]:
             raise RuntimeError("Arrangement Record is on (live_set record_mode): a take would record into the arrangement; turn it off")
         self._check_identity(ident)
-        quant_enum = v[6]
+        quant_enum = v[7]
         quant = QUANT_BEATS[int(quant_enum)] if isinstance(quant_enum, (int, float)) and 0 <= int(quant_enum) < len(QUANT_BEATS) else None
-        now_solo = [bool(x) for x in v[7:7 + nt]]
-        now_arm = [None if x is None else bool(x) for x in v[7 + nt:7 + 2 * nt]]
-        slots = [bool(x) for x in v[7 + 2 * nt:]]
+        now_solo = [bool(x) for x in v[8:8 + nt]]
+        now_arm = [None if x is None else bool(x) for x in v[8 + nt:8 + 2 * nt]]
+        slots = [bool(x) for x in v[8 + 2 * nt:]]
         if all(slots):
             raise RuntimeError("no empty clip slot on %s (all %d hold clips): delete the takes, or add scenes (clear_takes(confirm=True) "
                                "deletes the clips; the recordings stay on disk)" % (self.record_track, len(slots)))
         rec_index = int(self.record_track.split()[-1])
         if rec_index >= nt or len(now_solo) != nt:
             raise RuntimeError("the record track index %d is outside the %d tracks counted at the first take: rebuild the renderer" % (rec_index, nt))
+        if self._baseline is None and (now_solo[rec_index] or now_arm[rec_index]):
+            note = ("the record track %s is already %s at the first take (a leftover of an interrupted run?): it is the baseline and "
+                    "stays that way" % (self.record_track, "soloed" if now_solo[rec_index] else "armed"))
+            if note not in self.warnings and not any("already" in w for w in self.warnings):
+                self.warnings.append(note)
         if self._baseline is None or not self._restore_failed:
             self._baseline = (now_solo, now_arm)                  # what the cleanup restores: kept across a failed restore
         base_solo, base_arm = self._baseline
@@ -1384,7 +1423,7 @@ class LiveRenderer:
         take = dict(sched, file=None, slot=slot_index, tempo=tempo, request_s=m, request_samples=[round(x, 3) for x in (t1, t2, t3)],
                     notes=notes, candidates=cands, sample_rate=None, failures=[], lead_extra_s=self.lead_extra_s, lead_raised_s=0.0,
                     setup_errors=[], cleanup_errors=[], offset_median_ms=None, offset_trend_ms=None, clip_length_beats=None,
-                    quantization_beats=quant, fire_window_s=None, file_shift_s=None, onsets_found=None, rejected=None, sync_poll_s=None,
+                    quantization_beats=quant, fire_window_s=None, capture_warnings=list(self.warnings), fires_in_one_request=False, file_shift_s=None, onsets_found=None, rejected=None, sync_poll_s=None,
                     sync_repolled=False)
         self.takes.append(take)
         # what the cleanup writes if its own re-read fails: the record track's solo and arm, which this take changes
@@ -1396,12 +1435,7 @@ class LiveRenderer:
         started = touched = False
         pending = None
         try:
-            try:
-                cl.notes_remove(self.clip)
-            except Exception:
-                pass                                                  # an empty clip may refuse
-            cl.notes_add(self.clip, notes)
-            ops = []
+            ops = [{"op": "notes_remove", "path": self.clip}, {"op": "notes_add", "path": self.clip, "notes": notes}]
             if not base_solo[rec_index]:
                 ops.append({"op": "set", "path": self.record_track, "property": "solo", "value": True})
             if base_arm[rec_index] is False:
@@ -1411,27 +1445,43 @@ class LiveRenderer:
                     {"op": "set", "path": self.clip, "property": "end_marker", "value": float(end_beat)}]
             nsetup = len(ops)
             ops += self._param_ops(plans[0][1])                       # candidate 0's parameters, before the clip is fired
-            ops.insert(0, self._guard_op())                           # the identity guard: first, and the transaction halts on it
+            guards = self._guard_ops(record=True)                    # first: the transaction halts on a mismatch, before any note or set
+            ng = len(guards)
+            ops = guards + ops
             touched = True
             t_w = self.clock()
             tr = cl.transaction(ops, stop_on_error=True)
             t_d = self.clock()
             results = tr.get("results", [])
-            if not results or not results[0].get("ok"):
-                raise RuntimeError("the scratch tracks moved during the take: the device guard refused the setup transaction (%s); nothing was written"
-                                   % (results[0].get("error") if results else "no result"))
-            take["setup_errors"] = [r.get("error") for r in results[1:1 + nsetup] if not r.get("ok")]
-            if take["setup_errors"] or len(results) < 1 + nsetup:
+            if len(results) < ng or not all(r.get("ok") for r in results[:ng]):
+                raise RuntimeError("the scratch tracks moved during the take: an identity guard refused the setup transaction (%s); "
+                                   "no note and no parameter was written" % ([r.get("error") for r in results if not r.get("ok")] or "no result"))
+            take["setup_errors"] = [r.get("error") for r in results[ng:ng + nsetup] if not r.get("ok")]
+            if take["setup_errors"] or len(results) < ng + nsetup:
                 raise RuntimeError("setting up the take failed (%s): nothing was played" % (take["setup_errors"][:2] or "halted"))
-            bad0 = [r for r in results[1 + nsetup:] if not r.get("ok")]
+            bad0 = [r for r in results[ng + nsetup:] if not r.get("ok")]
             short0 = len(results) < len(ops)
             writes = [(not bad0 and not short0, None if not (bad0 or short0) else "%d of %d parameter writes failed (first: %s)" % (
-                len(bad0) or len(ops) - len(results), len(ops) - 1 - nsetup, bad0[0].get("error") if bad0 else "halted"), t_d - t_w, t_d)]
+                len(bad0) or len(ops) - len(results), len(ops) - ng - nsetup, bad0[0].get("error") if bad0 else "halted"), t_d - t_w, t_d)]
             t_fire = self.clock()
-            cl.call(slot, "fire")
-            started = True
-            cl.call(self._clip_slot(), "fire")
-            take["fire_window_s"] = round(self.clock() - t_fire, 3)
+            if self.fire_together:
+                # ONE request: both slots fire in the same step, so they start on the same launch-quantization boundary (no
+                # straddle) and with no gap; the two guards come first (a record slot that moved would fire a user's clip)
+                started = True
+                fr = cl.transaction(self._guard_ops(record=True) + [{"op": "call", "path": slot, "function": "fire"},
+                                                                     {"op": "call", "path": self._clip_slot(), "function": "fire"}],
+                                    stop_on_error=True).get("results", [])
+                if len(fr) < 2 or not all(r.get("ok") for r in fr[:2]):
+                    raise RuntimeError("the scratch tracks moved during the take: an identity guard refused the fire transaction (%s); "
+                                       "nothing was fired" % ([r.get("error") for r in fr if not r.get("ok")] or "no result"))
+                if len(fr) < 4 or not all(r.get("ok") for r in fr):
+                    raise RuntimeError("firing the slots failed (%s)" % [r.get("error") for r in fr if not r.get("ok")][:2])
+                take["fires_in_one_request"], take["fire_window_s"] = True, 0.0
+            else:
+                cl.call(slot, "fire")
+                started = True
+                cl.call(self._clip_slot(), "fire")
+                take["fire_window_s"] = round(self.clock() - t_fire, 3)
             limit = self.sync_timeout_s if self.sync_timeout_s is not None else max(3.0, 8.0 * m)
             deadline = self.clock() + limit
             while True:
@@ -1591,14 +1641,13 @@ class LiveRenderer:
         warnings: list = []
 
         def reread():
-            specs = [{"path": self.record_track, "property": "name"}, {"path": self.midi_track, "property": "name"},
-                     {"path": self.device, "property": "class_name"}, {"path": self.guard_path, "property": "_live_ptr"}]
+            specs = self._ident_specs()
             specs += [{"path": "live_set tracks %d" % i, "property": "solo"} for i in range(nt)]
             specs += [{"path": "live_set tracks %d" % i, "property": "arm"} for i in range(nt)]
             r = [_value(x) for x in cl.get_batch(specs)["results"]]
-            ctx["ident"] = {"record": r[0], "midi": r[1], "device": r[2], "device_id": r[3]}
-            ctx["solo"] = [bool(x) for x in r[4:4 + nt]]
-            ctx["arm"] = [None if x is None else bool(x) for x in r[4 + nt:4 + 2 * nt]]
+            ctx["ident"] = self._ident(r[:5])
+            ctx["solo"] = [bool(x) for x in r[5:5 + nt]]
+            ctx["arm"] = [None if x is None else bool(x) for x in r[5 + nt:5 + 2 * nt]]
             if ctx["ident"] != self.expect:
                 ctx["moved"] = True
                 self._restore_failed = True                           # nothing is restored: the next take must not take this as its baseline
@@ -1649,12 +1698,14 @@ class LiveRenderer:
             else:
                 ops = blind_restore                                   # the re-read failed: at least the record track
             if ops:
-                res = twice(lambda: cl.transaction(ops, stop_on_error=False)).get("results", [])
+                guarded = [{"op": "call", "path": self.record_guard_path, "function": "str_for_value", "args": [0.0],
+                            "expect": {"id": self.expect["record_id"]}}] + ops          # first: a record track that moved since the re-read refuses it all
+                res = twice(lambda: cl.transaction(guarded, stop_on_error=True)).get("results", [])
                 bad = [r for r in res if not r.get("ok")]
-                if bad or len(res) < len(ops):
+                if bad or len(res) < len(guarded):
                     self._restore_failed = True
                     raise RuntimeError("restoring solo/arm failed (%d of %d operations: %s): the Set's track states may be wrong" % (
-                        len(bad) or len(ops) - len(res), len(ops), bad[0].get("error") if bad else "no result"))
+                        len(bad) or len(guarded) - len(res), len(ops), bad[0].get("error") if bad else "no result"))
             self._restore_failed = False
 
         for step in ((reread if touched else None), stop_slot, stop_transport, restore):
