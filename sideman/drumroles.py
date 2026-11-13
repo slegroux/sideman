@@ -964,14 +964,21 @@ def _tail(probs: list, k: int) -> float:
     return float(pmf[k:].sum())
 
 
-def _bleed_pair(res_a: dict, ga: dict, res_b: dict, gb: dict, span: int, sr: int) -> dict:
-    """The evidence that group `ga` (stem a) is bleed of group `gb` (stem b), and the first of the three conditions it fails
-    ("coincidence", "level", "likeness", or None when it passes all). See mark_bleed."""
+def _bleed_pair(res_a: dict, ga: dict, res_b: dict, gbs: list, span: int, sr: int) -> dict:
+    """The evidence that group `ga` (stem a) is bleed of the group `gbs[0]` (stem b), or of the union of the groups `gbs`
+    (one or more groups of stem b: every hit of theirs is a candidate partner), and the first of the three conditions it
+    fails ("coincidence", "level", "likeness", or None when it passes all). See mark_bleed."""
     hits_a = [res_a["hits"][i] for i in ga["members"] + ga["assigned_members"] if res_a["hits"][i]["level_db"] is not None]
-    hits_b = [res_b["hits"][i] for i in gb["members"] + gb["assigned_members"] if res_b["hits"][i]["level_db"] is not None]
+    owner = {}
+    for gb in gbs:
+        for i in gb["members"] + gb["assigned_members"]:
+            if res_b["hits"][i]["level_db"] is not None:
+                owner[i] = gb
+    hits_b = [res_b["hits"][i] for i in owner]
     n = len(hits_a)
-    ev = {"source_stem": None, "source_group": gb["id"], "hits": n, "coincide": 0, "rate": 0.0, "expected": None, "p": None,
-          "louder_db": None, "louder_share": None, "distance": None, "failed": "coincidence"}
+    ev = {"source_stem": None, "source_group": gbs[0]["id"], "source_groups": [g["id"] for g in gbs], "union": len(gbs) > 1,
+          "hits": n, "coincide": 0, "rate": 0.0, "expected": None, "p": None, "louder_db": None, "louder_share": None,
+          "distance": None, "distances": None, "failed": "coincidence"}
     if not n or not hits_b:
         return ev
     tb = np.array([h["onset_s"] for h in hits_b])
@@ -1000,18 +1007,25 @@ def _bleed_pair(res_a: dict, ga: dict, res_b: dict, gb: dict, span: int, sr: int
     if not (ev["louder_db"] >= BLEED_LOUDER_DB and ev["louder_share"] >= BLEED_LOUDER_SHARE):
         return ev
     ev["failed"] = "likeness"
-    if ga["clean_hit"] is None or gb["clean_hit"] is None:
-        ev["distance_note"] = "no clean hit to compare (%s)" % (
-            "this group: " + str(ga["clean_note"]) if ga["clean_hit"] is None else "the other group: " + str(gb["clean_note"]))
+    paired = {}                                  # the groups the coincident pairs belong to, by id
+    for _, b in pairs:
+        paired[owner[b["id"]]["id"]] = owner[b["id"]]
+    ev["source_groups"] = sorted(paired)
+    missing = [g for g in paired.values() if g["clean_hit"] is None] + ([ga] if ga["clean_hit"] is None else [])
+    if missing:
+        ev["distance_note"] = "no clean hit to compare (%s)" % "; ".join(
+            "%s: %s" % ("this group" if g is ga else "group %d" % g["id"], g["clean_note"]) for g in missing)
         return ev
-    ev["distance"] = float(_pair_distance(ga["clean_hit"]["audio"], gb["clean_hit"]["audio"], sr))
+    ev["distances"] = {gid: float(_pair_distance(ga["clean_hit"]["audio"], g["clean_hit"]["audio"], sr)) for gid, g in paired.items()}
+    ev["distance"] = max(ev["distances"].values())
     ev["failed"] = None if ev["distance"] <= BLEED_DISTANCE else "likeness"
     return ev
 
 
 def _bleed_why(ev: dict) -> str:
     """One line for the evidence of one pair (the reason it was not marked, or the proof that it was)."""
-    src = "group %d of `%s`" % (ev["source_group"], ev["source_stem"])
+    src = ("the union of groups %s of `%s`" % (ev["source_groups"], ev["source_stem"]) if ev["union"]
+           else "group %d of `%s`" % (ev["source_group"], ev["source_stem"]))
     co = "%d of %d hits coincide with %s (%.0f %%; the two patterns give %s by chance, p %s)" % (
         ev["coincide"], ev["hits"], src, 100 * ev["rate"],
         "-" if ev["expected"] is None else "%.0f %%" % (100 * ev["expected"]), "-" if ev["p"] is None else "%.3g" % ev["p"])
@@ -1027,7 +1041,8 @@ def _bleed_why(ev: dict) -> str:
             co, lv, BLEED_LOUDER_DB, 100 * BLEED_LOUDER_SHARE)
     if ev["distance"] is None:
         return "%s; %s; likeness not tested: %s" % (co, lv, ev.get("distance_note"))
-    sounds = "the clean hits are %.2f apart (at most %.2f)" % (ev["distance"], BLEED_DISTANCE)
+    sounds = "the clean hits are %.2f apart%s (at most %.2f)" % (
+        ev["distance"], "" if not ev["union"] else " (the furthest of the groups the pairs belong to)", BLEED_DISTANCE)
     return "%s; %s; %s%s" % (co, lv, sounds, "" if ev["failed"] is None else ": they do not sound alike")
 
 
@@ -1044,10 +1059,18 @@ def mark_bleed(results_by_stem: dict) -> dict:
     at least as many coincidences (Poisson-binomial). If the other group plays every beat, a group that sits on the beats
     coincides with it every time and the chance rate is 100 %: that is not evidence. The track's bars run from the first to
     the last hit of any stem. Hits that are not on the grid count in the observed rate and get the chance of their nearest 16th.
-    Returns {stem: {group id: {"bleed": bool, "why": str, "evidence": dict or None}}} for every group of every stem. A marked
-    group's `evidence` is the pair that proves it ({"source_stem", "source_group", "hits", "coincide", "rate", "expected",
-    "p", "louder_db", "louder_share", "distance"}); an unmarked group's is the pair that came closest and `why` says which
-    condition it failed. Pass each stem's entry to `name_roles(..., bleed=)`."""
+    Second test, reported separately: a separator may split one source over several groups of its stem, so that no single
+    group is coincident enough. A group that fails (a) against EVERY group of another stem is also tested against the union
+    of that stem's groups that the first test did not mark (at least two), the chance rate computed the same way from the
+    16ths where any of them plays. Coincidence alone never marks here either: (b) is read over all coincident pairs, each
+    hit at its own level, and (c) against the clean hit of every group that a coincident pair belongs to, the furthest
+    counting; a group without a clean hit is not tested.
+    Returns {stem: {group id: {"bleed": bool, "why": str, "evidence": dict or None, "union": {other stem: {"evidence", "why"}}}}}
+    for every group of every stem. A marked group's `evidence` is the pair or union that proves it ({"source_stem",
+    "source_group", "source_groups", "union", "hits", "coincide", "rate", "expected", "p", "louder_db", "louder_share",
+    "distance", "distances", "failed"}); an unmarked group's is the single group that came closest and `why` says which
+    condition it failed; `union` holds what the second test read, when it was run. Pass each stem's entry to
+    `name_roles(..., bleed=)`."""
     stems = list(results_by_stem)
     if not stems:
         raise ValueError("no stems")
@@ -1060,26 +1083,52 @@ def mark_bleed(results_by_stem: dict) -> dict:
     sr = first["sample_rate"]
     bars = [h["bar"] for r in results_by_stem.values() for h in r["hits"]]
     span = max(bars) - min(bars) + 1 if bars else 1
+    stage = ["coincidence", "level", "likeness", None]
     out = {s: {} for s in stems}
+    singles = {}                                               # (stem, group id) -> {other stem: [evidence per group]}
     for sa in stems:
         for ga in results_by_stem[sa]["groups"]:
-            ok, best = [], None
+            ok, best, per_stem = [], None, {}
             for sb in stems:
                 if sb == sa:
                     continue
+                per_stem[sb] = []
                 for gb in results_by_stem[sb]["groups"]:
-                    ev = _bleed_pair(results_by_stem[sa], ga, results_by_stem[sb], gb, span, sr)
+                    ev = _bleed_pair(results_by_stem[sa], ga, results_by_stem[sb], [gb], span, sr)
                     ev["source_stem"] = sb
+                    per_stem[sb].append(ev)
                     if ev["failed"] is None:
                         ok.append(ev)
-                    rank = (["coincidence", "level", "likeness", None].index(ev["failed"]), ev["rate"])
+                    rank = (stage.index(ev["failed"]), ev["rate"])
                     if best is None or rank > best[0]:
                         best = (rank, ev)
+            singles[(sa, ga["id"])] = per_stem
             if ok:
                 ev = min(ok, key=lambda e: e["distance"])
-                out[sa][ga["id"]] = {"bleed": True, "why": _bleed_why(ev), "evidence": ev}
+                out[sa][ga["id"]] = {"bleed": True, "why": _bleed_why(ev), "evidence": ev, "union": {}}
             elif best is None:
-                out[sa][ga["id"]] = {"bleed": False, "why": "there is no other stem to compare with", "evidence": None}
+                out[sa][ga["id"]] = {"bleed": False, "why": "there is no other stem to compare with", "evidence": None, "union": {}}
             else:
-                out[sa][ga["id"]] = {"bleed": False, "why": _bleed_why(best[1]), "evidence": best[1]}
+                out[sa][ga["id"]] = {"bleed": False, "why": _bleed_why(best[1]), "evidence": best[1], "union": {}}
+    left = {s: [g for g in results_by_stem[s]["groups"] if not out[s][g["id"]]["bleed"]] for s in stems}
+    for sa in stems:
+        for ga in results_by_stem[sa]["groups"]:
+            entry = out[sa][ga["id"]]
+            if entry["bleed"]:
+                continue
+            ok = []
+            for sb, evs in singles[(sa, ga["id"])].items():
+                if len(left[sb]) < 2 or any(e["failed"] != "coincidence" for e in evs):
+                    continue
+                ev = _bleed_pair(results_by_stem[sa], ga, results_by_stem[sb], left[sb], span, sr)
+                ev["source_stem"] = sb
+                entry["union"][sb] = {"evidence": ev, "why": _bleed_why(ev)}
+                if ev["failed"] is None:
+                    ok.append(ev)
+            if ok:
+                ev = min(ok, key=lambda e: e["distance"])
+                entry.update(bleed=True, why=_bleed_why(ev), evidence=ev)
+            elif entry["union"]:
+                entry["why"] += "; against the union of a stem's groups: " + "; ".join(
+                    "`%s`: %s" % (sb, u["why"]) for sb, u in entry["union"].items())
     return out

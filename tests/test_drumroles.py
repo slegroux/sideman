@@ -893,6 +893,53 @@ def test_a_group_that_coincides_only_at_the_rate_the_patterns_give_by_chance_is_
     assert not marks["x"][0]["bleed"] and ev["failed"] == "coincidence" and ev["rate"] == 0.5 and ev["expected"] == 0.5
 
 
+def split_source_pair(second_audio):
+    """Stem x (a kick on step 0 of 16 bars, and a tom copy 20 dB down on step 2 of bars 0-7) against stem y, where the tom
+    fill that the copy comes from is split over two groups: step 2 in bars 0-3 and step 2 in bars 4-7."""
+    tom = tom_hit()
+    x = fake_result([{"steps": [0], "audio": tom_hit(f=45.0, tau=0.1), "level": -12.0, "bars": range(16)},
+                     {"steps": [2], "audio": tom * 0.1, "level": -35.0, "bars": range(8)}], n_bars=16)
+    y = fake_result([{"steps": [2], "audio": tom, "level": -15.0, "bars": range(4)},
+                     {"steps": [2], "audio": second_audio, "level": -15.0, "bars": range(4, 8)}], n_bars=16)
+    return {"x": x, "y": y}
+
+
+def test_bleed_of_a_source_split_over_two_groups_is_marked_by_the_union_and_not_by_either_alone():
+    marks = drumroles.mark_bleed(split_source_pair(tom_hit()))
+    copy, kick = marks["x"][1], marks["x"][0]
+    assert copy["bleed"] and copy["evidence"]["union"] and copy["evidence"]["source_groups"] == [0, 1]
+    # the second test: each group alone has half the hits (50 % against 25 %: under the 70 % asked); together all 8 of 8,
+    # the track runs over 16 bars and the groups together are at that 16th in 8 of them (chance 50 %, p 0.004), 20 dB louder
+    ev = copy["evidence"]
+    assert ev["coincide"] == ev["hits"] == 8 and ev["expected"] == pytest.approx(0.5) and ev["p"] == pytest.approx(0.5 ** 8)
+    assert ev["louder_db"] == pytest.approx(20.0) and ev["distance"] < 0.1 and set(ev["distances"]) == {0, 1}
+    assert "the union of groups [0, 1]" in copy["why"]
+    assert not kick["bleed"] and not marks["y"][0]["bleed"] and not marks["y"][1]["bleed"]
+    # with only the first group in the stem there is nothing to unite: 4 of 8 hits coincide, not marked, no second test
+    pair = split_source_pair(tom_hit())
+    pair["y"]["groups"] = pair["y"]["groups"][:1]
+    alone = drumroles.mark_bleed(pair)["x"][1]
+    assert not alone["bleed"] and alone["union"] == {} and alone["evidence"]["coincide"] == 4
+
+
+def test_bleed_by_the_union_needs_every_group_a_pair_belongs_to_to_sound_alike_and_never_marks_on_coincidence_alone():
+    # the second half of the fill is a hat, not a tom: the pairs with it are 3 or more away from the copy, so the union fails
+    # on likeness although it coincides in all 8 hits and is louder
+    marks = drumroles.mark_bleed(split_source_pair(noise_hit(1, 0.01)))
+    copy = marks["x"][1]
+    assert not copy["bleed"] and copy["union"]["y"]["evidence"]["failed"] == "likeness"
+    assert copy["union"]["y"]["evidence"]["distances"][0] < 0.1 and copy["union"]["y"]["evidence"]["distances"][1] > drumroles.BLEED_DISTANCE
+    assert "against the union of a stem's groups" in copy["why"] and "do not sound alike" in copy["union"]["y"]["why"]
+    # the same split source, but quieter than the copy: coincidence alone does not mark
+    pair = split_source_pair(tom_hit())
+    for g in pair["y"]["groups"]:
+        g["level_db"] = -45.0
+    for h in pair["y"]["hits"]:
+        h["level_db"] = -45.0
+    quiet = drumroles.mark_bleed(pair)["x"][1]
+    assert not quiet["bleed"] and quiet["union"]["y"]["evidence"]["failed"] == "level"
+
+
 def test_a_small_excess_over_chance_in_a_long_stem_is_not_bleed():
     # x plays the 4 beats in bars 0-14 (60 hits), y plays them in bars 0-12 and then another 16th in bars 15-19, so the
     # track runs over 20 bars: y is at each beat 16th in 13 of 20 bars (chance 65 %), x coincides in 13 of 15 bars (87 %):
