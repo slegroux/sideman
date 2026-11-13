@@ -169,6 +169,16 @@ def test_one_repeated_tom_is_one_group():
     assert r["groups"][0]["clean_hit"] is not None       # a tom falls 40 dB (tau 150 ms) inside its 484 ms to the next
 
 
+def test_each_group_keeps_up_to_eight_complete_members_nearest_the_medoid_for_the_role_rules(hats):
+    # 16 offbeat hats and 48 closed ones, every one complete (each falls 40 dB well before the next 16th): 8 of each are kept,
+    # members of the group, nearest its medoid first, the clean hit one of them
+    for g in hats["groups"]:
+        ids = [m["hit"] for m in g["read_members"]]
+        d = [hats["hits"][i]["distance"] for i in ids]
+        assert len(ids) == 8 == len(set(ids)) and set(ids) <= set(g["members"]) and d == sorted(d)
+        assert g["clean_hit"]["hit"] in ids and all(len(m["audio"]) > 0 for m in g["read_members"])
+
+
 def test_a_hit_8_ms_early_and_one_12_ms_late_keep_their_16th_and_say_how_far_off_they_are():
     events = [(at(i), tom_hit()) for i in range(0, 64, 4)]
     events[6] = (at(24, -8.0), tom_hit())                  # bar 1, beat 3 (step 8), 8 ms early
@@ -263,8 +273,8 @@ def test_a_sound_the_sample_misses_still_gets_its_group():
 
 def plain(groups):
     """Groups without their audio (arrays do not compare)."""
-    return [{k: v for k, v in g.items() if k != "clean_hit"} | {"clean": g["clean_hit"] and g["clean_hit"]["hit"]}
-            for g in groups]
+    return [{k: v for k, v in g.items() if k not in ("clean_hit", "read_members")}
+            | {"clean": g["clean_hit"] and g["clean_hit"]["hit"], "read": [m["hit"] for m in g["read_members"]]} for g in groups]
 
 
 def test_sections_are_the_same_groups_restricted_and_their_order_does_not_matter():
@@ -647,7 +657,8 @@ def click_hit(f=400.0, tau=0.003, seconds=0.3):
 def fake_result(specs, n_bars=8, threshold=drumroles.THRESHOLD):
     """A hit_groups-shaped result built by hand: each spec is {steps, bars, audio (the clean hit, [n] or None), level (dB),
     stability, separation, nearest, assigned (steps whose hits count as assigned, not measured), hidden / unmeasured
-    ((bar, step) cells with no hit that are listed as hidden under a tail / as holding an unmeasured hit)}. Group i has id i; its
+    ((bar, step) cells with no hit that are listed as hidden under a tail / as holding an unmeasured hit), read (the audio of the
+    members the measurement rules read, as `hit_groups` keeps them; without it the clean hit is the one member read)}. Group i has id i; its
     hits sit exactly on the 16th of every bar in `bars` at each step."""
     hits, groups, hidden, unmeasured = [], [], [], []
     for gid, s in enumerate(specs):
@@ -667,13 +678,15 @@ def fake_result(specs, n_bars=8, threshold=drumroles.THRESHOLD):
         bars_with = len({hits[i]["bar"] for i in members + assigned})
         pat = [len({hits[i]["bar"] for i in members + assigned if hits[i]["step"] == st}) / n_bars for st in range(16)]
         audio = s.get("audio")
+        read = [{"hit": 1000 * (gid + 1) + k, "audio": np.asarray(a)[:, None]} for k, a in enumerate(s["read"])] if "read" in s else None
         groups.append({
             "id": gid, "count": len(members), "assigned": len(assigned), "tentative": len(members) < drumroles.TENTATIVE_N,
             "stability": s.get("stability", 0.9), "separation": s.get("separation", 3.0), "nearest_group": s.get("nearest"),
             "bars_with": bars_with, "pattern": pat, "level_db": s.get("level", -10.0), "members": members,
             "assigned_members": assigned, "off_grid": 0,
             "clean_hit": None if audio is None else {"hit": members[0], "audio": np.asarray(audio)[:, None]},
-            "clean_note": "none of the members tried is complete" if audio is None else None})
+            "clean_note": "none of the members tried is complete" if audio is None else None,
+            **({} if read is None else {"read_members": read})})
     return {"sample_rate": SR, "tempo": BPM, "t0": T0, "threshold": threshold, "hits": hits, "groups": groups,
             "bars": n_bars, "first_bar": 0, "hidden_cells": sorted(hidden), "unmeasured_cells": sorted(unmeasured)}
 
@@ -853,10 +866,15 @@ def reading(fall=100.0, share=0.0, pitched=False, hz=None):
     return {"fall_20_ms": fall, "fall_40_ms": None, "pitched": pitched, "pitch_hz": hz, "noise_body_db": share}
 
 
-def rule(kind, **m):
-    """(name, rule text) that the rules of stem `kind` give a clean hit with the readings `m`."""
+def rules(kind, reads):
+    """(name, rule text) that the rules of stem `kind` give a group whose members read `reads` (a list of `reading`s)."""
     r = fake_result([{"steps": [0], "audio": None}])
-    return drumroles._apply_rules(kind, drumroles._use(r, r["groups"][0]), reading(**m))
+    return drumroles._apply_rules(kind, drumroles._use(r, r["groups"][0]), reads)
+
+
+def rule(kind, **m):
+    """The same for one member, with the readings `m`."""
+    return rules(kind, [reading(**m)])
 
 
 def test_the_snare_rule_is_a_band_a_tom_or_a_kick_reading_is_not_a_snare_and_the_edges_are_exact():
@@ -877,6 +895,54 @@ def test_a_snare_stem_group_falling_20_db_in_exactly_30_ms_is_a_snare_in_29_9_ms
     name, why = rule("snare", fall=29.9, share=-5.0)
     assert name == "rim" and "29.9 ms (under 30)" in why                  # not rounded to "30 ms (under 30)"
     assert rule("snare", fall=29.9, share=0.0)[0] == "rim" and rule("snare", fall=30.0, share=0.0)[0] is None
+
+
+def test_tom_roles_at_the_same_pitch_share_a_rank_they_are_not_split_low_and_high():
+    # two toms at 150 Hz: neither is lower than the other, so they are not ranked and are numbered, with a note
+    same = fake_result([{"steps": [4], "audio": tom_hit(f=150.0)}, {"steps": [8], "audio": tom_hit(f=150.0)}])
+    got, out = names(same, "toms")
+    assert got == ["tom", "tom 2"] and any("not ranked low, mid or high" in n for n in out["notes"])
+    # 100, 150 and 150 Hz: two ranks, the two at 150 Hz are both "high"
+    three = fake_result([{"steps": [4], "audio": tom_hit(f=100.0)}, {"steps": [8], "audio": tom_hit(f=150.0)},
+                         {"steps": [12], "audio": tom_hit(f=150.0)}])
+    got, out = names(three, "toms")
+    assert sorted(got) == ["tom high", "tom high 2", "tom low"] and got[0] == "tom low"
+
+
+def test_the_measurement_rules_read_up_to_eight_members_and_name_only_when_two_thirds_agree():
+    # a snare stem group whose clean hit reads a rim and whose 8 members read 3 snares (a tone under the noise), 3 rims and 2
+    # noise hits: none reaches 6 of 8 (two thirds of 8 is 5.33), so it stays neutral and the reason has the counts
+    mixed = [snare_hit(i) for i in range(3)] + [click_hit()] * 3 + [noise_hit(9, 0.08), noise_hit(10, 0.08)]
+    r = fake_result([{"steps": [4, 12], "audio": click_hit(), "read": mixed}])
+    got, out = names(r, "snare")
+    assert got == ["snare 1"] and out["groups"][0]["measures"]["members_read"] == 8
+    why = out["groups"][0]["reason"]
+    assert "3 of 8 rim, 3 snare, 2 neither" in why and "a name needs 67 %" in why and not out["groups"][0]["named"]
+    # 5 of 8 snares is under two thirds, 6 of 8 is over: named, and the rule says how many
+    five = [snare_hit(i) for i in range(5)] + [click_hit()] * 2 + [noise_hit(9, 0.08)]
+    assert names(fake_result([{"steps": [4, 12], "audio": snare_hit(1), "read": five}]), "snare")[0] == ["snare 1"]   # the clean hit is a snare
+    six = [snare_hit(i) for i in range(6)] + [click_hit()] + [noise_hit(9, 0.08)]
+    got, out = names(fake_result([{"steps": [4, 12], "audio": click_hit(), "read": six}]), "snare")
+    assert got == ["snare"] and out["groups"][0]["rule"].startswith("6 of 8 members: a tone under the noise")
+    # the clean hit alone says nothing once members are read: a snare clean hit among 8 rims is a rim
+    rims = [click_hit()] * 8
+    assert names(fake_result([{"steps": [4, 12], "audio": snare_hit(1), "read": rims}]), "snare")[0] == ["rim"]
+    # the same agreement for the other rules: toms (pitched), kick (pitched, 70 Hz at most), hh open (falls 140 ms or more)
+    toms = [tom_hit(f=150.0)] * 6 + [noise_hit(9, 0.08)] * 2
+    assert names(fake_result([{"steps": [4], "audio": tom_hit(f=150.0), "read": toms}]), "toms")[0] == ["tom"]
+    # exactly two thirds (4 of the 6 that could be read) is enough; 3 of 5 is not
+    assert names(fake_result([{"steps": [4], "audio": tom_hit(f=150.0), "read": toms[2:]}]), "toms")[0] == ["tom"]
+    assert names(fake_result([{"steps": [4], "audio": tom_hit(f=150.0), "read": toms[3:]}]), "toms")[0] == ["toms 1"]
+    kicks = [tom_hit(f=45.0, tau=0.07)] * 6 + [tom_hit(f=81.0)] * 2
+    assert names(fake_result([{"steps": [0], "audio": tom_hit(f=45.0), "read": kicks}]), "kick")[0] == ["kick"]
+    split = [tom_hit(f=45.0, tau=0.07)] * 4 + [tom_hit(f=81.0)] * 4
+    got, out = names(fake_result([{"steps": [0], "audio": tom_hit(f=45.0), "read": split}]), "kick")
+    assert got == ["kick 1"] and "4 of 8 kick, 4 neither" in out["groups"][0]["reason"]
+    opens = [noise_hit(i, 0.1) for i in range(6)] + [noise_hit(9, 0.005)] * 2
+    r = fake_result([{"steps": [0, 8], "audio": noise_hit(1, 0.005), "read": opens}])        # no pattern rule fits [0, 8]
+    assert names(r, "hh")[0] == ["hh open"]
+    r = fake_result([{"steps": [0, 8], "audio": noise_hit(1, 0.1), "read": opens[2:] + [noise_hit(9, 0.005)] * 2}])
+    assert names(r, "hh")[0] == ["hh 1"]                                                       # 4 open of 8 read
 
 
 def test_names_toms_by_pitch_low_mid_high_when_several_and_kick_by_a_low_body():

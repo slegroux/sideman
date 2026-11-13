@@ -549,9 +549,22 @@ is judged over that section, not over the stem.
 | toms | `tom` | the clean hit is pitched | `profile_array`'s `pitched`; the library's toms are all pitched (53 to 578 Hz) |
 | kick | `kick` | pitched, body at most 70 Hz | the library's 33 kicks: 28 to 56 Hz |
 
+**The measurement rules read members, not one hit.** `hh open`, `rim`,
+`snare`, `tom` and `kick` read the readings of up to 8 complete members of the
+group nearest its medoid (`read_members`, the clean hit usually among them) and
+name only when **at least two thirds of the members read agree**; otherwise the
+group stays neutral and the reason has the counts ("3 of 8 rim, 3 snare, 2
+neither"). The pattern rules do not read them. One hit is a poor witness: on
+Flare the snare group 2's clean hit fell 20 dB in 30.0 ms, exactly the rim
+limit, and over its members the readings were 6 snare, 5 rim, 3 neither, so the
+name `snare` was a coin toss. A tom's rank is the median pitch of the members
+that read pitched.
+
 When several roles of one stem are toms they are ranked by body pitch:
 `tom low`, `tom mid`, `tom high` (two toms: low and high; more mids get a
-number). The rank is relative to the other toms in that stem, not a pitch class.
+number). The rank is relative to the other toms in that stem, not a pitch class. Tom
+roles that read the same pitch (to the Hz) share a rank: all at one pitch are
+not ranked at all and just numbered, with a note.
 Two roles that get one name are numbered (`hh offbeat`, `hh offbeat 2`).
 
 **Rules that are not there, and why.**

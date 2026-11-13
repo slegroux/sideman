@@ -153,6 +153,8 @@ SNARE_NOISE_MIN_DB = -12.0  # ...this (a body that is nearly all tone is a tom o
 #                             33 kicks -39.7 to -23.0 (0 of 33; 31 of 33 under -1 alone). Still named: 1 clave (Clave Mian, -8.9) and 7
 #                             hats (3 closed, 4 open, -3.3 to -1.7: nothing here reads a hat's noise as noise), and the 14 claps stay neutral
 KICK_MAX_HZ = 70.0       # kick: pitched, body pitch at most this (library: 33 kicks at 28-56 Hz)
+AGREE_MEMBERS = 8        # the rules that read a clean hit's measurements read this many members nearest the medoid instead...
+AGREE_SHARE = 2 / 3      # ...and name only when at least this share of them read the same (Flare snare group 2: 6 snare, 5 rim, 3 neither)
 NEAR_SEPARATION = 1.15   # two groups whose separation is at most this times the threshold may be one sound...
 SAME_PATTERN = 0.8       # ...when the cosine of the sets of 16ths they play at (one hit is enough) is at least this
 
@@ -393,14 +395,15 @@ def _split_by_pitch(x: np.ndarray, sr: int, hits: list, groups: list, pitch: dic
     return out
 
 
-def _clean_hit(x: np.ndarray, sr: int, hits: list, ids: list, dist: dict) -> tuple[dict | None, str | None]:
-    """(the clean hit, or None and why) among hits `ids` of one group: oneshot._clean_hit's rule on the group's
+def _clean_hit(x: np.ndarray, sr: int, hits: list, ids: list, dist: dict) -> tuple[dict | None, str | None, list]:
+    """(the clean hit, or None and why, the members read) among hits `ids` of one group: oneshot._clean_hit's rule on the group's
     members. Candidates, nearest their group's medoid first (at most MAX_CANDIDATES), must be complete (their cut
     falls 40 dB before it ends, oneshot._measure's `truncated`); of those the ones within CLEAN_BAND_DB of the loudest,
     then the ones with a quiet lead-in (the 20 ms before the onset LEAD_DB under the peak), if any, then the ones with
     at least ROOM_FRAC of the median room, then the ones within TYPICAL_DB of the median peak, if any. Of the
     last the one nearest the medoid wins (oneshot's rule takes the earliest; here the group is already known, so
-    the most typical sound is taken)."""
+    the most typical sound is taken). The members read are the first AGREE_MEMBERS complete candidates, nearest the medoid
+    first: [{"hit", "audio"}] (empty when none is complete)."""
     order = sorted(ids, key=lambda i: (dist[i], hits[i]["start"]))[:MAX_CANDIDATES]
     cands = []
     for i in order:
@@ -416,7 +419,8 @@ def _clean_hit(x: np.ndarray, sr: int, hits: list, ids: list, dist: dict) -> tup
         cands.append({"i": i, "peak": got["peak_db"], "room": h["room"], "quiet": quiet})
     if not cands:
         return None, ("none of the %d member%s tried is complete: each is cut off by the next hit or by the %g s "
-                      "limit before it has fallen 40 dB" % (len(order), "" if len(order) == 1 else "s", MAX_CUT_S))
+                      "limit before it has fallen 40 dB" % (len(order), "" if len(order) == 1 else "s", MAX_CUT_S)), []
+    near = [{"hit": hits[c["i"]]["id"], "audio": x[hits[c["i"]]["start"]:hits[c["i"]]["end"]].copy()} for c in cands[:AGREE_MEMBERS]]
     loud = max(c["peak"] for c in cands)
     cands = [c for c in cands if c["peak"] >= loud - oneshot.CLEAN_BAND_DB]
     cands = [c for c in cands if c["quiet"]] or cands
@@ -426,7 +430,7 @@ def _clean_hit(x: np.ndarray, sr: int, hits: list, ids: list, dist: dict) -> tup
     cands = [c for c in cands if abs(c["peak"] - med_peak) <= oneshot.TYPICAL_DB] or cands
     h = hits[cands[0]["i"]]                     # candidates are in order of distance to the medoid
     return {"hit": h["id"], "start": h["start"], "end": h["end"], "onset_s": h["onset_s"], "level_db": h["level_db"],
-            "audio": x[h["start"]:h["end"]].copy()}, None
+            "audio": x[h["start"]:h["end"]].copy()}, None, near
 
 
 def _evenly(ids: list, n: int) -> list:
@@ -480,7 +484,7 @@ def _scope(x: np.ndarray, sr: int, hits: list, found: list, hidden: set, ids: se
             continue
         on = [hits[i] for i in mine + extra if hits[i]["on_grid"]]
         on_assigned = [hits[i] for i in extra if hits[i]["on_grid"]]
-        clean, why = _clean_hit(x, sr, hits, mine, g["distance"]) if mine else (None, "no measured member in this scope")
+        clean, why, near = _clean_hit(x, sr, hits, mine, g["distance"]) if mine else (None, "no measured member in this scope", [])
         dists = [g["distance"][i] for i in mine]
         groups.append({
             "id": gid, "count": len(mine), "assigned": len(extra), "tentative": len(mine) < TENTATIVE_N,
@@ -492,7 +496,7 @@ def _scope(x: np.ndarray, sr: int, hits: list, found: list, hidden: set, ids: se
             "level_db": float(np.median([hits[i]["level_db"] for i in mine])) if mine else None,
             "spread": {"median": float(np.median(dists)), "max": float(max(dists))} if mine else None,
             "off_grid": len(mine) + len(extra) - len(on), "members": mine, "assigned_members": extra,
-            "clean_hit": clean, "clean_note": why})
+            "clean_hit": clean, "clean_note": why, "read_members": near})
     groups.sort(key=lambda g: (-g["count"], (g["members"] + g["assigned_members"])[0]))
     lost = [h for h in (hits[i] for i in ids) if h["on_grid"] and first <= h["bar"] < first + bars and h["status"] in (
         "overlapped", "too_short", "no_lead", "ungrouped", "faint")]
@@ -576,7 +580,8 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     bars it plays at, on-grid hits, assigned ones included), "assigned_pattern" (the same for the assigned hits alone),
     "level_db" (median), "spread" ({"median", "max"} of the members' distances to the medoid), "off_grid", "members"
     (hit ids), "assigned_members", "clean_hit" ({"hit", "start", "end", "onset_s", "level_db", "audio"} or None; never
-    an assigned hit), "clean_note" (why None)}.
+    an assigned hit), "clean_note" (why None), "read_members" ([{"hit", "audio"}]: up to AGREE_MEMBERS complete members nearest the
+    medoid, which the role rules read alongside the clean hit)}.
     `stability` is how the group holds when the sample changes: the stem is grouped again `stability_runs` times with
     the sample moved along; the k-th of the `sample` hits of a round is the one at position
     round((k + shift) * (m - 1) / (sample - 1 + shift)) of the m hits still ungrouped, with shift 0 in the grouping
@@ -785,17 +790,41 @@ def _use(result: dict, g: dict) -> dict:
     return {"counts": counts, "n": int(counts.sum()), "steps": rows}
 
 
-def _clean_measures(g: dict, sr: int) -> tuple[dict | None, str | None]:
-    """(oneshot's readings of the group's clean hit that the rules use, or None and why)."""
+def _read(audio: np.ndarray, sr: int) -> tuple[dict | None, str | None]:
+    """(oneshot's readings of one hit that the rules use, or None and why)."""
+    try:
+        p = oneshot.profile_array(audio, sr, hit=0, single=True)
+    except ValueError as e:
+        return None, str(e)
+    return {"fall_20_ms": p["fall_20_ms"], "fall_40_ms": p["fall_40_ms"], "pitched": p["pitched"],
+            "pitch_hz": p["pitch_body_hz"], "noise_body_db": (p["noise_db"] or {}).get("body")}, None
+
+
+def _clean_measures(g: dict, sr: int, cache: dict) -> tuple[dict | None, str | None]:
+    """(the readings of the group's clean hit, or None and why). `cache` holds the readings by hit id, so that a hit that
+    is both the clean hit and one of the members read is measured once."""
     c = g["clean_hit"]
     if c is None:
         return None, g["clean_note"] or "no clean hit"
-    try:
-        p = oneshot.profile_array(c["audio"], sr, hit=0, single=True)
-    except ValueError as e:
-        return None, "the clean hit cannot be measured: %s" % e
-    return {"fall_20_ms": p["fall_20_ms"], "fall_40_ms": p["fall_40_ms"], "pitched": p["pitched"],
-            "pitch_hz": p["pitch_body_hz"], "noise_body_db": (p["noise_db"] or {}).get("body")}, None
+    if c["hit"] not in cache:
+        cache[c["hit"]] = _read(c["audio"], sr)
+    m, why = cache[c["hit"]]
+    return (m, None) if m else (None, "the clean hit cannot be measured: %s" % why)
+
+
+def _member_readings(g: dict, sr: int, cache: dict) -> list[dict]:
+    """The readings of the members the measurement rules read: the group's `read_members` (up to AGREE_MEMBERS complete
+    members nearest the medoid), or the clean hit alone in a result that has none. A member that cannot be measured is left out."""
+    members = g.get("read_members")
+    if members is None:
+        members = [] if g["clean_hit"] is None else [{"hit": g["clean_hit"]["hit"], "audio": g["clean_hit"]["audio"]}]
+    out = []
+    for mem in members:
+        if mem["hit"] not in cache:
+            cache[mem["hit"]] = _read(mem["audio"], sr)
+        if cache[mem["hit"]][0] is not None:
+            out.append(cache[mem["hit"]][0])
+    return out
 
 
 def _pattern_numbers(use: dict) -> dict:
@@ -820,11 +849,44 @@ def _unknown_text(unknown: int, what: str) -> str:
     return "" if not unknown else " (%d of the %s unknown: observable in under %d bars)" % (unknown, what, OBSERVE_MIN)
 
 
-def _apply_rules(kind: str, use: dict, m: dict | None) -> tuple[str | None, str | None]:
-    """(name, the rule that gave it) from the first rule of stem `kind` that fits, else (None, None). A rule that needs
-    the clean hit's readings does not fire without them. "tom" is ranked low / mid / high by name_roles."""
+def _label(kind: str, m: dict) -> str | None:
+    """What one hit's readings say it is under the measurement rules of stem `kind` (None: nothing)."""
+    fall = m["fall_20_ms"]
+    if kind == "hh":
+        return "hh open" if fall is not None and fall >= OPEN_FALL_20_MS else None
+    if kind == "snare":
+        if fall is not None and fall < RIM_FALL_20_MS:
+            return "rim"
+        return "snare" if m["noise_body_db"] is not None and SNARE_NOISE_MIN_DB < m["noise_body_db"] <= SNARE_NOISE_MAX_DB else None
+    if kind == "toms":
+        return "tom" if m["pitched"] else None
+    if kind == "kick":
+        return "kick" if m["pitched"] and m["pitch_hz"] is not None and m["pitch_hz"] <= KICK_MAX_HZ else None
+    return None
+
+
+def _votes(kind: str, reads: list) -> dict:
+    """{name: members that read it} over `reads` for the measurement rules of stem `kind` (None: nothing)."""
+    votes = {}
+    for m in reads:
+        lab = _label(kind, m)
+        votes[lab] = votes.get(lab, 0) + 1
+    return votes
+
+
+def _vote_text(votes: dict, n: int) -> str:
+    """"6 of 14 snare, 5 rim, 3 neither", the readings that agreed first."""
+    ranked = sorted(votes.items(), key=lambda kv: (-kv[1], kv[0] is None, kv[0] or ""))
+    return ", ".join(("%d of %d %s" % (v, n, lab or "neither")) if k == 0 else "%d %s" % (v, lab or "neither")
+                     for k, (lab, v) in enumerate(ranked))
+
+
+def _apply_rules(kind: str, use: dict, reads: list) -> tuple[str | None, str | None]:
+    """(name, the rule that gave it) from the first rule of stem `kind` that fits, else (None, None). The pattern rules read
+    the group's pattern. The measurement rules (`hh open`, `rim`, `snare`, `tom`, `kick`) read `reads`, the readings of up to
+    AGREE_MEMBERS members (see `_member_readings`), and name only when at least AGREE_SHARE of them read the same; with none
+    they do not fire. "tom" is ranked low / mid / high by name_roles."""
     pn = _pattern_numbers(use)
-    fall = None if m is None else m["fall_20_ms"]
     if kind == "hh":
         (off_used, off_unk, off_known, _), (odd_used, odd_unk, odd_known, _) = pn["off"], pn["odd"]
         if pn["share_off"] >= OFFBEAT_SHARE and _enough(off_used, off_known, 4, OFFBEAT_STEPS, OFFBEAT_KNOWN):
@@ -832,22 +894,28 @@ def _apply_rules(kind: str, use: dict, m: dict | None) -> tuple[str | None, str 
                 100 * pn["share_off"], off_used, off_known, _unknown_text(off_unk, "offbeats"))
         if _enough(odd_used, odd_known, 8, ODD_STEPS, ODD_KNOWN):
             return "hh 16th", "%d of %d known odd 16ths in use%s" % (odd_used, odd_known, _unknown_text(odd_unk, "odd 16ths"))
-        if fall is not None and fall >= OPEN_FALL_20_MS:
-            return "hh open", "falls 20 dB in %.0f ms (at least %.0f)" % (fall, OPEN_FALL_20_MS)
-    elif kind == "snare" and m is not None:
-        if fall is not None and fall < RIM_FALL_20_MS:
-            return "rim", "falls 20 dB in %.1f ms (under %.0f)" % (fall, RIM_FALL_20_MS)
-        if m["noise_body_db"] is not None and SNARE_NOISE_MIN_DB < m["noise_body_db"] <= SNARE_NOISE_MAX_DB:
-            return "snare", "a tone under the noise: the body's noise share is %.1f dB (over %.1f, at most %.1f)" % (
-                m["noise_body_db"], SNARE_NOISE_MIN_DB, SNARE_NOISE_MAX_DB)
-    elif kind == "toms" and m is not None and m["pitched"]:
-        return "tom", "pitched, body at %.0f Hz" % m["pitch_hz"]
-    elif kind == "kick" and m is not None and m["pitched"] and m["pitch_hz"] <= KICK_MAX_HZ:
-        return "kick", "pitched, body at %.0f Hz (at most %.0f)" % (m["pitch_hz"], KICK_MAX_HZ)
-    return None, None
+    if kind not in ("hh", "snare", "toms", "kick") or not reads:
+        return None, None
+    votes = _votes(kind, reads)
+    agreed = [lab for lab, v in votes.items() if lab is not None and v >= AGREE_SHARE * len(reads) - 1e-9]
+    if not agreed:
+        return None, None
+    name, of = agreed[0], [m for m in reads if _label(kind, m) == agreed[0]]
+    pre = "%d of %d members: " % (len(of), len(reads))
+    med = lambda key: float(np.median([m[key] for m in of]))  # noqa: E731
+    if name == "hh open":
+        return name, pre + "falls 20 dB in %.0f ms (at least %.0f)" % (med("fall_20_ms"), OPEN_FALL_20_MS)
+    if name == "rim":
+        return name, pre + "falls 20 dB in %.1f ms (under %.0f)" % (med("fall_20_ms"), RIM_FALL_20_MS)
+    if name == "snare":
+        return name, pre + "a tone under the noise: the body's noise share is %.1f dB (over %.1f, at most %.1f)" % (
+            med("noise_body_db"), SNARE_NOISE_MIN_DB, SNARE_NOISE_MAX_DB)
+    if name == "tom":
+        return name, pre + "pitched, body at %.0f Hz" % med("pitch_hz")
+    return name, pre + "pitched, body at %.0f Hz (at most %.0f)" % (med("pitch_hz"), KICK_MAX_HZ)
 
 
-def _no_rule(kind: str, use: dict, m: dict | None, why_no_clean: str | None) -> str:
+def _no_rule(kind: str, use: dict, m: dict | None, why_no_clean: str | None, reads: list) -> str:
     """Why no rule of stem `kind` fits, with the numbers the rules read."""
     if kind not in ("hh", "snare", "toms", "kick"):
         return "the stem kind %r has no rules" % (kind,)
@@ -868,6 +936,9 @@ def _no_rule(kind: str, use: dict, m: dict | None, why_no_clean: str | None) -> 
     else:
         parts.append("clean hit: falls 20 dB in %s ms, %s, noise share of the body %s dB" % (
             m["fall_20_ms"], "pitched at %.0f Hz" % m["pitch_hz"] if m["pitched"] else "unpitched", m["noise_body_db"]))
+    if reads:
+        parts.append("the %d member%s read, nearest the medoid, do not agree (a name needs %.0f %% to read the same): %s" % (
+            len(reads), "" if len(reads) == 1 else "s", 100 * AGREE_SHARE, _vote_text(_votes(kind, reads), len(reads))))
     return "no rule of the %s stem fits: %s" % (kind, "; ".join(parts))
 
 
@@ -912,7 +983,9 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
     A group is NAMED only when it is eligible: at least NAME_MIN_HITS measured hits, `stability` measured and at least
     NAME_STABILITY, `separation` (against the nearest group of at least 4 measured hits; None passes) over the result's grouping threshold. Then the first rule of its stem that fits gives
     the name: hh: "hh offbeat", "hh 16th", "hh open"; snare: "rim", "snare"; toms: "tom" ("tom low" / "tom mid" /
-    "tom high" by body pitch, when several roles are toms); kick: "kick". The pattern counts the measured hits and the
+    "tom high" by body pitch, when several roles are toms); kick: "kick". The rules that read measurements (everything but the two pattern rules) read up to AGREE_MEMBERS members nearest
+    the medoid (`read_members`) and name only when at least AGREE_SHARE of them read the same; the reason of a group where
+    they disagree has the counts. The pattern counts the measured hits and the
     ones assigned to the group under another hit's tail (`assigned` says how many). A group that is not eligible, or that
     no rule fits, keeps "<stem> <id + 1>" with the reason. Two roles with one name get " 2", " 3".
     Groups of one name that are within NEAR_SEPARATION times the threshold of each other and play the same 16ths are one
@@ -934,17 +1007,18 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
     bleed = bleed or {}
     by_id = {g["id"]: g for g in result["groups"]}
     uses = {g["id"]: _use(result, g) for g in result["groups"]}
-    info, notes = {}, []
+    info, notes, cache = {}, [], {}
     for g in result["groups"]:
         gid = g["id"]
         u = uses[gid]
-        m, why_clean = _clean_measures(g, sr)
+        m, why_clean = _clean_measures(g, sr, cache)
+        reads = _member_readings(g, sr, cache) if kind else []
         e = {"id": gid, "name": "%s %d" % (label, gid + 1), "named": False, "rule": None, "reason": None,
              "bleed": bool(bleed.get(gid, {}).get("bleed")), "role": None, "note": None,
              "measures": {"hits": g["count"] + g["assigned"], "measured": g["count"], "assigned": g["assigned"],
                           "offbeat_share": round(_pattern_numbers(u)["share_off"], 3), "steps": u["steps"],
                           "unknown_steps": [r["step"] for r in u["steps"] if r["state"] == "unknown"],
-                          **(m or {"clean_hit": why_clean})}}
+                          "members_read": len(reads), **(m or {"clean_hit": why_clean})}}
         info[gid] = e
         if e["bleed"]:
             e["reason"] = "marked as bleed: %s" % bleed[gid]["why"]
@@ -953,11 +1027,13 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
         if why:
             e["reason"] = "not named: " + "; ".join(why)
             continue
-        name, rule = _apply_rules(kind, u, m) if kind else (None, None)
+        name, rule = _apply_rules(kind, u, reads) if kind else (None, None)
         if name is None:
-            e["reason"] = _no_rule(stem_kind, u, m, why_clean)
+            e["reason"] = _no_rule(stem_kind, u, m, why_clean, reads)
         else:
             e["name"], e["named"], e["rule"] = name, True, rule
+            if name == "tom":                      # ranked by the median of the pitched members, not by the clean hit alone
+                e["measures"]["role_pitch_hz"] = float(np.median([r["pitch_hz"] for r in reads if r["pitched"]]))
             pn = _pattern_numbers(u)
             unk = {"hh offbeat": ("off", "offbeats"), "hh 16th": ("odd", "odd 16ths")}.get(name)
             if unk and pn[unk[0]][1]:
@@ -1010,13 +1086,17 @@ def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -
                          "16ths, so they may be one sound" % (sorted(ids), e["name"], NEAR_SEPARATION * thr))
     roles.sort(key=lambda r: (-r["count"], r["groups"][0]))
     toms = [r for r in roles if r["name"] == "tom" and r["named"]]
-    pitch = lambda r: info[max(r["groups"], key=lambda i: by_id[i]["count"])]["measures"]["pitch_hz"]  # noqa: E731
-    if len(toms) > 1:
-        toms.sort(key=pitch)
-        for k, r in enumerate(toms):
-            r["name"] = "tom low" if k == 0 else "tom high" if k == len(toms) - 1 else "tom mid"
+    pitch = lambda r: info[max(r["groups"], key=lambda i: by_id[i]["count"])]["measures"]["role_pitch_hz"]  # noqa: E731
+    levels = sorted({round(pitch(r)) for r in toms})                  # toms at one pitch (to the Hz printed) share a rank
+    if len(levels) > 1:
+        for r in toms:
+            k = levels.index(round(pitch(r)))
+            r["name"] = "tom low" if k == 0 else "tom high" if k == len(levels) - 1 else "tom mid"
         notes.append("toms are ranked by body pitch among this stem's tom roles (%s): low, mid and high are relative to each "
-                     "other, not to a scale" % ", ".join("%s %.0f Hz" % (r["name"], pitch(r)) for r in toms))
+                     "other, not to a scale; roles at one pitch share a rank" % ", ".join(
+                         "%s %.0f Hz" % (r["name"], pitch(r)) for r in sorted(toms, key=pitch)))
+    elif len(toms) > 1:
+        notes.append("the tom roles of this stem all read %d Hz: they are not ranked low, mid or high" % levels[0])
     seen = {}
     for r in roles:
         seen[r["name"]] = seen.get(r["name"], 0) + 1
