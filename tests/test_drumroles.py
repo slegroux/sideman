@@ -1005,17 +1005,95 @@ def test_bleed_not_marked_when_it_coincides_and_sounds_alike_but_is_louder_in_th
 def test_a_group_that_coincides_only_at_the_rate_the_patterns_give_by_chance_is_not_bleed():
     # x plays the 4 beats of every bar, 20 dB down, the same tom as y; y plays every 16th of every bar. Every hit of x
     # coincides, but y is there at every 16th: the chance rate is 100 %, which is the base rate, not bleed
+    # (a hat against the tom: the coincidence cannot tell, so the groups are judged on level and likeness, and a hat is not a tom;
+    # the same tom 20 dB down is a constant leak and is marked, see the co-located tests)
     every = [(b, s) for b in range(8) for s in range(16)]
     beats = [(b, s) for b in range(8) for s in (0, 4, 8, 12)]
-    marks = drumroles.mark_bleed(bleed_pair(tom_hit() * 0.1, beats, -30.0, tom_hit(), every, -10.0))
+    marks = drumroles.mark_bleed(bleed_pair(noise_hit(1, 0.01), beats, -30.0, tom_hit(), every, -10.0))
     ev = marks["x"][0]
-    assert not ev["bleed"] and ev["evidence"]["failed"] == "coincidence"
+    assert not ev["bleed"] and ev["evidence"]["failed"] == "likeness" and ev["evidence"]["co_located"]
     assert ev["evidence"]["rate"] == 1.0 and ev["evidence"]["expected"] == 1.0 and "100 %" in ev["why"]
     # coincidence at half the hits, with y playing on half the bars: 50 % observed against 50 % expected
     even = [(b, s) for b in range(0, 8, 2) for s in (0, 4, 8, 12)]
     marks = drumroles.mark_bleed(bleed_pair(tom_hit() * 0.1, beats, -30.0, tom_hit(), even, -10.0))
     ev = marks["x"][0]["evidence"]
     assert not marks["x"][0]["bleed"] and ev["failed"] == "coincidence" and ev["rate"] == 0.5 and ev["expected"] == 0.5
+
+
+# ---- a leak of a constant pattern: the patterns give the coincidence away, so level and likeness decide
+
+KICK = lambda: tom_hit(f=45.0, tau=0.07)      # noqa: E731
+EVERY_BEAT = (0, 4, 8, 12)
+
+
+def leak_stems(own, own_steps, copy, copy_db, bars=8):
+    """Real hit_groups on two short stems. "loud": the kick on every beat. "mixed": `own(b, s)` on `own_steps` of every bar and,
+    on every beat, `copy` (an audio array) `copy_db` dB down. Returns (loud result, mixed result, mark_bleed's answer)."""
+    loud = run(stem([(at(16 * b + s), KICK()) for b in range(bars) for s in EVERY_BEAT], bars))
+    mixed = run(stem([(at(16 * b + s), own(b, s)) for b in range(bars) for s in own_steps]
+                     + [(at(16 * b + s), copy * 10 ** (copy_db / 20)) for b in range(bars) for s in EVERY_BEAT], bars))
+    return loud, mixed, drumroles.mark_bleed({"kick": loud, "mixed": mixed})
+
+
+def group_at(r, step):
+    """The one group of `r` that has hits at 16th `step`."""
+    got = [g for g in r["groups"] if g["pattern"][step] > 0]
+    assert len(got) == 1, [(g["id"], g["count"]) for g in r["groups"]]
+    return got[0]
+
+
+@pytest.mark.slow
+def test_a_kick_leaking_20_db_down_on_every_beat_into_a_snare_stem_is_marked_and_is_not_a_role():
+    # kick stem: a kick on every beat of 8 bars. Snare stem: a snare on 2 and 4 (steps 4, 12) and the same kick 20 dB down on
+    # every beat. The kick copies alone (steps 0 and 8) are a group of 16; the kick stem plays those 16ths in every bar, so the
+    # chance of a coincidence is 100 % and the coincidence cannot tell: it is the level (20 dB) and the likeness (the same
+    # sound) that mark it
+    loud, mixed, marks = leak_stems(lambda b, s: snare_hit(100 * b + s), (4, 12), KICK(), -20.0)
+    leak, snare = group_at(mixed, 0), group_at(mixed, 4)
+    assert leak["id"] != snare["id"] and leak["count"] == 16 and group_at(mixed, 8)["id"] == leak["id"]
+    ev = marks["mixed"][leak["id"]]
+    assert ev["bleed"] and ev["evidence"]["source_stem"] == "kick" and ev["evidence"]["co_located"]
+    assert ev["evidence"]["rate"] == 1.0 and ev["evidence"]["expected"] == 1.0 and ev["evidence"]["louder_db"] == pytest.approx(20.0, abs=2.0)
+    assert ev["evidence"]["distance"] < drumroles.CO_DISTANCE and "co-located: chance cannot tell" in ev["why"]
+    assert not marks["mixed"][snare["id"]]["bleed"] and not any(m["bleed"] for m in marks["kick"].values())
+    out = drumroles.name_roles(mixed, "snare", bleed=marks["mixed"])
+    bled = [e for e in out["groups"] if e["id"] == leak["id"]][0]
+    assert bled["bleed"] and bled["role"] is None and not bled["named"]
+    assert all(leak["id"] not in role["groups"] for role in out["roles"]) and [r["groups"] for r in out["roles"]] == [[snare["id"]]]
+
+
+@pytest.mark.slow
+def test_a_snare_leaking_20_db_down_into_a_kick_stem_is_marked_the_same_way():
+    # snare stem: a snare on every beat. Kick stem: a kick on steps 0 and 8 and that snare 20 dB down on every beat (the
+    # copies alone, steps 4 and 12, are the leak group)
+    snares = {(b, s): snare_hit(100 * b + s) for b in range(8) for s in EVERY_BEAT}
+    loud = run(stem([(at(16 * b + s), snares[b, s]) for b, s in snares], 8))
+    mixed = run(stem([(at(16 * b + s), KICK()) for b in range(8) for s in (0, 8)]
+                     + [(at(16 * b + s), snares[b, s] * 0.1) for b, s in snares], 8))
+    marks = drumroles.mark_bleed({"snare": loud, "kick": mixed})
+    leak = group_at(mixed, 4)
+    assert leak["id"] == group_at(mixed, 12)["id"] != group_at(mixed, 0)["id"] and leak["count"] == 16
+    ev = marks["kick"][leak["id"]]
+    assert ev["bleed"] and ev["evidence"]["source_stem"] == "snare" and ev["evidence"]["co_located"] and ev["evidence"]["expected"] == 1.0
+    assert not marks["kick"][group_at(mixed, 0)["id"]]["bleed"]
+    out = drumroles.name_roles(mixed, "kick", bleed=marks["kick"])
+    assert all(leak["id"] not in role["groups"] for role in out["roles"])
+
+
+@pytest.mark.slow
+def test_a_different_sound_that_only_shares_the_pattern_is_not_marked_and_the_same_sound_8_db_down_is_not_either():
+    # a hat 20 dB under the kick on every beat of the snare stem: co-located, 20 dB under, but a hat is not a kick: likeness fails
+    nominal = oneshot._loudest_ms(KICK()[:, None], SR) / oneshot._loudest_ms(noise_hit(1, 0.012)[:, None], SR)
+    _, mixed, marks = leak_stems(lambda b, s: snare_hit(100 * b + s), (4, 12), noise_hit(1, 0.012) * nominal, -20.0)
+    ev = marks["mixed"][group_at(mixed, 0)["id"]]
+    assert not ev["bleed"] and ev["evidence"]["co_located"] and ev["evidence"]["failed"] == "likeness"
+    assert ev["evidence"]["louder_db"] == pytest.approx(20.0, abs=2.0) and ev["evidence"]["distance"] > 2 * drumroles.CO_DISTANCE
+    assert "do not sound alike" in ev["why"]
+    # the same kick only 8 dB down: it would pass the 6 dB the other test asks for, not the 12 dB asked here
+    _, mixed, marks = leak_stems(lambda b, s: snare_hit(100 * b + s), (4, 12), KICK(), -8.0)
+    ev = marks["mixed"][group_at(mixed, 0)["id"]]
+    assert not ev["bleed"] and ev["evidence"]["co_located"] and ev["evidence"]["failed"] == "level"
+    assert ev["evidence"]["louder_db"] == pytest.approx(8.0, abs=2.0) and "it needs +12 dB" in ev["why"]
 
 
 def split_source_pair(second_audio):

@@ -161,6 +161,14 @@ CHANCE_FLOOR = 0.02      # a 16th the other group never plays in the track still
 BLEED_LOUDER_DB = 6.0    # the other group is louder by at least this at the coincident hits...
 BLEED_LOUDER_SHARE = 0.75  # ...in at least this share of them
 BLEED_DISTANCE = 2.0     # the two clean hits sound alike: spectral distance at most this
+# When the patterns give the coincidence away (the other group plays at the group's 16ths in almost every bar) the
+# coincidence test cannot tell a leak from two parts that share a pattern: p is 1 whatever the group is, the margin cannot be
+# met. The group is then judged on level and likeness alone, each stricter than above, and the evidence says "co-located".
+CO_EXPECTED = 0.9        # the expected coincidence rate from which the test is "co-located: chance cannot tell"
+CO_RATE = 0.9            # ...then at least this share of the group's hits coincide (replaces the rate, margin and p)...
+CO_LOUDER_DB = 12.0      # ...the other group is louder by at least this at the coincident hits (a separator leak is 15-30 dB down)...
+CO_LOUDER_SHARE = 0.9    # ...in at least this share of them...
+CO_DISTANCE = THRESHOLD  # ...and the clean hits are within the grouping's own threshold (the same sound, not a similar one)
 
 
 def _fade(x: np.ndarray, sr: int) -> np.ndarray:
@@ -1044,7 +1052,8 @@ def _bleed_pair(res_a: dict, ga: dict, res_b: dict, gbs: list, span: int, sr: in
     n = len(hits_a)
     ev = {"source_stem": None, "source_group": gbs[0]["id"], "source_groups": [g["id"] for g in gbs], "union": len(gbs) > 1,
           "hits": n, "coincide": 0, "rate": 0.0, "expected": None, "p": None, "louder_db": None, "louder_share": None,
-          "distance": None, "distances": None, "failed": "coincidence"}
+          "distance": None, "distances": None, "co_located": False, "louder_min_db": BLEED_LOUDER_DB,
+          "louder_min_share": BLEED_LOUDER_SHARE, "distance_max": BLEED_DISTANCE, "failed": "coincidence"}
     if not n or not hits_b:
         return ev
     tb = np.array([h["onset_s"] for h in hits_b])
@@ -1064,13 +1073,21 @@ def _bleed_pair(res_a: dict, ga: dict, res_b: dict, gbs: list, span: int, sr: in
     chance = [max(CHANCE_FLOOR, len(cells.get(h["step"], ())) / span) for h in hits_a]
     ev.update(coincide=len(pairs), rate=len(pairs) / n, expected=float(np.mean(chance)),
               p=_tail(chance, len(pairs)) if pairs else 1.0)
+    co = ev["co_located"] = ev["expected"] >= CO_EXPECTED
+    louder_db, louder_share, limit = (CO_LOUDER_DB, CO_LOUDER_SHARE, CO_DISTANCE) if co else (
+        BLEED_LOUDER_DB, BLEED_LOUDER_SHARE, BLEED_DISTANCE)
+    ev.update(louder_min_db=louder_db, louder_min_share=louder_share, distance_max=limit)
     if pairs:                                   # measured even when the coincidence fails, so the report can say it
         diff = [b["level_db"] - a["level_db"] for a, b in pairs]
-        ev.update(louder_db=float(np.median(diff)), louder_share=float(np.mean([d >= BLEED_LOUDER_DB for d in diff])))
-    if not (ev["rate"] >= BLEED_RATE and ev["rate"] - ev["expected"] >= BLEED_MARGIN and ev["p"] <= BLEED_P):
+        ev.update(louder_db=float(np.median(diff)), louder_share=float(np.mean([d >= louder_db for d in diff])))
+    if co:
+        passed = ev["rate"] >= CO_RATE
+    else:
+        passed = ev["rate"] >= BLEED_RATE and ev["rate"] - ev["expected"] >= BLEED_MARGIN and ev["p"] <= BLEED_P
+    if not passed:
         return ev
     ev["failed"] = "level"
-    if not (ev["louder_db"] >= BLEED_LOUDER_DB and ev["louder_share"] >= BLEED_LOUDER_SHARE):
+    if not (ev["louder_db"] >= louder_db and ev["louder_share"] >= louder_share):
         return ev
     ev["failed"] = "likeness"
     paired = {}                                  # the groups the coincident pairs belong to, by id
@@ -1084,7 +1101,7 @@ def _bleed_pair(res_a: dict, ga: dict, res_b: dict, gbs: list, span: int, sr: in
         return ev
     ev["distances"] = {gid: float(_pair_distance(ga["clean_hit"]["audio"], g["clean_hit"]["audio"], sr)) for gid, g in paired.items()}
     ev["distance"] = max(ev["distances"].values())
-    ev["failed"] = None if ev["distance"] <= BLEED_DISTANCE else "likeness"
+    ev["failed"] = None if ev["distance"] <= limit else "likeness"
     return ev
 
 
@@ -1095,20 +1112,24 @@ def _bleed_why(ev: dict) -> str:
     co = "%d of %d hits coincide with %s (%.0f %%; the two patterns give %s by chance, p %s)" % (
         ev["coincide"], ev["hits"], src, 100 * ev["rate"],
         "-" if ev["expected"] is None else "%.0f %%" % (100 * ev["expected"]), "-" if ev["p"] is None else "%.3g" % ev["p"])
+    if ev["co_located"]:
+        co = "co-located: chance cannot tell (%s); judged on level and likeness alone" % co
     lv = ("the level of that group against this group's hits is %+.1f dB (median; %.0f %% of the pairs at %+.0f dB or more)"
-          % (ev["louder_db"], 100 * ev["louder_share"], BLEED_LOUDER_DB)) if ev["louder_db"] is not None else ""
+          % (ev["louder_db"], 100 * ev["louder_share"], ev["louder_min_db"])) if ev["louder_db"] is not None else ""
     if ev["failed"] == "coincidence":
         if not ev["coincide"]:
             return "no hit coincides with %s within %.0f ms" % (src, 1000 * COINCIDE_S)
+        if ev["co_located"]:
+            return "%s: too few of the hits coincide (it needs %.0f %%); %s" % (co, 100 * CO_RATE, lv)
         return "%s: not well above chance (it needs %.0f %% of the hits, %.0f points over chance, p at most %g); %s" % (
             co, 100 * BLEED_RATE, 100 * BLEED_MARGIN, BLEED_P, lv)
     if ev["failed"] == "level":
-        return "%s; %s: it is not under that group (it needs +%.0f dB in %.0f %% of the pairs)" % (
-            co, lv, BLEED_LOUDER_DB, 100 * BLEED_LOUDER_SHARE)
+        return "%s; %s: it is not under that group (it needs %+.0f dB in %.0f %% of the pairs)" % (
+            co, lv, ev["louder_min_db"], 100 * ev["louder_min_share"])
     if ev["distance"] is None:
         return "%s; %s; likeness not tested: %s" % (co, lv, ev.get("distance_note"))
     sounds = "the clean hits are %.2f apart%s (at most %.2f)" % (
-        ev["distance"], "" if not ev["union"] else " (the furthest of the groups the pairs belong to)", BLEED_DISTANCE)
+        ev["distance"], "" if not ev["union"] else " (the furthest of the groups the pairs belong to)", ev["distance_max"])
     return "%s; %s; %s%s" % (co, lv, sounds, "" if ev["failed"] is None else ": they do not sound alike")
 
 

@@ -609,6 +609,23 @@ group is marked bleed of a group in another stem only when **all three** hold:
    Without a clean hit on either side the test is not made and the group is
    not marked; the evidence says so.
 
+**A leak of a constant pattern: co-located.** When the patterns give the
+coincidence away, the test above cannot tell a leak from two parts that share a
+pattern: a kick on every beat in one stem and a copy of it 20 dB down on every
+beat in another has an expected rate of 100 %, `p` is 1 whatever the group is,
+and the 25-point margin cannot be met. That is not evidence either way, and it
+was also how a constant kick leak in the snare stem went unmarked and was named
+`snare 2`. When the expected rate is **at least 90 %** the group is judged on
+level and likeness alone, each stricter, and the evidence says "co-located:
+chance cannot tell": at least 90 % of its hits coincide, the other group is
+louder by **at least 12 dB** in at least 90 % of the coincident pairs (a
+separator leak is 15 to 30 dB down; 8 dB under is a part doubling another, and
+the 6 dB of the ordinary test would mark it), and the clean hits are within the
+grouping threshold (**1.5**: the same sound, not a similar one). A different
+sound that shares the pattern fails the likeness. The numbers are chosen, from
+the cases built for them (20 dB and 8 dB down, a kick against a hat); on Flare
+no group has an expected rate of 90 %, so nothing changes there.
+
 **One source split over several groups.** A separator, or the grouping, can split one
 source into several groups of its stem, so that no single group coincides enough.
 A group that fails the first test against every group of another stem is also
