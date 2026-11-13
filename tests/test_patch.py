@@ -1065,3 +1065,16 @@ def test_a_noisy_body_with_a_long_tail_and_no_flat_spectrum_keeps_the_tail_in_re
     assert not any("widened" in n for n in flat["notes"])
     no_tail = patch.operator_guess(reading(flatness={"attack": 0.0, "body": 0.0}, **dict(kw, fall_40_ms=60.0)))
     assert not any("widened" in n for n in no_tail["notes"])            # no tail past 2.5 times the 20 dB fall: nothing to widen
+
+
+def test_to_live_merges_only_adjacent_rows_with_the_same_display_so_a_table_with_a_dip_is_refused():
+    for rows in ([[0, 1, "ms"], [0.4, 50, "ms"], [0.6, 1, "ms"], [1, 100, "ms"]], [[0, 1, "ms"], [0.5, 100, "ms"], [1, 1, "ms"]]):
+        with pytest.raises(ValueError, match="not monotone"):
+            patch.to_live({"Ae Decay": 20.0}, {"Ae Decay": rows})
+        with pytest.raises(ValueError, match="not monotone"):
+            patch.from_live({"Ae Decay": 0.7}, {"Ae Decay": rows})
+    plateau = {"Ae Decay": [[0, 1, "ms"], [0.2, 10, "ms"], [0.3, 10, "ms"], [0.4, 10, "ms"], [1, 100, "ms"]]}
+    assert patch.to_live({"Ae Decay": 10.0}, plateau)["Ae Decay"] == pytest.approx(0.3)      # adjacent rows: one at the mean
+    assert patch.from_live({"Ae Decay": 0.3}, plateau)["Ae Decay"] == pytest.approx(10.0)
+    falling = {"Ae Decay": [[0, 100, "ms"], [0.5, 10, "ms"], [0.6, 10, "ms"], [1, 1, "ms"]]}
+    assert patch.to_live({"Ae Decay": 10.0}, falling)["Ae Decay"] == pytest.approx(0.55)

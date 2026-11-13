@@ -825,9 +825,10 @@ _UNITS = {"ms": ("time", 1.0), "s": ("time", 1000.0), "Hz": ("freq", 1.0), "kHz"
 
 
 class _Curve:
-    """One parameter's table: Live value <-> display number (in ms, Hz, dB, %, st or plain), piecewise linear. Rows
-    with the same display number (display rounding: two live values that both read "0.10 ms") are collapsed into one
-    at their mean live value. Each segment is interpolated in the log of the number when the table's positive rows
+    """One parameter's table: Live value <-> display number (in ms, Hz, dB, %, st or plain), piecewise linear. Consecutive
+    rows (in live-value order) with the same display number (display rounding: two live values that both read "0.10
+    ms") are collapsed into one at their mean live value; rows that share a number but are not adjacent are not merged,
+    so a table that goes up and comes back down is refused. Each segment is interpolated in the log of the number when the table's positive rows
     span a decade or more and both ends of the segment are positive, linearly otherwise (a 0 ms row does not make
     the whole table linear). -inf (a row whose display is -inf) is its own point. Raises ValueError for a table that
     is not strictly monotone once plateaus are collapsed, mixes dimensions, or has under two finite rows."""
@@ -857,10 +858,13 @@ class _Curve:
         pts.sort()
         if len(set(p[0] for p in pts)) != len(pts):
             raise ValueError("units[%r]: two rows have the same live value" % name)
-        groups = {}
+        runs = []                      # plateaus: consecutive rows (live order) with one display number, as one row
         for live, disp in pts:
-            groups.setdefault(disp, []).append(live)
-        pts = sorted((sum(v) / len(v), d) for d, v in groups.items())      # plateaus: one row at the mean live value
+            if runs and runs[-1][1] == disp:
+                runs[-1][0].append(live)
+            else:
+                runs.append(([live], disp))
+        pts = [(sum(v) / len(v), d) for v, d in runs]               # at the mean live value
         self.live = np.array([p[0] for p in pts])
         self.disp = np.array([p[1] for p in pts])
         d = np.diff(self.disp)
