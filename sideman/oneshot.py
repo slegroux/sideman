@@ -475,19 +475,24 @@ def _dc(x: np.ndarray, sr: int) -> np.ndarray:
     return np.where(real, dc, 0.0)
 
 
-def _onset(x: np.ndarray, mag: np.ndarray, sr: int, after_hit: bool) -> int:
+def _onset(x: np.ndarray, mag: np.ndarray, sr: int, after_hit: bool, tail_s: float = 0.0) -> int:
     """Index of a hit's onset in x: the first 1 ms frame whose mean power is
     within ONSET_DB of the hit's loudest 1 ms, and in that frame the first
     sample at that level, so a lone click or dither spike does not count.
-    After an earlier hit, the level must also be twice its tail's."""
+    After an earlier hit, the level must also be twice its tail's, the tail
+    read from x's first 1 ms or, with `tail_s`, from its loudest 1 ms over the
+    first `tail_s` seconds (one 1 ms frame of a low tone's tail is loud or quiet
+    with the phase it falls on). 0 when nothing in x rises that far (or x
+    starts with the hit)."""
     frame = max(1, int(round(0.001 * sr)))
     c = np.concatenate([[0.0], np.cumsum((x ** 2).mean(axis=1))])
     fwd = (c[frame:] - c[:-frame]) / frame if len(x) > frame else c[-1:] / max(1, len(x))
     floor = fwd.max() * 10 ** (-ONSET_DB / 10)
     level = math.sqrt(floor)
     if after_hit:              # rise out of the tail: four times its power, twice its peak
-        floor = max(floor, 4.0 * float(fwd[0]))
-        level = max(level, 2.0 * float(mag[:frame].max()))
+        span = max(frame, int(round(tail_s * sr)))
+        floor = max(floor, 4.0 * float(fwd[:span - frame + 1].max()))
+        level = max(level, 2.0 * float(mag[:span].max()))
     first = int(np.argmax(fwd >= floor))
     inside = np.nonzero(mag[first:first + frame] >= level)[0]
     return first + (int(inside[0]) if len(inside) else 0)
@@ -505,9 +510,119 @@ def _starts_inside(x: np.ndarray, mag: np.ndarray, sr: int, segs: list) -> bool:
     return fwd[0] >= fwd.max() * 10 ** (-FAST_DB / 10) and later > float(mag[s:e].max()) * 10 ** (3 / 20)
 
 
-def profile_array(x: np.ndarray, sr: int, hit: int | None = None) -> dict:
+CLEAN_BAND_DB = 6.0      # a clean candidate is within this of the loudest complete hit (a ghost note is not one)
+LEAD_S = 0.020           # preferred: the 20 ms before its onset...
+LEAD_DB = 20.0           # ...are at least this far under its peak (not the tail of an earlier hit)
+ROOM_FRAC = 0.9          # "typical": room at least this share of the candidates' median...
+TYPICAL_DB = 3.0         # ...and, preferably, a peak within this of their median peak
+NEAR_S = 0.030           # a hit asked for "near" a position is taken within this
+HIT_LEAD_S = 0.002       # hit_cut starts this long before the onset it finds
+HIT_TAIL_S = 0.020       # hit_cut reads the tail's level over this (a whole period down to 50 Hz)
+
+
+def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray,
+               within: tuple | None = None, near: float | None = None) -> tuple[int, dict, int, str]:
+    """(index, measured profile, ms of room, note) of the clean hit.
+
+    The candidates are the complete hits (not cut off before they fall 40 dB, long enough to
+    measure), except that a take whose first hit begins at full level while a later one is more
+    than 3 dB louder is read as starting inside a hit, and that first hit is not offered. With
+    `within` = (start s, end s) only hits whose onset lies inside count, so the tail of a hit from
+    before the span is never one. The pick: the candidates within CLEAN_BAND_DB of the loudest
+    (a ghost note is not clean); of those the ones with a quiet lead-in (the 20 ms before the onset
+    LEAD_DB under the peak), if any; of those the ones whose room (onset to the next onset, or the
+    end of the take) is at least ROOM_FRAC of the median; of those the ones whose peak is within
+    TYPICAL_DB of the median peak, if any; the earliest. With `near` (seconds), the complete hit
+    whose onset is within NEAR_S of it wins instead, when there is one, whatever its level.
+    Raises ValueError("no clean hit ...") when there is no candidate."""
+    skip0 = len(segs) > 1 and _starts_inside(x, mag, sr, segs)
+    complete = []
+    for k, (_, end) in enumerate(segs):
+        if k == 0 and skip0:
+            continue
+        if within is not None and not within[0] - NEAR_S <= onsets[k] / sr < within[1] + NEAR_S:
+            continue                           # never a candidate (below): not worth measuring
+        cut = "the file ends" if k == len(segs) - 1 else "the next hit starts"
+        try:
+            got = _measure(x[onsets[k]:end], sr, cut, quick=True)
+        except ValueError:
+            continue
+        if got["truncated"]:
+            continue
+        lead = mag[max(0, onsets[k] - int(LEAD_S * sr)):onsets[k]]
+        quiet = not len(lead) or 20 * math.log10(max(float(lead.max()), 1e-12)) <= got["peak_db"] - LEAD_DB
+        room = (onsets[k + 1] if k + 1 < len(segs) else x.shape[0]) - onsets[k]
+        complete.append({"k": k, "got": got, "room": room, "at": onsets[k] / sr, "quiet": quiet, "cut": cut})
+    inside = complete
+    if within is not None:
+        inside = [c for c in complete if within[0] <= c["at"] < within[1]]
+        slack = NEAR_S if near is not None else 0.0
+        complete = [c for c in complete if within[0] - slack <= c["at"] < within[1] + slack]
+    if not inside and near is not None:
+        inside = complete                      # nothing inside the span, but a hit at the edge may be the one asked for
+    if not inside:
+        raise ValueError("no clean hit: none of the %d hit%s is complete (not cut off before falling 40 dB) "
+                         "and inside the span asked for" % (len(segs), "" if len(segs) == 1 else "s"))
+    c, why = None, None
+    if near is not None:                       # like with like: the hit at that place, whatever the span's own band
+        close = [c for c in complete if abs(c["at"] - near) <= NEAR_S]
+        if close:
+            c, why = min(close, key=lambda c: abs(c["at"] - near)), "the hit at the requested position"
+    if c is None:
+        loud = max(c["got"]["peak_db"] for c in inside)
+        cands = [c for c in inside if c["got"]["peak_db"] >= loud - CLEAN_BAND_DB]
+        cands = [c for c in cands if c["quiet"]] or cands
+        med_room = float(np.median([c["room"] for c in cands]))
+        roomy = [c for c in cands if c["room"] >= ROOM_FRAC * med_room]
+        med_peak = float(np.median([c["got"]["peak_db"] for c in roomy]))
+        typical = [c for c in roomy if abs(c["got"]["peak_db"] - med_peak) <= TYPICAL_DB]
+        c = min(typical or roomy, key=lambda c: c["k"])
+        why = "typical of %d candidate%s" % (len(roomy), "" if len(roomy) == 1 else "s")
+    got = _measure(x[onsets[c["k"]]:segs[c["k"]][1]], sr, c["cut"])      # only the pick is measured in full
+    return c["k"], got, int(round(_ms(c["room"], sr))), why
+
+
+def hit_cut(x: np.ndarray, sr: int, at: float, length: float | None = None) -> tuple[np.ndarray, float | None]:
+    """(cut, onset s) for the hit near `at` (seconds) in x [n, channels]. The onset is found here from the
+    audio alone, not from where an earlier slice began: the first rise out of the tail within 100 ms after
+    `at`, the tail's level read as its loudest 1 ms over HIT_TAIL_S from `at` - 30 ms, so one search never
+    goes earlier than `at` - 10 ms. The search is then made again from the onset it found, until it finds the same
+    one (at most four times, so up to about 40 ms earlier in all). That makes the onset of one rise out of a tail
+    independent of where `at` fell; with grace notes or a swell a few ms apart it can still be any of the rises. The cut runs from HIT_LEAD_S before the onset to `length` seconds after it (the end of x if None).
+    Two cuts of the same audio with the same `length` are the same samples whatever the offset they were read
+    at. When nothing rises there the onset is None and the cut starts HIT_LEAD_S before `at`. Profile a cut
+    with profile_array(cut, hit=0, single=True): the whole cut is the one hit."""
+    x = np.asarray(x, dtype=np.float64)
+    back, ahead = int(round(0.030 * sr)), int(round(0.100 * sr))
+
+    def rise(i: int) -> int | None:
+        a, b = max(0, i - back), min(len(x), i + ahead)
+        win = x[a:b]
+        k = _onset(win, np.abs(win).max(axis=1), sr, True, HIT_TAIL_S) if len(win) else 0
+        return a + k if k > 0 else None            # with the tail read over 20 ms, a rise is never at the window's start
+
+    onset = rise(int(round(at * sr)))
+    for _ in range(4):
+        again = None if onset is None else rise(onset)
+        if again is None or again == onset:
+            break
+        onset = again
+    start = int(round(at * sr)) if onset is None else onset
+    end = len(x) if length is None else min(len(x), start + int(length * sr))
+    return x[max(0, start - int(HIT_LEAD_S * sr)):max(end, start + 1)], None if onset is None else onset / sr
+
+
+def profile_array(x: np.ndarray, sr: int, hit: int | str | None = None, within: tuple | None = None,
+                  near: float | None = None, single: bool = False) -> dict:
     """The one-shot profile of one signal [n, channels]: of hit `hit` (from 0)
-    when it holds several, by default the first that is not cut off. See profile()."""
+    when it holds several, by default the first that is not cut off; "clean"
+    picks a typical complete hit (see profile()). `within` (start s, end s) and
+    `near` (s) only apply to "clean": hits must start inside the span, and the
+    hit starting within 30 ms of `near` is preferred. Raises ValueError("no clean
+    hit ...") when there is no candidate. `single` takes the whole of x as one hit (hit 0), without
+    looking for hits inside it: for a cut made with hit_cut."""
+    if isinstance(hit, bool) or not (hit is None or hit == "clean" or isinstance(hit, (int, np.integer))):
+        raise ValueError("hit must be a whole number, \"clean\" or None, got %r" % (hit,))
     _check_channels(x)
     x = np.asarray(x, dtype=np.float64)
     if not np.isfinite(x).all():
@@ -520,20 +635,25 @@ def profile_array(x: np.ndarray, sr: int, hit: int | None = None) -> dict:
     mag = np.abs(x).max(axis=1)
     if not len(mag) or mag.max() <= 0:
         raise ValueError("the file is silent")
-    segs = _segments(x, sr)
-    if hit is not None and not 0 <= hit < len(segs):
+    segs = [(0, x.shape[0])] if single else _segments(x, sr)
+    if isinstance(hit, (int, np.integer)) and not 0 <= hit < len(segs):
         raise ValueError("hit %r is out of range: the take has %d hit%s (0-%d)"
                          % (hit, len(segs), "" if len(segs) == 1 else "s", len(segs) - 1))
     onsets = [_onset(x[s:e], mag[s:e], sr, s > 0) + s for s, e in segs]
     order, extra, tail = list(range(len(segs))), [], False
-    if hit is not None:
-        order = [hit]
+    picked = None
+    if hit == "clean":
+        k, got, room, why = _clean_hit(x, sr, segs, onsets, mag, within, near)
+        picked, order = (k, got), []
+        extra.append("hit %d is the clean hit (%s): complete, with %d ms from its onset to the next onset "
+                     "or the end of the file" % (k, why, room))
+    elif hit is not None:
+        order = [int(hit)]
     elif len(segs) > 1 and _starts_inside(x, mag, sr, segs):
         # hit 0 looks like the tail of a hit that began before the file: try the
         # others first. A take trimmed at the onset of a fast hit looks the same,
         # so hit 0 stays the fallback when no later hit is complete.
         order, tail = order[1:] + [0], True
-    picked = None
     for k in order:
         cut = "the file ends" if k == len(segs) - 1 else "the next hit starts"
         try:
@@ -562,9 +682,10 @@ def profile_array(x: np.ndarray, sr: int, hit: int | None = None) -> dict:
     return out
 
 
-def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
+def _measure(y: np.ndarray, sr: int, cut: str, quick: bool = False) -> dict:
     """The profile of one hit y [n, channels], which starts at its onset and
-    ends where `cut` says ("the file ends" or "the next hit starts")."""
+    ends where `cut` says ("the file ends" or "the next hit starts"). `quick`
+    returns only {"peak_db", "truncated"}, as the full profile has them."""
     notes = []
     peak = float(np.abs(y).max())
     if len(y) < FRAME_S[0] * sr:
@@ -588,7 +709,6 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
     b0, b1 = int(t0), int(t1)
     out["body_window_ms"] = [_ms(b0, sr), _ms(b1, sr)]
 
-    z = _analytic(y)
     f0, tonal, body = None, [], None
     if b1 - b0 >= int(FRAME_S[0] * sr):
         body = _spectrum(y, b0, b1, sr)
@@ -629,6 +749,9 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
     else:
         length = int(0.005 * sr)
     env = _boxcar(power, max(1, length))
+    if quick:                  # what the clean-hit pick needs, read as below
+        ip = int(np.argmax(env))
+        return {"peak_db": out["peak_db"], "truncated": _last_above(env, ip, env[ip] * 10 ** (-FALLS_DB[-1] / 10)) is None}
     if pitched:                # harmonics on the body flattened by the whole-period envelope, so a
         flat = _spectrum(y, b0, b1, sr, level=env)      # fast decay does not smear f0 into 2 f0
         near = [t for t in _tonal(flat, nyq_hi) if abs(t[0] - f0) <= HARM_TOL * f0]
@@ -656,6 +779,7 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
         # a fundamental more than STRONG_DB under its strongest harmonic is lost in that
         # harmonic's skirt in a short frame: follow the harmonic and divide by its number
         k = round(tonal[0][0] / f0) if tonal[0][1] - l1 > STRONG_DB and _harmonic(tonal[0][0], f0) else 1
+        z = _analytic(y)
         dense, reached = _track(z, sr, k * f0, round((b0 + b1) / 2 / sr, 3), gate, k)
         dense = [(c, f / k) for c, f in dense]
         if k > 1:
@@ -792,12 +916,20 @@ def _measure(y: np.ndarray, sr: int, cut: str) -> dict:
     return out
 
 
-def profile(path: str | pathlib.Path, hit: int | None = None) -> dict:
+def profile(path: str | pathlib.Path, hit: int | str | None = None) -> dict:
     """Envelope, pitch and tone of a one-shot file, relative to the hit itself.
 
     hits, onsets_ms the hits found in the file and where each starts
     hit             which one this profile is (from 0): `hit`, by default the first
-                    that is not cut off
+                    that is not cut off; hit="clean" asks for a typical complete hit. Of the
+                    hits that are not cut off, those within 6 dB of the loudest; of those the
+                    ones that start from quiet (the 20 ms before the onset 20 dB under the
+                    peak), if any; of those the ones with room (onset to the next onset or the
+                    end of the file) at least 90 % of the median; of those the ones with a
+                    peak within 3 dB of the median peak, if any; the earliest. A take whose
+                    first hit begins at full level while a later one is more than 3 dB louder
+                    is read as starting inside a hit, and that first hit is not offered.
+                    Raises "no clean hit" when no hit is complete
     onset_ms        where the hit starts in the file (first 1 ms within 40 dB of its loudest)
     truncated       the next hit or the end of the file cuts it before it falls 40 dB
     peak_db         sample peak, dBFS (the only absolute level here)

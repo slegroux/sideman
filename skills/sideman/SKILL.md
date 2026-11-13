@@ -178,6 +178,33 @@ the test clip, stop, and read the new clip's `file_path`. Recording plays
 audio, so get the user's yes first, and delete the scratch track afterwards.
 `sample_analyze(file)` gives one hit's numbers when there is no reference.
 
+**Compare a scene with a reference track** — when the reference comes with
+stems. Build its profile once, from files:
+```
+reference_profile("/ref/mix.wav", {"kick": "/ref/kick.wav", "bass": "/ref/bass.wav",
+                  "drums": ["/ref/hh.wav", "/ref/snare.wav"]},
+                  tempo=124, t0=0.113, sections=[{"name": "E05", "start_bar": 48, "bars": 8}])
+```
+Then record the scene on capture tracks: a muted audio track per element, input
+set to the element's last bus, Post Mixer, monitoring Off, plus one for the
+master. **This plays and records audio in the user's Set: get their yes first.**
+Guard before: no solos (turn them off and remember which), the reference track
+muted; restore both after, even if the recording fails. Then write the manifest
+and report:
+```
+mix_report({"tempo": 124, "offset_s": 0, "sources": {"master": "/rec/master.aif", "kick": "...", "bass": "..."},
+            "sections": [{"name": "E05", "start_bar": 0, "bars": 8}]},
+           reference="/ref/mix.profile.json")
+```
+Sections pair with the profile's by name; `"reference": {"section": ..., "from_bar": N}`
+on a manifest section pairs it with another one. Read each section's
+`elements.gaps` first (ratios to the kick, largest first, then `width_gaps`),
+then `elements.notes`: "the capture is the reference: check solos" means the
+guard failed and nothing else in that section is real; "the kick is out" names
+the yardstick used instead. Then the `drums` readings, then the mix bands. Say
+what differs and by how much. The numbers do not say which gaps matter, and the
+Set is not changed from them without asking.
+
 **Third-party plugins expose one parameter** — a VST/AU device's `parameters`
 holds only `Device On` until the user exposes controls via Live's **Configure**
 button, which is GUI-only and has no API. `get_parameter_names` still reports

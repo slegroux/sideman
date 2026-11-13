@@ -108,7 +108,11 @@ def test_envelope_and_pitch_ignore_sample_rate():
     assert b["click_db"] == pytest.approx(a["click_db"], abs=1.5)
     for band in ("sub", "bass", "low_mid", "mid"):
         assert b["bands_db"][band] == pytest.approx(a["bands_db"][band], abs=0.5), band
-    assert b["pitch_track_hz"] == pytest.approx(a["pitch_track_hz"], rel=0.02)
+    # a point the track cannot read is None on both sides; the others agree. (pytest.approx on the whole dict
+    # relied on older versions letting None through; 9.2 raises TypeError for None with a relative tolerance.)
+    assert {k for k, v in b["pitch_track_hz"].items() if v is None} == {k for k, v in a["pitch_track_hz"].items() if v is None}
+    assert {k: v for k, v in b["pitch_track_hz"].items() if v is not None} == pytest.approx(
+        {k: v for k, v in a["pitch_track_hz"].items() if v is not None}, rel=0.02)
 
 
 def test_envelope_cut_short_is_none_with_a_reason():
@@ -891,3 +895,180 @@ def test_compare_settle_time_alone_is_not_a_reading():
     c = dict(base, pitch_drop_st=3.0, pitch_settle_ms=30.0)
     d = dict(base, pitch_drop_st=3.0, pitch_settle_ms=7.5)
     assert [r.split()[1] for r in oneshot.compare(c, d)["readings"]] == ["settles"]
+
+
+# ---------------------------------------------------------------- clean hit
+
+def take(onsets_s, total_s, freq=100, tau=0.03):
+    """Decaying 100 Hz hits starting at `onsets_s`, in a file `total_s` long."""
+    x = np.zeros((int(total_s * SR), 1))
+    for t in onsets_s:
+        h = hit(freq, tau, seconds=total_s - t)
+        x[int(t * SR):int(t * SR) + len(h)] += h
+    return x
+
+
+# With tau = 30 ms a hit is 40 dB down after 30 * ln(100) = 138 ms, so a hit with
+# less than that before the next onset (or the end) is cut off.
+def test_clean_hit_is_the_third_when_the_gaps_are_120_120_and_500_ms():
+    r = oneshot.profile_array(take([0, 0.12, 0.24], 0.74), SR, hit="clean")
+    assert r["hits"] == 3 and r["hit"] == 2 and not r["truncated"]
+    assert any("clean hit" in n and "500 ms" in n for n in r["notes"]), r["notes"]
+
+
+def test_clean_hit_is_the_earliest_typical_one_not_the_one_with_most_room():
+    # rooms 300, 600, 300 ms, all complete: the median is 300 ms and all are typical -> the earliest
+    r = oneshot.profile_array(take([0, 0.3, 0.9], 1.2), SR, hit="clean")
+    assert r["hits"] == 3 and r["hit"] == 0
+    # the same, the odd long room first: 800, 300, 300, 300 ms -> still the earliest
+    assert oneshot.profile_array(take([0, 0.8, 1.1, 1.4], 1.7), SR, hit="clean")["hit"] == 0
+    # two equal rooms: the earliest
+    assert oneshot.profile_array(take([0, 0.4], 0.8), SR, hit="clean")["hit"] == 0
+
+
+def test_clean_hit_skips_a_complete_hit_with_less_than_90_percent_of_the_median_room():
+    # tau 20 ms: 40 dB down after 92 ms. Rooms 150, 500, 500 ms: all complete, the median is 500, and
+    # 150 < 0.9 * 500 -> not typical (a fill note), so the pick is hit 1
+    x = take([0, 0.15, 0.65], 1.15, tau=0.02)
+    r = oneshot.profile_array(x, SR, hit="clean")
+    assert r["hits"] == 3 and r["hit"] == 1
+
+
+def test_clean_hit_leaves_out_a_ghost_note_and_hits_before_the_span():
+        # three ghosts first (the median hit is a ghost), then two full-level hits: only the 6 dB band picks a loud one
+    loud, ghost = take([1.4, 1.9], 2.4), 0.2 * take([0.2, 0.7, 1.0], 2.4)
+    r = oneshot.profile_array(loud + ghost, SR, hit="clean")
+    assert r["hits"] == 5 and r["hit"] == 3 and r["onset_ms"] == pytest.approx(1400, abs=3)
+    # within= keeps hits that start before the span out (the tail of a hit from the section before)
+    r = oneshot.profile_array(take([0.0, 0.7, 1.4], 2.1, tau=0.05), SR, hit="clean", within=(0.5, 2.1))
+    assert r["hit"] == 1 and r["onset_ms"] == pytest.approx(700, abs=3)
+    # near= prefers the hit at that position, within 30 ms
+    r = oneshot.profile_array(take([0.0, 0.7, 1.4], 2.1, tau=0.05), SR, hit="clean", near=1.41)
+    assert r["hit"] == 2
+
+
+def test_clean_hit_when_only_the_last_is_complete():
+    r = oneshot.profile_array(take([0, 0.15, 0.30], 0.6, tau=0.05), SR, hit="clean")   # 40 dB down after 230 ms
+    assert r["hits"] == 3 and r["hit"] == 2
+
+
+def test_clean_hit_of_two_complete_hits_the_one_with_far_less_room_is_not_typical():
+    # tau 50 ms: hit 1 has 250 ms of room (just complete), hit 2 has 400; the median is 325 and 250 < 0.9 * 325
+    r = oneshot.profile_array(take([0, 0.20, 0.45], 0.85, tau=0.05), SR, hit="clean")
+    assert r["hits"] == 3 and r["hit"] == 2
+
+
+def test_clean_hit_a_quiet_lead_in_is_preferred_to_an_earlier_hit_riding_on_a_tail():
+    # tau 50 ms. Hit 0 is cut off by hit 1 100 ms later; hit 1 is complete (600 ms of room) but starts on
+    # hit 0's tail, which is 16 dB down in the 20 ms before it. Hit 2 (500 ms of room) starts from quiet.
+    # Of the two complete hits the one with the quiet lead-in is the pick, though it is later.
+    r = oneshot.profile_array(take([0, 0.10, 0.70], 1.2, tau=0.05), SR, hit="clean")
+    assert r["hits"] == 3 and r["hit"] == 2
+    # with nothing else complete, the hit on the tail is still better than nothing (the rule is a preference)
+    assert oneshot.profile_array(take([0, 0.10], 0.9, tau=0.05), SR, hit="clean")["hit"] == 1
+
+
+def test_clean_hit_a_peak_more_than_3_db_from_the_median_is_not_typical():
+    # four hits with 500 ms of room each; the first is 4 dB louder than the other three (the median), all
+    # within the 6 dB band: the pick is the earliest typical one, hit 1, not hit 0
+    x = take([0, 0.5, 1.0, 1.5], 2.0, tau=0.03)
+    x[int(0.5 * SR):] *= 10 ** (-4 / 20)
+    r = oneshot.profile_array(x, SR, hit="clean")
+    assert r["hits"] == 4 and r["hit"] == 1
+    # 2 dB louder is typical: the earliest, hit 0
+    y = take([0, 0.5, 1.0, 1.5], 2.0, tau=0.03)
+    y[int(0.5 * SR):] *= 10 ** (-2 / 20)
+    assert oneshot.profile_array(y, SR, hit="clean")["hit"] == 0
+
+
+def test_clean_hit_none_complete_is_refused_with_no_clean_hit():
+    with pytest.raises(ValueError, match="no clean hit"):
+        oneshot.profile_array(take([0, 0.06, 0.12], 0.2, tau=0.1), SR, hit="clean")
+    for bad in ("best", "2", 1.0, True, 2.5):
+        with pytest.raises(ValueError, match="hit must be"):
+            oneshot.profile_array(take([0], 0.5), SR, hit=bad)
+    # the default and a number are unchanged by "clean" existing
+    assert oneshot.profile_array(take([0, 0.3], 0.9), SR)["hit"] == 0
+
+
+def test_clean_hit_through_the_tools(tmp_path):
+    import mcp_server.server as S
+    p = tmp_path / "take.wav"
+    sf.write(str(p), take([0, 0.12, 0.24], 0.74), SR, subtype="FLOAT")
+    assert json.loads(S.sample_analyze(str(p), hit="clean"))["hit"] == 2
+    assert json.loads(S.sample_compare(str(p), str(p), hit_a="clean", hit_b="clean"))["readings"] == []
+    with pytest.raises(S.LiveError, match="no clean hit"):
+        q = tmp_path / "roll.wav"
+        sf.write(str(q), take([0, 0.06, 0.12], 0.2, tau=0.1), SR, subtype="FLOAT")
+        S.sample_analyze(str(q), hit="clean")
+
+
+def test_clean_hit_near_a_position_is_judged_against_the_span_not_a_louder_hit_at_its_edge():
+    # a full-level hit starts 20 ms before the span (inside the 30 ms slack of near=), the hit in the span is
+    # 8 dB down: it is the only candidate inside, so near= must still find it. (A louder edge hit that set the
+    # 6 dB band would have dropped it.)
+    x = take([0.48], 2.4) + 0.4 * take([1.4], 2.4)
+    inside = oneshot.profile_array(x, SR, hit="clean", within=(0.5, 2.4))
+    assert inside["hit"] == 1 and inside["onset_ms"] == pytest.approx(1400, abs=3)
+    near = oneshot.profile_array(x, SR, hit="clean", within=(0.5, 2.4), near=1.40)
+    assert near["hit"] == 1 and "requested position" in near["notes"][0]
+    nothing_inside = oneshot.profile_array(x[:int(1.0 * SR)], SR, hit="clean", within=(0.5, 1.0), near=0.49)
+    assert nothing_inside["hit"] == 0                  # only an edge hit exists, and it is the one asked for
+
+
+def test_hit_cut_is_the_same_whatever_the_offset_it_was_read_at():
+    x = take([0.30, 0.90], 1.6, tau=0.04)
+    a, at_a = oneshot.hit_cut(x, SR, 0.30, 0.55)
+    shifted = np.concatenate([np.zeros((int(0.0123 * SR), 1)), x])                  # the same audio read 12.3 ms late
+    b, at_b = oneshot.hit_cut(shifted, SR, 0.30 + 0.0123 + 0.004, 0.55)                # and asked for 4 ms off
+    n = min(len(a), len(b))
+    assert abs(len(a) - len(b)) <= 2 and np.allclose(a[:n], b[:n], atol=1e-9)
+    assert abs(len(a) / SR - (0.55 + 0.002)) < 0.002          # the lead before the onset, then the length asked for
+    assert abs((at_b - at_a) - 0.0123) < 1.5 / SR             # and the onset moved by exactly the 12.3 ms
+    ra = oneshot.profile_array(a, SR, hit=0, single=True)
+    rb = oneshot.profile_array(b, SR, hit=0, single=True)
+    assert oneshot.compare(ra, rb)["readings"] == []
+
+
+def test_single_takes_the_whole_array_as_one_hit_without_looking_for_hits_inside():
+    x = take([0.0, 0.40], 0.8, tau=0.05)                       # two hits
+    assert oneshot.profile_array(x, SR)["hits"] == 2
+    one = oneshot.profile_array(x, SR, hit=0, single=True)
+    assert one["hits"] == 1 and one["hit"] == 0 and one["onsets_ms"] == [one["onset_ms"]]
+
+
+def test_hit_cut_finds_the_same_onset_wherever_it_is_asked_for_near_the_hit():
+    """A noise hat (tau 30 ms) with a soft lead-in, 4 ms of noise at a fifth of its level before its rise, 125 ms after
+    another hat. Where `at` falls (8 ms either side of the main rise) decides what the 20 ms tail window holds, and so
+    which of the rises a single search takes; searching again from what it found, until it finds the same, gives one
+    onset for every `at`, inside the 4 ms lead-in."""
+    rng = np.random.default_rng(3)
+
+    def hat(n, tau):
+        return np.diff(rng.standard_normal(n + 1)) * 0.5 * np.exp(-np.arange(n) / SR / tau)
+
+    x = np.zeros(SR)
+    on = int(0.5 * SR)
+    for t0 in (on - int(0.125 * SR), on):
+        x[t0:t0 + int(0.3 * SR)] += hat(int(0.3 * SR), 0.03)
+    x[on - int(0.004 * SR):on] += 0.2 * hat(int(0.004 * SR), 1.0)
+    found = {oneshot.hit_cut(np.stack([x, x], 1), SR, on / SR + d / 1000, 0.1)[1] for d in np.arange(-8.0, 8.01, 0.5)}
+    assert len(found) == 1, sorted((f - on / SR) * 1000 for f in found)
+    assert -4.0 <= (found.pop() - on / SR) * 1000 <= 0.0
+
+
+@pytest.mark.parametrize("tau,gap", [(0.08, 0.20), (0.12, 0.15)])
+def test_hit_cut_reads_a_low_tail_over_20_ms_not_one_frame(tau, gap):
+    """A kick gliding 24 st down to 55 Hz (decay `tau`) and the same kick `gap` s later, on its tail. One 1 ms frame
+    of a 55 Hz tail is loud or quiet with the phase it falls on, so a tail level read from the window's first frame
+    puts the onset in the tail (tens of ms early) for some `at`. Read as the loudest 1 ms over 20 ms, every `at` within
+    6 ms of the second kick finds one onset, at the kick's start (within 2 ms after it: the sine starts at 0)."""
+    t = np.arange(int(0.6 * SR)) / SR
+    h = np.sin(2 * np.pi * np.cumsum(55.0 * 2 ** (2.0 * np.exp(-t / 0.02))) / SR) * np.exp(-t / tau)
+    x = np.zeros(2 * SR)
+    for s0 in (int(0.5 * SR), int((0.5 + gap) * SR)):
+        x[s0:s0 + len(h)] += h[:len(x) - s0]
+    on = int((0.5 + gap) * SR) / SR
+    found = {oneshot.hit_cut(np.stack([x, x], 1), SR, on + d / 1000, 0.2)[1] for d in np.arange(-6.0, 6.01, 0.25)}
+    assert len(found) == 1, sorted((f - on) * 1000 for f in found if f is not None)
+    assert 0.0 <= (found.pop() - on) * 1000 <= 2.0

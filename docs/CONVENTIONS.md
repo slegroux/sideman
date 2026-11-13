@@ -286,6 +286,120 @@ twelfth apart on the same partials are one line, not a pitch difference.
 - At 22.05 kHz the bands above 11 kHz are empty, so a hat compared with a
   44.1 kHz file reads "highs low".
 
+## Comparing a scene with a reference track
+
+`reference_profile` and `mix_report` measure one scene of the Set against the
+matching section of a reference track that comes with stems. They run on
+files, in the MCP server, and need the `listen` extra. The report has three
+layers:
+
+- **The mix**: bands, width and loudness of the master capture, against the
+  reference mix's section.
+- **Elements against the yardstick**: each element's level as a ratio to the
+  kick, ours against the reference's, and the difference. Ranked `gaps` come
+  first; `width_gaps` (an element's width more than 0.1 apart) are listed
+  apart from them.
+- **Drum sounds**: for the kick, `toms`, `snare`, `hh`, `clap` and `rim` when
+  both sides have them and sound in the paired bars, the `sample_compare`
+  readings between a typical clean hit of ours and of the reference stem. A
+  clean hit is complete (it falls 40 dB before the next one), within 6 dB of the
+  loudest such hit, starts from quiet if any does (20 ms before it 20 dB down),
+  has room to the next onset of at least 90 % of the median, and, if any does,
+  a peak within 3 dB of the median; the earliest of those. Each side is cut with
+  a beat of pre-roll and post-roll (ending 50 ms short of the beat line, where
+  early hits start; ours 30 ms longer, so the same audio read a little early
+  still has its room to fall), only hits that start inside the section (its
+  window starting 20 ms early, as below) count, the reference's is picked first,
+  and ours is the one within 30 ms of the same place when there is one. When our
+  own hit-finding offers none there, a hit that rises out of what comes before
+  it within 30 ms of that place is measured, with a note; otherwise our own
+  typical hit, with a note that the hits are not at the same place (where each
+  is) and that the readings compare different hits. The two hits are then
+  measured again on cuts made from the hits themselves, of the same length, so
+  the same audio gives the same readings however it is offset against the grid.
+
+**The reference profile** is built once with `reference_profile(mix, stems,
+tempo, t0, sections)`. `stems` maps a role to a file or a list of files that
+are summed (`drums` = hh + snare + toms); `kick` is the yardstick. `t0` is
+where bar 0 sits in the files, in seconds, and the sections are `{name,
+start_bar, bars}`. It is written as JSON next to the mix, with each input's
+path, mtime and size, and `mix_report` says which have changed since. Rebuild
+it when a stem is re-exported; a profile from another version is refused.
+
+**Where to tap.** Record each element at its last bus, Post Mixer, on a muted
+audio track with monitoring Off, and the master on its own track. The master
+tap sits after the master chain and the element taps before it, so the master
+is never ratioed against an element.
+
+**A ratio to the kick** cancels a gain that the stems and the mix share, so a
+stem exported 3 dB hot still reads right; it does not cancel bleed. "Bass
+−6 dB" means the bass is 6 dB under the kick in the same bars, ours and the
+reference's. Where the kick is out on either side (silent, or 30 dB under the
+loudest other element, as in a break) both sides use the loudest element
+present on both as the yardstick instead, and the section says which. A kick
+that is out on one side only is also listed as a difference ("In the
+reference only: kick (kick out in ours: 35 dB under the loudest other role,
++6.0 dB vs bass)"). With no shared element the table is left out with a note.
+
+**Present, trace, absent.** An element is present in a section when at least a
+quarter of its bars (and one) are within 40 dB of the elements together, a
+trace when a quarter are within 60 dB, otherwise absent. "Together" is our
+element sources on one side and the profile's stems on the other, never the
+master capture: its make-up gain would move the line. Absent is not reported as
+−120 dB. A trace on both sides, or against an absent element, is listed and
+never counted as a gap or as "in the reference only", because separation bleed
+lives there; an element present on one side and a trace on the other is
+compared and can be a gap. Presence is judged on the core of each bar, from
+20 ms after its grid line to 20 ms before the next, on both sides: whatever
+sounds within 20 ms of a line (a note ending on it, a hit starting just before
+it) never makes an element present in a bar or a section. Levels are read over
+the whole bar, except that a bar's window starts at the onset of a hit that
+rises within 20 ms before its line (real drums start a few ms early, and a
+capture is never sample-aligned with the reference): that hit belongs to its
+own bar and section, while a note or a tail that ends on the line stays in the
+bar before.
+
+**Timing tolerance.** A hit's earliness against the grid plus the capture's
+read offset (how far `offset_s` sits from where the audio really is, either
+way) must stay within 20 ms. Flare-like drums start 3-9 ms early, which leaves
+11-17 ms for the offset. Past 20 ms a hit at a section line counts in the
+section before it (it can make an element present there, "in ours only"), and
+a drum hit's place differs by more than the 30 ms the drum layer allows when
+the earliness and offset together pass 30 ms ("not at the same place").
+
+**Pairing.** Sections pair by name: the manifest section "E05" with the
+profile's "E05". A manifest section may carry `"reference": {"section":
+"E05", "from_bar": 4}` to pair with another section or start four bars in; a
+shorter section pairs with the first bars. The reference's bands, widths and
+loudness are then those of the whole profile section. A section with no match,
+or longer than its match, reports the mix layer only, with a note.
+
+**The capture is the reference.** If the master capture matches the reference
+mix, level aside (per-bar curve and bands within 0.3 dB, width within 0.01), the
+section is flagged. The usual causes are the reference track left unmuted, so
+it plays into the capture, and a solo that cuts the Set down to part of itself.
+Guard against it before recording: no solos, and the reference track muted;
+restore both afterwards.
+
+**Limits.**
+
+- Stems carry their own bleed and level. A ratio is only as good as the stem.
+- The drum layer needs one isolated hit. A hat or tom roll has no clean hit, and
+  the report says so instead of reading one.
+- A capture shorter than the section is refused; compare whole bars.
+- A hit that cannot fall 40 dB before the next one is never compared: a long
+  kick at 124 BPM, or closed hats on 16ths, reads "no clean hit".
+- The drum layer compares both hits over the shorter of the two cuts. When one
+  side's hit is the last in its slice, a longer tail on the other is not read.
+- With grace notes or a swell a few ms before a hit, the onset found can be any
+  of the rises, and the two sides can start up to about 16 ms apart.
+- Claps and other layered hits can split differently on the two sides. The
+  note "measured at the reference's place" then appears, without readings,
+  even on identical audio.
+- A section line closer than 40 ms to the start of a file gets no early start.
+- The numbers describe the difference. Which gaps are real is the user's ear's
+  call: on one replica two stem reads were wrong, and the ear won.
+
 ## Racks and plug-ins
 
 Two walls, both real, and both worth stating to the user rather than working

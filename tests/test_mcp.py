@@ -121,7 +121,8 @@ def test_every_tool_maps_to_the_right_op():
 
 # Tools that run in the server process and send no op of their own (the
 # listening tools read audio files; a clip path costs one `get`).
-LOCAL_TOOLS = {"audio_analyze", "audio_compare", "mix_report", "sample_analyze", "sample_compare"}
+LOCAL_TOOLS = {"audio_analyze", "audio_compare", "mix_report", "reference_profile", "sample_analyze",
+               "sample_compare"}
 
 
 def test_tool_count_matches_registry():
