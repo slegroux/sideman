@@ -489,6 +489,109 @@ restore both afterwards.
 - The numbers describe the difference. Which gaps are real is the user's ear's
   call: on one replica two stem reads were wrong, and the ear won.
 
+### Drum roles
+
+`sideman.drumroles` (needs the `listen` extra; no MCP tool yet) lists the sounds
+inside one drum stem. `hit_groups` finds the hits, puts them on the 16th grid
+and groups the ones that sound alike. `name_roles` then gives each group a name
+and `mark_bleed` marks the groups that are another stem's sound leaking in.
+
+**The names are rules over a group's stem, its pattern and the readings of its
+clean hit. They are not recognition.** A group no rule fits keeps a neutral
+name (`hh 2`: the stem and the group's number) with the reason. A name says
+"this group passed this rule", never "this is a hi-hat". Listen to the clean
+hit before trusting one.
+
+A group is **named only when it is eligible**: at least 4 measured hits,
+`stability` measured (it is not on a stem with no more measured hits than the
+sample of 32, nor for a tentative group) and at least 0.75, and `separation`
+over the grouping threshold (1.5; a lone group has no neighbour and passes).
+Otherwise it keeps the neutral name and the reason says which test it failed.
+The rule is the second review's: on the Flare hats, groups at stability
+0.79-0.91 were the ones the sample did not move, 0.13-0.69 the ones it did.
+
+Pattern: the hits counted are the measured ones and the ones assigned to the
+group under another hit's tail (`assigned` says how many). A 16th is *in use*
+when the group plays there in at least 25 % of the bars it plays in.
+
+| Stem | Name | Rule | Where the number comes from |
+|------|------|------|-----------------------------|
+| hh | `hh offbeat` | at least 90 % of the hits on steps 2, 6, 10, 14 and at least 3 of those 4 in use | 90 %: chosen, a tenth of the hits may be strays or assigned to the wrong 16th; 3 of 4: one offbeat may be taken by the other hat (Flare hh group 0 plays its four offbeats in 56 % to 89 % of the stem's bars) |
+| hh | `hh 16th` | at least 6 of the 8 odd 16ths in use | chosen: a 16th-note hat plays the "e" and "a" of each beat, and 6 of 8 leaves two gaps (4 of 8 let a hat that plays only the "e" of each beat, Flare hh group 2, take the name); an offbeat group has none of them |
+| hh | `hh open` | neither pattern fits and the clean hit falls 20 dB in 140 ms or more | `fall_20_ms` of the 22 closed and open hats of `_PRODUCTION/Drums` that could be measured (below) |
+| snare | `rim` | the clean hit falls 20 dB in under 30 ms | the library's 3 rims: 5, 19 and 28 ms; its other 30 claps and snares: 35 to 167 ms |
+| snare | `snare` | not a rim, and the noise share of the body is at most -1.0 dB (a tone under the noise) | the library: 9 samples (7 snares, 2 labelled clap + snare) read -1.0 to -9.1, the other 14 claps -0.3 to 0 |
+| toms | `tom` | the clean hit is pitched | `profile_array`'s `pitched`; the library's toms are all pitched (53 to 578 Hz) |
+| kick | `kick` | pitched, body at most 70 Hz | the library's 33 kicks: 28 to 56 Hz |
+
+When several roles of one stem are toms they are ranked by body pitch:
+`tom low`, `tom mid`, `tom high` (two toms: low and high; more mids get a
+number). The rank is relative to the other toms in that stem, not a pitch class.
+Two roles that get one name are numbered (`hh offbeat`, `hh offbeat 2`).
+
+**Rules that are not there, and why.**
+
+- **No `hh closed`.** The library's closed hats fall 20 dB in 18 to 130 ms and
+  its open hats in 15 to 269 ms (12 and 10 hats measured; four of the open ones
+  are under 30 ms). Nothing under 140 ms separates them, so a short decay names
+  nothing. Over 140 ms: 0 of 12 closed hats, 5 of 10 open ones.
+- **No `clap`.** Nothing `profile_array` reads separates a noise clap from a
+  noise snare or a stick. The best rule found (noise body and under -20 dB in
+  the 60-250 Hz band) names 9 of the library's 14 claps and 5 samples that are
+  not claps (CMPCT SNAD, FX SNARE, SNARE STICK, STICK, STICK 1): 64 % right. A
+  noise-bodied group in a snare stem stays neutral, with its measurements.
+- **No `conga`.** The library has one conga: it reads unpitched, falls 40 dB in
+  264 ms, inside the toms' 116 to 476 ms, and its high toms (290 to 578 Hz) sit
+  where a conga would. A pitched hit in the toms stem is a `tom`: the word means
+  "pitched, in the toms stem".
+- The snare rule misses 4 of 11 plain snares (noise snares: the body has no
+  tone to read). They stay neutral.
+
+**Two groups that may be one sound.** The grouping cuts a continuum where the
+sample puts the cut (the threshold's own limit, above). Two groups of one name
+that play the same 16ths (cosine of their hits per 16th at least 0.8) and are
+within 1.15 times the threshold (1.73) of each other, one the other's nearest
+group, are reported as **one role with variants** (each variant has its
+decay, level and stability): on Flare two offbeat hat groups 1.54 apart with
+different decays are this. 1.15 is chosen: it takes in the 1.54 and 1.53 of the
+real pair and stays under the 1.77-1.82 at which the three Flare snare groups
+held (stability 0.95-0.98). A group of that kind that is not eligible stays
+neutral, and the role it is near lists it under `possibly_also`.
+
+**Bleed.** Separators leak: a tom fill can sit 20 dB down in the kick stem. A
+group is marked bleed of a group in another stem only when **all three** hold:
+
+1. *Coincidence well over chance.* At least 70 % of its hits fall within 25 ms
+   of a hit of that group, at least 25 points more than the two patterns give by
+   chance, and the chance of so many from the patterns alone is at most 1 %.
+   Chance, for each hit of the group at 16th s: the share of the track's bars
+   (first to last hit of any stem) in which the other group plays at s, at least
+   2 %; the hits taken as independent, `expected` is their mean and the chance
+   of at least as many coincidences is a Poisson-binomial tail. A group that
+   plays the beats against a group that plays every beat coincides every time
+   and the chance rate is 100 %: that is the base rate, and the first builder
+   called such groups bleed from a 96 % coincidence. The three numbers each
+   guard a case: the rate a partial overlap, the margin a long stem where a
+   small excess is "significant", the p value a few hits.
+2. *Louder there.* The other group's hits are louder at the coincident moments
+   (`level_db`, loudest ms) by at least 6 dB in at least 75 % of the pairs. 6 dB
+   is chosen (half the amplitude); on Flare the snare stem's groups are louder
+   than the coincident toms by 3 to 5 dB and the kick stem's second group is
+   4.7 dB under the snare's hits: neither is bleed by level.
+3. *Sounds like it.* The two clean hits are at most 2.0 apart. Chosen between
+   the grouping threshold (1.5: the same sound) and the nearest distinct
+   sounds measured (2.5 over a bleed bed, 2.8 for closed against open hat).
+   Without a clean hit on either side the test is not made and the group is
+   not marked; the evidence says so.
+
+A marked group stays in the output with its `evidence` (hits that coincide,
+`rate`, `expected`, `p`, `louder_db`, `distance`) and is left out of the stem's
+roles. A group that is not marked says which test it failed and the numbers. A
+group with one to three hits can hardly pass the first test: three hits where
+the other plays in a quarter of the bars is a 1.6 % chance. A lone bled hit
+(the Flare replica's 81 Hz hit in the kick stem) is not found this way; it stays
+a neutral group, and its note says why it was not marked.
+
 ## Racks and plug-ins
 
 Two walls, both real, and both worth stating to the user rather than working
