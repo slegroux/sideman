@@ -1,7 +1,7 @@
 """sideman.drumroles.hit_groups on synthetic drum stems at 124 BPM whose answers follow from how they are built.
 
 Needs the `listen` extra:  uv run --extra listen pytest tests/test_drumroles.py -q
-Skipped (not failed) when numpy or soundfile is missing. Four tests that take over 6 s are marked `slow`:
+Skipped (not failed) when numpy or soundfile is missing. Tests that take over 6 s are marked `slow`:
 `-m "not slow"` leaves them out, a plain run includes them.
 
 Conventions used below: bar 0 starts at T0; a 16th is 60 / 124 / 4 s; step 0 is the downbeat, 4 / 8 / 12 are the other
@@ -570,6 +570,7 @@ def test_more_sounds_than_max_groups_leave_the_rest_ungrouped_and_say_so():
     assert sum(g["count"] for g in r["groups"]) + len(left) == len(r["hits"]) == 12
 
 
+@pytest.mark.slow
 def test_bars_0_to_3_alone_and_inside_16_bars_give_the_same_groups_on_separated_sounds():
     big = run(stem(hat_events(16), 16), sections=[{"name": "a", "start_bar": 0, "bars": 4}])
     small = run(stem(hat_events(4), 4))
@@ -1097,9 +1098,11 @@ def test_names_on_a_real_hat_stem_closed_16ths_and_a_short_hat_on_the_offbeats()
     assert [g["count"] for g in by_count] == [48, 16] and all(g["stability"] == 1.0 for g in by_count)
     assert {g["id"]: n for g, n in zip(r["groups"], got)} == {by_count[0]["id"]: "hh 16th", by_count[1]["id"]: "hh offbeat"}
     assert [role["name"] for role in out["roles"]] == ["hh 16th", "hh offbeat"] and all(g["named"] for g in out["groups"])
-    # the same stem asked for no regrouping has no stability: both stay neutral, with the reason
-    quiet = names(run(stem(hat_events(4), 4)), "hh")
-    assert quiet[0] == ["hh 1", "hh 2"] and all("stability is not measured" in g["reason"] for g in quiet[1]["groups"])
+    # the same groups as a result that was not asked for regroupings (stability_runs=0) read: neither is named, with the reason
+    # (the real stability_runs=0 run is in the stable-by-construction test)
+    quiet = {**r, "groups": [{**g, "stability": None, "stability_status": "not asked for"} for g in r["groups"]]}
+    got, out = names(quiet, "hh")
+    assert got == ["hh 1", "hh 2"] and all("stability is not measured" in g["reason"] for g in out["groups"])
 
 
 # ---------------------------------------------------------------- bleed
@@ -1277,6 +1280,27 @@ def test_the_chance_is_reported_over_the_groups_own_bars_too_and_p_is_not_eviden
     ev = drumroles.mark_bleed(bleed_pair(tom_hit() * 0.1, CELLS, -30.0, tom_hit(), CELLS, -10.0))["x"][0]
     assert ev["bleed"] and ev["evidence"]["own_expected"] == ev["evidence"]["expected"] == 0.5 and ev["evidence"]["p_evidence"] is True
     assert "not evidence of leakage" not in ev["why"]
+
+
+def test_a_hit_at_a_16th_the_source_never_plays_still_has_a_chance_of_coinciding():
+    # y's hits sit 21 ms off the 16th line (not on the grid: in no cell), so y never "plays" at x's 16th; each of x's 8 hits still
+    # coincides with one. The chance of each is the floor (2 %), so the chance of all 8 is 0.02 ** 8, small and not 0
+    pair = bleed_pair(tom_hit() * 0.1, CELLS, -30.0, tom_hit(), CELLS, -10.0)
+    for h in pair["y"]["hits"]:
+        h["on_grid"] = False
+        h["onset_s"] += 0.021
+    ev = drumroles.mark_bleed(pair)["x"][0]["evidence"]
+    assert ev["coincide"] == 8 and ev["expected"] == pytest.approx(drumroles.CHANCE_FLOOR)
+    assert ev["p"] == pytest.approx(drumroles.CHANCE_FLOOR ** 8) and ev["p"] > 0
+
+
+def test_the_level_of_the_other_group_is_the_median_of_the_pairs_not_the_mean():
+    # three coincident pairs with the other group 20, 20 and 2 dB louder: median 20, mean 14; 2 of 3 are over the 6 dB asked
+    pair = bleed_pair(tom_hit() * 0.1, CELLS[:3], -30.0, tom_hit(), CELLS[:3], -10.0)
+    for h, level in zip(pair["y"]["hits"], (-10.0, -10.0, -28.0)):
+        h["level_db"] = level
+    ev = drumroles.mark_bleed(pair)["x"][0]["evidence"]
+    assert ev["louder_db"] == pytest.approx(20.0) and ev["louder_share"] == pytest.approx(2 / 3)
 
 
 def split_source_pair(second_audio):
