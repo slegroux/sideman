@@ -61,7 +61,7 @@ class FakeLive:
                  latency_in_take=None, handle_frac=0.5, write_frac=1.0, quantize_beats=4.0, clip_late_beats=0.0,
                  never_plays=False, drop_notes=(), cut_last_ms=None, fail_write=(), raise_on_file=False, first_seed=1000,
                  seed=1, names=None, armed_tracks=(), exclusive_arm=False, record_mode=False, insert_on_fire=None,
-                 flip_playing_at_state=False, fail_setup=False, fail_restore=False, clip_length_cap=None):
+                 flip_playing_at_state=False, fail_setup=False, fail_restore=False, clip_length_cap=None, on_fire=None, unnamed=()):
         self.tmp, self.clock, self.tempo, self.latency, self.jitter = tmp_path, clock, tempo, latency, jitter
         self.lo, self.hi, self.p_spike, self.spike, self.poll_spike, self._next = lo, hi, p_spike, spike, poll_spike, None
         self.latency_in_take, self.handle_frac, self.write_frac = latency_in_take, handle_frac, write_frac
@@ -74,15 +74,16 @@ class FakeLive:
         self.solo = [i in solo for i in range(ntracks)]
         self.arms = [i in armed_tracks for i in range(ntracks)]
         self.arms[2] = bool(armed)
+        self.dev_ptrs = ["ptr-%d" % i for i in range(ntracks)]        # the identity (_live_ptr) of each track's first device parameter
         self.exclusive_arm, self.record_mode, self.insert_on_fire = exclusive_arm, record_mode, insert_on_fire
         self.flip_playing_at_state, self.fail_setup, self.fail_restore = flip_playing_at_state, fail_setup, fail_restore
-        self.clip_length_cap = clip_length_cap
+        self.clip_length_cap, self.on_fire, self.unnamed = clip_length_cap, on_fire, set(unnamed)
         self.fresh_noise, self.drop_notes, self.cut_last_ms = fresh_noise, set(drop_notes), cut_last_ms
         self.fail_write, self.raise_on_file, self.seeds = set(fail_write), raise_on_file, itertools.count(first_seed)
         self.calls, self.writes, self.notes = [], [], []        # writes: (time it lands, {param index: Live value})
         self.clip_t0 = self.clip_t0_used = self.rec_t0 = self.rec_t1 = None
         self.clip_length, self.recorded, self.files, self.in_take = 4.0, {}, 0, False
-        self.deleted, self.transactions = [], 0
+        self.deleted, self.transactions, self.param_transactions, self.refused = [], 0, 0, 0
 
     @property
     def armed(self):
@@ -92,7 +93,9 @@ class FakeLive:
         self.names.insert(at, "NEW")
         self.solo.insert(at, False)
         self.arms.insert(at, False)
-        self.ntracks += 1
+        self.dev_ptrs.insert(at, "ptr-new-%d" % len(self.dev_ptrs))
+        ntracks_before = self.ntracks
+        self.ntracks = ntracks_before + 1
 
     # ---- the wire
     def _tick(self, *what):
@@ -151,7 +154,10 @@ class FakeLive:
             if prop == "name" and path.startswith("live_set tracks ") and " clip_slots " not in path:
                 out.append(ok(self.names[int(path.split()[-1])]))
             elif prop == "name":
-                out.append(ok("take %s" % path.split()[-2]))
+                k = int(path.split()[-2])
+                out.append({"ok": False, "error": "no name"} if k in self.unnamed else ok("take %d" % k))
+            elif prop == "_live_ptr":
+                out.append(ok(self.dev_ptrs[int(path.split()[2])]))
             elif prop == "class_name":
                 out.append(ok("Operator" if self.names[int(path.split()[2])] == "OP" else "Other"))
             elif prop == "solo":
@@ -202,6 +208,8 @@ class FakeLive:
         elif function == "fire" and path == "live_set tracks 1 clip_slots 0":
             self.clip_t0 = self.clip_t0_used = self._boundary(at) + self.clip_late_beats * 60.0 / self.tempo
             self.in_take = True
+            if self.on_fire is not None:
+                self.on_fire(self)                          # the user does something in Live while the take runs
             if self.insert_on_fire is not None:
                 self.insert_track(self.insert_on_fire)
                 self.insert_on_fire = None
@@ -219,25 +227,44 @@ class FakeLive:
         return {}
 
     def transaction(self, ops, **kw):
-        self._tick("transaction", tuple((o["path"], o["property"]) for o in ops))
+        """Ops run in order; with stop_on_error the first failure halts the rest, as Live's transaction does. An op that is
+        a call carrying expect={"id": ...} is the renderer's identity guard: refused (PermissionError) when the device
+        parameter at its path is not the one with that id."""
+        self._tick("transaction", tuple((o["path"], o.get("property") or o.get("function")) for o in ops))
         self.transactions += 1
+        stop = kw.get("stop_on_error", True)
         params, results = {}, []
-        is_restore = any(o["property"] in ("solo", "arm") for o in ops) and not any(o["path"] == CLIP for o in ops)
+        is_restore = any(o.get("property") in ("solo", "arm") for o in ops) and not any(o["path"] == CLIP for o in ops)
         if self.fail_restore and is_restore:
             return {"results": [{"ok": False, "error": "refused"} for _ in ops]}                       # nothing applied
-        for o in ops:
+        has_params = any(o["path"].startswith(DEV + " parameters ") and o.get("property") == "value" for o in ops)
+        failing = has_params and self.param_transactions in self.fail_write
+        if has_params:
+            self.param_transactions += 1
+        for k, o in enumerate(ops):
+            if o.get("op") == "call":
+                want = (o.get("expect") or {}).get("id")
+                if want is not None and self.dev_ptrs[int(o["path"].split()[2])] != want:
+                    self.refused += 1
+                    results.append({"ok": False, "error": "PermissionError: expect does not match"})
+                    if stop:
+                        break
+                    continue
+                results.append({"ok": True})
+                continue
+            fail = (self.fail_setup and o["path"] == CLIP and o["property"] == "looping") or \
+                   (failing and o["path"].startswith(DEV + " parameters ") and not params and not any(r for r in results if r.get("ok") is False))
+            if fail:
+                results.append({"ok": False, "error": "refused"})
+                if stop:
+                    break
+                continue
             got = self._apply(o["path"], o["property"], o["value"], self._write_time)
             if got:
                 params[got[0]] = got[1]
             results.append({"ok": True})
-        if self.fail_setup and any(o["path"] == CLIP for o in ops):
-            results[0] = {"ok": False, "error": "refused"}
         if params:
-            k = len(self.writes)
             self.writes.append((self._write_time, params))
-            if k in self.fail_write:
-                first = len(ops) - len(params)
-                results[first] = {"ok": False, "error": "refused"}
         return {"results": results}
 
     def notes_remove(self, path, **w):
@@ -640,7 +667,50 @@ def test_a_track_inserted_during_a_take_restores_nothing_on_the_wrong_track_and_
     assert not [c for c in after if c[1] == "call" and c[3] == "stop"]                                # no stop on the slot of the wrong track
     assert not [c for c in after if c[1] == "transaction" and any(prop in ("solo", "arm") for _, prop in c[2])]   # no restore
     assert fake.solo[2] is False and fake.solo[3] is True                        # the old record track (now 3) stays soloed: the message says so
-    assert "may still be soloed" in r.takes[0]["cleanup_errors"][0]
+    assert "may still be soloed" in r.takes[0]["cleanup_errors"][0] and r._restore_failed is True
+    # the guard: every parameter write carries the identity op first, and after the insertion NO device write landed:
+    assert len(fake.writes) == 1 and fake.refused == 1                      # candidate 0's, before the clip was fired; the next was refused
+    guards = [c[2][0] for c in fake.calls if c[1] == "transaction" and any(p.startswith(DEV) for p, _ in c[2])]
+    assert guards and all(g == (DEV + " parameters 0", "str_for_value") for g in guards)
+
+
+def raising_n(fake, method, when, excs):
+    """Make fake.<method> raise the exceptions in `excs`, one per matching call, in order."""
+    original, queue = getattr(fake, method), list(excs)
+
+    def wrapper(*a, **k):
+        if queue and when(*a, **k):
+            raise queue.pop(0)
+        return original(*a, **k)
+    setattr(fake, method, wrapper)
+
+
+def test_two_ctrl_c_in_one_cleanup_step_skip_nothing_and_the_error_says_the_transport_may_still_run(tmp_path):
+    """Both tries of stop_playing are interrupted: the restores after it must still run (a cleanup that catches only
+    Exception would stop at the first interrupt), and the raised error says the transport may still be running."""
+    g = guess_of()
+    fake, clock = make(tmp_path, solo={0}, armed=False)
+    raising_n(fake, "call", lambda path, function, *a, **k: function == "stop_playing", [KeyboardInterrupt("one"), KeyboardInterrupt("two")])
+    with pytest.raises(KeyboardInterrupt) as e:
+        renderer(fake, clock, g).render(candidates(g, 4))
+    assert "one" in str(e.value) and "transport may still be running" in str(e.value)
+    assert fake.solo == [True, False, False, False] and fake.armed is False             # solo and arm were restored all the same
+    assert fake.playing is True                                                          # (and the fake shows the transport was not stopped)
+
+
+def test_a_solo_or_arm_the_user_sets_during_a_take_is_not_reverted_and_only_the_takes_own_changes_are_undone(tmp_path):
+    g = guess_of()
+
+    def user(f):
+        f.solo[3] = True                  # the user solos track 3 while the take runs
+        f.arms[0] = True                  # and arms track 0
+    fake, clock = make(tmp_path, solo={0}, on_fire=user)
+    renderer(fake, clock, g).render(candidates(g, 3))
+    assert fake.solo == [True, False, False, True] and fake.arms[0] is True and fake.armed is True
+    # the record track was already soloed and armed: the take changed neither, and the user's un-solo of track 0 stays
+    fake2, clock2 = make(tmp_path / "b", solo={0, 2}, armed=True, on_fire=lambda f: f.solo.__setitem__(0, False))
+    renderer(fake2, clock2, g).render(candidates(g, 3))
+    assert fake2.solo == [False, False, True, False] and fake2.armed is True
 
 
 def test_the_constructor_checks_that_the_device_and_the_clip_share_a_track_and_the_record_track_is_another(tmp_path):
@@ -668,6 +738,15 @@ def test_clear_takes_is_refused_when_a_track_moved_and_deletes_each_clip_with_it
     with pytest.raises(RuntimeError, match="not where they were"):
         r.clear_takes(confirm=True)
     assert len(fake.deleted) == 2
+    unnamed, clock2 = make(tmp_path / "u", filled={0, 1, 2}, unnamed={1})
+    with pytest.raises(RuntimeError, match="could not read the name"):
+        renderer(unnamed, clock2, g).clear_takes(confirm=True)
+    assert unnamed.deleted == []                                              # not even the clips whose names were read
+    bare, clock3 = make(tmp_path / "n", filled={0})
+    nobody = renderer(bare, clock3, g, capture=False)
+    with pytest.raises(RuntimeError, match="nothing was captured"):
+        nobody.clear_takes(confirm=True)
+    assert bare.deleted == []
 
 
 def test_a_missing_note_0_is_rejected_and_never_shifts_the_cuts_onto_the_next_candidates(tmp_path):
@@ -695,27 +774,31 @@ def test_the_first_onset_may_be_late_by_the_time_between_the_fires_when_nothing_
         assert dist(a, b) < 0.01
 
 
-def test_a_shift_as_long_as_a_spacing_needs_every_onset_there_and_a_shift_off_the_grid_is_refused(tmp_path):
+def test_a_shift_as_long_as_a_spacing_needs_an_onset_for_every_note_and_a_shift_off_the_grid_is_refused(tmp_path):
+    """A shift of one spacing is also what a missing note 0 looks like. It is accepted only if every note has an onset where
+    the shift puts it: counting onsets is defeated by one extra (a ghost) in the file."""
     g = guess_of()
     fake, clock = make(tmp_path)
     r = renderer(fake, clock, g)
     hit = standin(standin_from_live(patch.operator_live(g["patch"], g["structure"])), 5)
-    sr, spacing, step = SR, 2.0, 1.0          # a spacing of two grid steps: a missing note 0 looks like a grid shift
+    sr, spacing = SR, 2.0
+    expected = [0.0, 2.0, 4.0, 6.0, 8.0]
 
-    def file(n_hits, first_at):
-        x = np.zeros(int((first_at + spacing * n_hits + 0.5) * sr))
-        for k in range(n_hits):
-            a = int((first_at + k * spacing) * sr)
+    def file(onsets):
+        x = np.zeros(int((max(onsets) + 1.5) * sr))
+        for t in onsets:
+            a = int(t * sr)
             x[a:a + len(hit)] += hit
         return x[:, None]
     take = {"tempo": 60.0, "fire_window_s": 0.2}                   # 60 BPM: one beat is one second, the grid is 1 beat
-    assert r._file_shift(dict(take), file(5, 2.0), sr, 0.0, 5, spacing, 1.0) == pytest.approx(2.0, abs=0.01)      # all 5 onsets: a shift of one spacing
+    assert r._file_shift(dict(take), file([2.0, 4.0, 6.0, 8.0, 10.0]), sr, expected, spacing, 1.0) == pytest.approx(2.0, abs=0.01)   # all five there
+    t = dict(take)                                                                 # note 0 missing: four onsets
+    assert r._file_shift(t, file([2.0, 4.0, 6.0, 8.0]), sr, expected, spacing, 1.0) is None and "no onset near" in t["rejected"]
+    t = dict(take)                                                                 # note 0 missing AND a ghost: five onsets, as many as notes
+    assert r._file_shift(t, file([2.0, 4.0, 5.0, 6.0, 8.0]), sr, expected, spacing, 1.0) is None and "note 4 has no onset" in t["rejected"]
     t = dict(take)
-    assert r._file_shift(t, file(4, 2.0), sr, 0.0, 5, spacing, 1.0) is None and "may be missing" in t["rejected"]  # 4 onsets for 5 notes
-    t = dict(take)
-    assert r._file_shift(t, file(5, 1.5), sr, 0.0, 5, spacing, 1.0) is None and "not a whole number" in t["rejected"]
-    assert r._file_shift(dict(take), file(5, 1.0), sr, 0.0, 5, spacing, 1.0) == pytest.approx(1.0, abs=0.01)      # one step, under a spacing
-    assert step == 1.0
+    assert r._file_shift(t, file([1.5, 3.5, 5.5, 7.5, 9.5]), sr, expected, spacing, 1.0) is None and "not a whole number" in t["rejected"]
+    assert r._file_shift(dict(take), file([1.0, 3.0, 5.0, 7.0, 9.0]), sr, expected, spacing, 1.0) == pytest.approx(1.0, abs=0.01)   # one step, under a spacing
 
 
 def test_the_early_guard_fails_the_previous_candidate_when_the_sync_poll_is_longer_than_the_margin(tmp_path):
@@ -806,9 +889,9 @@ def test_a_ctrl_c_in_the_cleanup_skips_no_other_step_and_the_first_exception_is_
     elif which == "stop":
         raising_once(fake, "call", lambda path, function, *a, **k: function == "stop", boom)
     elif which == "restore":
-        raising_once(fake, "transaction", lambda ops, **k: any(o["property"] == "arm" and o["value"] is False for o in ops), boom)
+        raising_once(fake, "transaction", lambda ops, **k: any(o.get("property") == "arm" and o["value"] is False for o in ops), boom)
     else:                                                  # a Ctrl-C in the 3rd write, and a second one when the slot is stopped
-        raising_once(fake, "transaction", lambda ops, **k: len(fake.writes) == 2 and any(o["path"].startswith(DEV) for o in ops), boom)
+        raising_once(fake, "transaction", lambda ops, **k: len(fake.writes) == 2 and any(o["path"].startswith(DEV) and o.get("property") == "value" for o in ops), boom)
         raising_once(fake, "call", lambda path, function, *a, **k: function == "stop", KeyboardInterrupt("second"))
     with pytest.raises(KeyboardInterrupt) as e:
         renderer(fake, clock, g).render(candidates(g, 6))
@@ -934,7 +1017,7 @@ def test_patch_match_returns_the_error_that_ended_the_run_early(tmp_path):
     fake, clock = make(tmp_path / "x", nslots=3)                 # the probe take and two rounds, then no empty slot
     res = patch.patch_match(str(sample), renderer(fake, clock, g), rounds=6, population=8)
     assert res["error"] and "no empty clip slot" in res["error"] and res["rounds"] < 6
-    assert res["verification_error"] and fake.solo == [False] * 4 and fake.playing is False
+    assert res["verification_error"].startswith("skipped") and fake.solo == [False] * 4 and fake.playing is False
 
 
 def test_patch_match_takes_any_renderer(tmp_path):
