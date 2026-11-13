@@ -8,6 +8,8 @@ The method is a (mu, lambda) evolution strategy with weighted recombination and 
 a round is one batch of `population` renders and there are only about eight rounds, which suits a small
 sample-and-select method with no gradient and no model to fit (a full covariance, as CMA-ES keeps, cannot be
 estimated from so few samples); steps adapt per parameter by whether the selected moves agree in direction.
+The search is judged by the score it reaches, not by the parameters it returns: parameters that trade off against
+each other (a noise layer's decay and level) are not individually recovered.
 Choices that are not obvious from the code:
 
 - A patch is a dict of name -> float. `bounds` maps a name to (low, high) or (low, high, "log"); times and
@@ -45,7 +47,10 @@ tone with a pitch glide and a noise layer, a start 30 % off, 20 seeds, 8 rounds 
   pitch to within 0.3 semitone in 45 to 85 % (its bound is +-0.5). The noise layer is the weak part: its decay
   within 15 % in 55 to 80 % of the runs on those targets (a layer 10 to 12 dB under the tone: 15 % on its
   decay moves the score by about 0.01, one repeat spread), its level within 3 dB in 65 to 95 %. In the
-  failures the two trade off (a longer layer, quieter), and their distance is as low as the truth's own.
+  failures the two trade off (a longer layer, quieter). Re-rendered with noise it never saw (the score a patch
+  keeps is the luckiest of its renders), the final patch scores 0.036 above the true parameters on the kick-like
+  and tom-like targets (3 to 4 repeat spreads) and closes 61 to 94 % of the way from the start's distance to the
+  truth's (report, "Score reached").
   With 40 rounds instead of 8 the same targets reach 88 to 100 %, so this is the budget against the noise of
   the score, not a parameter the score cannot see.
 - A tone masked by noise as loud as itself (the hat-like target, tone at 7 kHz) is one the score cannot see in
