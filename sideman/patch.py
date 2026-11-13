@@ -189,7 +189,8 @@ def _spread(entries: list) -> float | None:
 
 def search(start: dict, bounds: dict, render, target: np.ndarray, sr: int, rounds: int = 8, population: int = 16,
            seed: int = 0, step: dict | None = None, patience: int = 4, min_ms: float = MIN_MS,
-           floor_db: float | None = DIST_FLOOR_DB, scale: str = "mel", match_level: bool = True) -> SearchResult:
+           floor_db: float | None = DIST_FLOOR_DB, scale: str = "mel", match_level: bool = True,
+           probes: list | None = None) -> SearchResult:
     """Refine the patch `start` towards `target` ([n] or [n, channels] at `sr`) for at most `rounds` rounds of
     `population` renders each (see the module docstring for the method).
 
@@ -198,8 +199,12 @@ def search(start: dict, bounds: dict, render, target: np.ndarray, sr: int, round
     `population` patches (all names of `start`, pinned ones included) and must return that many hits at `sr`.
     `step` overrides a parameter's first step (ln units for a log parameter, else the parameter's own); it must
     name searched parameters and be finite and above 0, else ValueError.
+    `probes`: patches rendered once in round 0, in place of the last random candidates (at most population - 1), as
+    candidates like the others: a place the random steps would not reach in time, for example a free noise layer at
+    its lower bound ("off"), which a start at -15 dB and a step of 3 dB leave only slowly (see search_arguments).
+    A probe must have every name of `start` and lie inside the bounds (pinned names are taken from `start`).
     `floor_db`, `scale` and `match_level` go to `oneshot.spectral_distance`. Raises ValueError for a start
-    outside its bounds, a population under 2, a bad `step`, or a render that returns the wrong number of hits;
+    outside its bounds, a population under 2, a bad `step`, a bad probe, or a render that returns the wrong number of hits;
     RuntimeError when no render ever scored. An exception from `render` ends the search with the rounds before
     it: the result carries it in `error` (and `failures` a whole-batch entry with index None); when nothing had
     scored yet it is raised."""
@@ -217,6 +222,18 @@ def search(start: dict, bounds: dict, render, target: np.ndarray, sr: int, round
             raise ValueError("step[%r] = %r must be a finite number above 0" % (nm, v))
     sigma = np.array([min(first.get(nm, STEP_LOG if lg else STEP_LIN * sp), STEP_MAX * sp)
                       for nm, lg, sp in zip(space.names, space.log, space.span)], dtype=float)
+    probe_u = []
+    if probes and len(probes) > population - 1:
+        raise ValueError("at most population - 1 = %d probes, got %d" % (population - 1, len(probes)))
+    for pr in probes or ():
+        miss = [nm for nm in start if nm not in pr]
+        if miss:
+            raise ValueError("a probe lacks %s" % miss)
+        u = space.to_u(pr)
+        tol = 1e-9 * (1.0 + np.abs(space.span))
+        if np.any(u < space.lo - tol) or np.any(u > space.hi + tol):
+            raise ValueError("a probe lies outside the bounds: %r" % (pr,))
+        probe_u.append(np.clip(u, space.lo, space.hi))
     mu = max(1, int(population * MU_FRAC))
     w = np.log(mu + 0.5) - np.log(np.arange(1, mu + 1))
     w = w / w.sum()
@@ -235,6 +252,8 @@ def search(start: dict, bounds: dict, render, target: np.ndarray, sr: int, round
         for zi in z:
             u = space.reflect(mean + sigma * zi)
             cands.append({"patch": space.to_patch(u, start), "u": u, "scores": []})
+        if r == 0 and probe_u:
+            cands[len(cands) - len(probe_u):] = [{"patch": space.to_patch(u, start), "u": u, "scores": []} for u in probe_u]
         incumbent = best
         try:
             out = render([dict(best["patch"])] + [dict(c["patch"]) for c in cands])
@@ -738,8 +757,12 @@ def operator_guess(profile: dict) -> dict:
 
 
 def search_arguments(guess: dict, units: dict | None = None) -> dict:
-    """The `start` and `bounds` arguments of `search` from an operator_guess result: start is the guess's patch,
-    bounds the guess's free parameters; every other name is pinned (rendered as given, never changed). With a
+    """The `start`, `bounds` and `probes` arguments of `search` from an operator_guess result: start is the guess's
+    patch, bounds the guess's free parameters; every other name is pinned (rendered as given, never changed).
+    `probes` holds one patch, the start with a free noise level at its lower bound (off), when the guess has one: a
+    layer without evidence may be a phantom, and a start at -15 dB with a step of 3 dB reaches "off" too slowly and
+    leaves a remnant at -30 to -40 dB (measured: report, "phantom layers"); rendered once in round 0 it is
+    chosen at once when the layer is a phantom and dropped when it is real. With a
     units table, each bound is pulled in toward the start (halving the distance, up to 30 times) until the voice
     at that bound converts through to_live: one candidate out of the table's range would stop the search
     (a render that raises ends it), so the search is never offered one. Raises ValueError when the start itself
@@ -748,7 +771,7 @@ def search_arguments(guess: dict, units: dict | None = None) -> dict:
     not checked: 2^n voices for n free parameters, and pulling in one bound at a time would not say which to pull."""
     start, bounds = dict(guess["patch"]), dict(guess["free"])
     if units is None:
-        return {"start": start, "bounds": bounds}
+        return {"start": start, "bounds": bounds, **_off_probe(start, bounds)}
 
     def converts(patch: dict) -> bool:
         try:
@@ -771,7 +794,14 @@ def search_arguments(guess: dict, units: dict | None = None) -> dict:
                 v = start[name]
             lo, hi = (v, hi) if end == 0 else (lo, v)
         bounds[name] = (lo, hi, scale)
-    return {"start": start, "bounds": bounds}
+    return {"start": start, "bounds": bounds, **_off_probe(start, bounds)}
+
+
+def _off_probe(start: dict, bounds: dict) -> dict:
+    """{"probes": [the start with the noise level at its lower bound]} when that level is searched, else {}."""
+    if "noise_level_ref_db" not in bounds:
+        return {}
+    return {"probes": [dict(start, noise_level_ref_db=bounds["noise_level_ref_db"][0])]}
 
 
 def operator_live(patch: dict, structure: dict) -> dict:

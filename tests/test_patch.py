@@ -1092,3 +1092,34 @@ def test_the_end_to_end_stand_in_reads_pe_decay_by_the_amp_envelopes_constant():
          "tone_level_db": 0.0, "output_db": -6.0}
     st = {"tone_on": True, "noise_on": False, "pitch_env_on": True, "filter_on": False}
     assert standin_from_live(patch.operator_live(q, st))["pitch_tau"] == pytest.approx(0.040, rel=1e-3)
+
+
+# ---- review round 2, phantom layers: a free noise layer without evidence, searched against a target with and
+# ---- without noise (every candidate played through operator_live and standin_from_live, fresh noise per render)
+
+def test_search_renders_its_probes_in_round_0_in_place_of_the_last_candidates_and_checks_them():
+    true = TRUE["tom"]
+    bounds = bounds_for(true)
+    start = start_for(true)
+    probe = dict(start, noise_db=-60.0, decay=0.2)
+    render = Capture()
+    patch.search(start, bounds, render, standin(true, TARGET_SEED), SR, rounds=2, probes=[probe])
+    assert [len(b) for b in render.seen] == [16, 16]
+    assert render.seen[0][-1] == pytest.approx(probe) and render.seen[0][0] == start
+    assert not any(p == pytest.approx(probe) for p in render.seen[1][1:])
+    for bad, match in ((dict(probe, noise_db=-61.0), "outside the bounds"), ({k: v for k, v in probe.items() if k != "decay"}, "lacks")):
+        with pytest.raises(ValueError, match=match):
+            patch.search(start, bounds, Renderer(), standin(true, TARGET_SEED), SR, rounds=1, probes=[bad])
+    with pytest.raises(ValueError, match="at most"):
+        patch.search(start, bounds, Renderer(), standin(true, TARGET_SEED), SR, rounds=1, probes=[probe] * 16)
+
+
+def test_search_arguments_offers_the_noise_layer_at_its_lower_bound_as_a_probe_only_when_its_level_is_free():
+    free = patch.operator_guess(reading(noise_db={"attack": -15.0, "body": None}, click_db=-50.0, flatness={"attack": 0.0, "body": 0.0}))
+    args = patch.search_arguments(free)
+    assert args["probes"] == [dict(args["start"], noise_level_ref_db=patch.NOISE_OFF_DB)]
+    pinned = patch.operator_guess(reading(noise_db={"attack": -10.0, "body": None}, click_db=-10.0))
+    assert "probes" not in patch.search_arguments(pinned) and "probes" not in patch.search_arguments(patch.operator_guess(reading()))
+    narrow = dict(GENEROUS, **{"Osc-B Level": [[0.0, -30.0, "dB"], [1.0, 0.0, "dB"]]})
+    pulled = patch.search_arguments(free, narrow)
+    assert pulled["probes"][0]["noise_level_ref_db"] == pulled["bounds"]["noise_level_ref_db"][0] > patch.NOISE_OFF_DB
