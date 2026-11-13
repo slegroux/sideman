@@ -1,7 +1,8 @@
 """sideman.drumroles.hit_groups on synthetic drum stems at 124 BPM whose answers follow from how they are built.
 
 Needs the `listen` extra:  uv run --extra listen pytest tests/test_drumroles.py -q
-Skipped (not failed) when numpy or soundfile is missing.
+Skipped (not failed) when numpy or soundfile is missing. Three tests that take over 6 s are marked `slow`:
+`-m "not slow"` leaves them out, a plain run includes them.
 
 Conventions used below: bar 0 starts at T0; a 16th is 60 / 124 / 4 s; step 0 is the downbeat, 4 / 8 / 12 are the other
 beats, and the offbeats ("and" of each beat) are steps 2, 6, 10, 14, so `s % 4 == 2`. Every hit has its own noise seed
@@ -441,6 +442,7 @@ def test_one_tom_with_a_third_of_a_semitone_of_jitter_stays_one_group():
 
 # ---------------------------------------------------------------- stability, tentative groups
 
+@pytest.mark.slow
 def test_well_separated_sounds_are_stable_and_a_decay_continuum_is_not():
     r = run(stem(hat_events(4), 4), stability_runs=2)
     assert [g["stability"] for g in r["groups"]] == [1.0, 1.0] and not any(g["tentative"] for g in r["groups"])
@@ -801,6 +803,7 @@ def test_names_leave_out_a_group_marked_as_bleed_and_it_stays_in_the_output():
     assert g["bleed"] and g["role"] is None and not g["named"] and "marked as bleed: it is a copy" in g["reason"]
 
 
+@pytest.mark.slow
 def test_names_on_a_real_hat_stem_closed_16ths_and_a_short_hat_on_the_offbeats():
     # 3 bars of hat_events: a tau 25 ms hat on the offbeats, tau 5 ms on the other 16ths (48 measured hits, so the sample
     # moves and stability is measured); two sounds 2.9 apart. The offbeat hat falls 20 dB in 60 ms: not "open" (140 ms)
@@ -817,6 +820,7 @@ def test_names_on_a_real_hat_stem_closed_16ths_and_a_short_hat_on_the_offbeats()
 
 # ---------------------------------------------------------------- bleed
 
+@pytest.mark.slow
 def test_a_tom_fill_copied_20_db_down_into_a_kick_stem_is_marked_bleed_and_the_kick_stem_keeps_one_role():
     # 9 bars. Kick stem: a 45 Hz kick on steps 0 and 8 of every bar (18 hits). Toms stem: a 150 Hz tom on steps 4 and 12 of
     # bars 1, 3, 5 and 7 (8 hits). The kick stem also holds the same toms 20 dB down: copies of those hits

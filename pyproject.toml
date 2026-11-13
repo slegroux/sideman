@@ -31,3 +31,4 @@ select = ["F", "E4", "E7", "E9"]
 # pytest's default keeps the last three runs. Keep only failed tests' files.
 tmp_path_retention_policy = "failed"
 tmp_path_retention_count = 1
+markers = ["slow: takes over 6 s (real audio through hit_groups with regrouping); deselect with -m \"not slow\", runs by default"]
