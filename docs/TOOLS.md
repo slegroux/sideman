@@ -661,7 +661,7 @@ LOM path; hit_a / hit_b pick a hit from a take holding several (see
 sample_analyze, also for "clean"; by default the first that is not cut off).
 
 Returns both sample_analyze profiles, `diff` (a - b: pitch in semitones,
-times as {"ms", "ratio" a/b}, levels in dB, width) and `readings`: one
+times as {"ms", "ratio" a/b}, levels in dB, width), `distance` (below) and `readings`: one
 plain line per difference past its threshold, largest first, such as
 "body pitch 2.1 st below the reference" or "falls 20 dB in 80 ms,
 reference 140 ms (43 % shorter)". Thresholds: body pitch 0.3 st, pitch
@@ -677,8 +677,24 @@ the other bands. Starts read at different times are compared from the
 later one; two pitches an octave or a twelfth apart on the same partials
 are one line. Level, leading silence and a 44.1/48/96 kHz rate give no
 reading (at 22.05 kHz the highs are empty and read low). Change the patch,
-record again, compare again until `readings` is empty. Local only; needs
-the `listen` extra.
+record again, compare again until `readings` is empty.
+
+`distance` is one number for how far apart the two hits sound: the
+multi-resolution STFT distance (Yamamoto et al. 2019, with the default
+settings of its PyTorch reference: FFT 512/1024/2048, spectral convergence
+plus mean log-magnitude difference, averaged over the three), symmetric in
+a and b. 0 is the same
+hit; measured on synthetic drums, a decay 25 % longer reads about 0.2, a
+semitone 0.3, a kick against a hat 3.7. The hits are first aligned on
+their onsets, scaled to the same loudest-1-ms level, and compared over
+the longer of the two (at most 2 s), the shorter counting as silent after
+its end, so a longer tail costs. Hits at different sample rates are compared at the
+lower. `distance_terms` splits it into `convergence` (loud parts: body,
+pitch) and `log_magnitude` (quiet parts: tail, noise floor, highs) and
+gives the length compared. It says how far, not what differs: `readings`
+say what. null with `distance_note` when it cannot be computed (a hit
+under 1025 samples after its onset); the readings are still given.
+Local only; needs the `listen` extra.
 
 ## Other
 

@@ -269,6 +269,32 @@ thresholds, not that they are identical. Two drops whose starts were read at
 different times are compared from the later one; two pitches an octave or a
 twelfth apart on the same partials are one line, not a pitch difference.
 
+`sample_compare` also returns `distance`: one number for how far apart two
+hits sound, the score an optimiser can minimise when matching a synth patch
+to a sample. It is `auraloss`'s `MultiResolutionSTFTLoss` with its default
+settings, rewritten in numpy: at FFT sizes 512, 1024 and 2048 (windows of
+240, 600 and 1200 samples), spectral convergence (how much of the loud
+spectrum differs) plus the mean log-magnitude difference (how much of the quiet
+spectrum differs: tail, noise floor, highs), averaged over the sizes and split
+in `distance_terms`. It is symmetric in the two hits (auraloss divides by the
+target alone; here it is the mean of both divisions). Before measuring, what
+is not timbre is equalised: DC removed, the two onsets aligned, both scaled to
+the same loudest 1 ms (its RMS, not the sample peak, which one click would
+set), and both cut to the longer of the two (at most 2 s), the shorter counting
+as silent after its end, so a longer tail on one side costs. A hit at another
+sample rate is compared at the lower rate. On synthetic drums (a 200 Hz tone
+with two harmonics, a kick with a pitch glide, a noise hat), 0 is the same hit, also read
+5 ms late or at another gain (under 1e-9); 0.014 is the same tone started
+between two samples; 0.19 is a decay 25 % longer (tau 50 against 40 ms) and
+0.79 one 2.5 times longer; 0.29 is one semitone and 0.94 seven; 0.18 is noise
+60 dB under the tone and 1.9 noise at 20 dB under; 3.7 is a kick against a hat.
+It says how far apart two hits are and not which property differs: for that
+read `readings`. It counts the raw level too when asked (`match_level=False` in
+`oneshot.spectral_distance`), and the windows are in samples, so a score is
+comparable between files at one sample rate, not between 44.1 and 96 kHz.
+A tail that ends in digital silence on one side and in a noise floor on the
+other costs through the log term, even where both are inaudible.
+
 **Limits** (known, not yet handled):
 
 - A file's own noise floor is not measured: a hit recorded quietly (say
