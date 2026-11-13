@@ -660,12 +660,14 @@ def fake_result(specs, n_bars=8, threshold=drumroles.THRESHOLD):
     stability, separation, nearest, assigned (steps whose hits count as assigned, not measured), hidden / unmeasured
     ((bar, step) cells with no hit that are listed as hidden under a tail / as holding an unmeasured hit), read (the audio of the
     members the measurement rules read, as `hit_groups` keeps them; without it the clean hit is the one member read), cells (the
-    (bar, step) pairs the group plays at, instead of steps x bars)}. Group i has id i; its hits sit exactly on the 16th of every
+    (bar, step) pairs the group plays at, instead of steps x bars), tail_db (the level of the tails over the `hidden` cells, dBFS; a
+    group's `level` is -10 unless given; without it the result has no tail levels and every hidden cell hides)}. Group i has id i; its hits sit exactly on the 16th of every
     bar in `bars` at each step."""
-    hits, groups, hidden, unmeasured = [], [], [], []
+    hits, groups, hidden, unmeasured, tails = [], [], [], [], {}
     for gid, s in enumerate(specs):
         members, assigned = [], []
         hidden += [list(c) for c in s.get("hidden", [])]              # (bar, step) cells the group is not seen in: under a tail
+        tails.update({tuple(c): s["tail_db"] for c in s.get("hidden", []) if "tail_db" in s})   # (the level of that tail, if given)
         unmeasured += [list(c) for c in s.get("unmeasured", [])]      # ...or held an unmeasured hit
         for b, st in s.get("cells") or [(b, st) for b in s.get("bars", range(n_bars)) for st in s["steps"]]:
             if (b, st) in s.get("hidden", ()) or (b, st) in s.get("unmeasured", ()):
@@ -689,7 +691,8 @@ def fake_result(specs, n_bars=8, threshold=drumroles.THRESHOLD):
             "clean_note": "none of the members tried is complete" if audio is None else None,
             **({} if read is None else {"read_members": read})})
     return {"sample_rate": SR, "tempo": BPM, "t0": T0, "threshold": threshold, "hits": hits, "groups": groups,
-            "bars": n_bars, "first_bar": 0, "hidden_cells": sorted(hidden), "unmeasured_cells": sorted(unmeasured)}
+            "bars": n_bars, "first_bar": 0, "hidden_cells": sorted(hidden), "unmeasured_cells": sorted(unmeasured),
+            **({"hidden_tail_db": [tails.get(tuple(c), 0.0) for c in sorted(hidden)]} if tails else {})}
 
 
 OFFBEATS, ODDS = [2, 6, 10, 14], [1, 3, 5, 7, 9, 11, 13, 15]
@@ -773,6 +776,35 @@ def test_the_density_is_read_over_the_bars_a_16th_could_be_seen_in_not_over_all_
     flat = fake_result([{"cells": [(b, ODDS[(k + 3 * b) % 8]) for b in range(40) for k in range(2)] + [(b, 11) for b in range(40)],
                          "audio": noise_hit(1, 0.005)}], n_bars=40)
     assert names(flat, "hh")[0] == ["hh 1"]
+
+
+def test_a_cell_under_a_quiet_tail_is_not_hidden_for_a_group_whose_hit_would_have_risen_out_of_it():
+    # a hat with 2 hits a bar rotating over the odd 16ths, 16 bars: each odd 16th played in 4 bars. Every empty odd line lies under a
+    # tail. Under a tail 30 dB under the group's own level (-10 dBFS) a hit of the group would have been found: the cells are seen and
+    # empty, the density is 2.0 and it is not a 16th hat. Under a tail within 15 dB of its level they are hidden: 4 of 4 bars at every
+    # odd 16th, density 8.0, named (the rule counts what could be seen)
+    cells = [(b, ODDS[(2 * b + k) % 8]) for b in range(16) for k in (0, 1)]
+    empty = [(b, st) for b in range(16) for st in ODDS if (b, st) not in set(cells)]
+
+    def read(**kw):
+        r = fake_result([{"cells": cells, "audio": noise_hit(1, 0.005), "hidden": empty, **kw}], n_bars=16)
+        out = drumroles.name_roles(r, "hh")
+        return out["groups"][0]["name"], out["groups"][0]["measures"]["density"]["odd_density"], out
+    name, density, out = read(tail_db=-40.0)
+    assert (name, density) == ("hh 1", 2.0) and out["groups"][0]["measures"]["unknown_steps"] == []
+    assert all(row["observable_bars"] == 16 for row in out["groups"][0]["measures"]["steps"] if row["step"] % 2)
+    name, density, _ = read(tail_db=-20.0)
+    assert (name, density) == ("hh 16th", 8.0)
+    # the exact limit: a hit rises RISE_DB (15 dB) out of a tail 15 dB under it and is found; 14.9 dB under, it is not
+    assert read(tail_db=-25.0)[:2] == ("hh 1", 2.0) and read(tail_db=-24.9)[:2] == ("hh 16th", 8.0)
+    # a result with no tail levels hides every cell, as before
+    r = fake_result([{"cells": cells, "audio": noise_hit(1, 0.005), "hidden": empty}], n_bars=16)
+    assert "hidden_tail_db" not in r and drumroles.name_roles(r, "hh")["groups"][0]["name"] == "hh 16th"
+    # with grid_onsets on, a hit is found out of a 6 dB rise (the line is looked at): 5.9 dB under hides it, 6.0 does not
+    for tail, want in ((-16.0, "hh 1"), (-15.9, "hh 16th")):
+        r = fake_result([{"cells": cells, "audio": noise_hit(1, 0.005), "hidden": empty, "tail_db": tail}], n_bars=16)
+        r["grid_onsets"] = True
+        assert drumroles.name_roles(r, "hh")["groups"][0]["name"] == want, tail
 
 
 def test_names_judge_a_step_over_the_bars_it_could_be_seen_in_closed_hats_under_an_open_hats_tail():
@@ -899,9 +931,12 @@ def test_observable_cells_of_a_real_stem_are_the_hidden_and_unmeasured_lines():
     assert off["bars"] == 8 and off["first_bar"] == 0 and off["unmeasured_cells"] == []
     assert {(b, s) for b, s in off["hidden_cells"] if s in (3, 7, 11, 15)} == {(b, s) for b in range(8) for s in (3, 7, 11, 15)}
     assert all(off["hidden_pattern"][s] == len({b for b, c in off["hidden_cells"] if c == s}) / 8 for s in range(16))
+    # every hidden cell has the level of the tail there (an open hat of tau 120 ms, 121 ms on: about -9 dB under its own peak, which is
+    # a few dB under the closed hats' level: inside the 15 dB that hides them)
+    assert len(off["hidden_tail_db"]) == len(off["hidden_cells"]) and all(isinstance(v, float) for v in off["hidden_tail_db"])
     on = run(stem(ev, 8), grid_onsets=True)
     lost = {(h["bar"], h["step"]) for h in on["hits"] if h["on_grid"] and h["status"] in ("overlapped", "too_short", "no_lead", "ungrouped", "faint")}
-    assert lost and {tuple(c) for c in on["unmeasured_cells"]} == lost
+    assert lost and {tuple(c) for c in on["unmeasured_cells"]} == lost and len(on["unmeasured_tail_db"]) == len(on["unmeasured_cells"])
     assert all(on["unmeasured_pattern"][s] == len({b for b, c in on["unmeasured_cells"] if c == s}) / 8 for s in range(16))
     # a section carries its own
     sec = run(stem(ev, 8), sections=[{"name": "b", "start_bar": 4, "bars": 4}])["sections"][0]

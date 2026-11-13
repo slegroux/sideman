@@ -524,8 +524,9 @@ group under another hit's tail (`assigned` says how many). A 16th is *in use*
 when the group plays there in at least 25 % of the bars it plays in **that it could
 be seen in**. A bar does not count for a 16th when the line fell inside another
 hit's tail with no hit found at it (`hidden_cells`: a closed hat under an open
-hat's tail cannot be seen playing there), or held an on-grid hit that was not
-measured (`unmeasured_cells`: it may have been this group's), and the group does
+hat's tail cannot be seen playing there, **if the tail is within 15 dB of the
+group's own level**: a hit under a quieter tail would have risen out of it and been
+found), or held an on-grid hit that was not measured (`unmeasured_cells`: it may have been this group's), and the group does
 not play there. Without that, a hat that plays every "a" but is hidden in three
 bars of four reads 25 %. A 16th observable in fewer than 4 bars is *unknown*: it
 counts neither for nor against, and a name given with unknown 16ths says how many
@@ -568,15 +569,26 @@ limit, and over its members the readings were 6 snare, 5 rim, 3 neither, so the
 name `snare` was a coin toss. A tom's rank is the median pitch of the members
 that read pitched.
 
-**The density is read like the step shares.** "Hits a bar" on the odd 16ths or
-the offbeats is the sum, over the *known* 16ths of that kind, of each one's share of
-the bars it could be seen in (a hit hidden under another hit's tail, or held by an
-unmeasured hit, is not a miss; an unknown 16th adds nothing, and the known-16ths
-floors already cover those). Counted over all the group's bars a hat whose "e"
-steps sit under an open hat's tail in most bars read under 4 although every bar in
-which they could be seen has them. The role's `density` gives both figures:
-`odd_per_bar` / `off_per_bar` over all the group's own bars, and `odd_density` /
-`off_density`, which the rules read.
+**The density is read like the step shares, over cells a hit of the group could
+not have been found in.** "Hits a bar" on the odd 16ths or the offbeats is the sum,
+over the *known* 16ths of that kind, of each one's share of the bars it could be
+seen in (an unknown 16th adds nothing, and the known-16ths floors already cover
+those). A cell is not seen **for a group** when it held a hit that was not measured
+(it may have been the group's), or when its line fell inside another hit's tail
+with no hit found AND that tail is within 15 dB (`RISE_DB`, the rise
+`oneshot._segments` needs to find a hit; 6 dB with `grid_onsets`, which looks at the
+line) of the group's own level: only then would a hit of the group have stayed
+hidden. A tail more than 15 dB under the group's level is no cover: a hit of the
+group would have risen out of it and been found, so the cell is seen and empty.
+`hit_groups` gives each hidden cell the level of the tail there (`hidden_tail_db`,
+`unmeasured_tail_db`, aligned with the cells). The first version counted every
+cell under any tail within 40 dB of its hit as hidden; empty cells under quiet
+tails were set aside while played cells stayed counted, which inflated the shares
+and the density (a hat playing 2 hits a bar, with every empty odd line under a quiet
+tail, read 8.0 a bar and was named `hh 16th`; on Flare 78 of the 83 "hidden" odd
+cells of hh group 1 lay under a tail more than 15 dB under it). The role's `density`
+gives both figures: `odd_per_bar` / `off_per_bar` over all the group's own bars,
+and `odd_density` / `off_density`, which the rules read.
 
 When several roles of one stem are toms they are ranked by body pitch:
 `tom low`, `tom mid`, `tom high` (two toms: low and high; more mids get a

@@ -506,11 +506,18 @@ def _scope(x: np.ndarray, sr: int, hits: list, found: list, hidden: set, ids: se
     lost = [h for h in (hits[i] for i in ids) if h["on_grid"] and first <= h["bar"] < first + bars and h["status"] in (
         "overlapped", "too_short", "no_lead", "ungrouped", "faint")]
     pat = lambda hs: [len({h["bar"] for h in hs if h["step"] == s}) / bars if bars else 0.0 for s in range(steps)]  # noqa: E731
+    cells_h = sorted(c for c in hidden if first <= c[0] < first + bars)
+    tail_u = {}                  # the level of the tail an unmeasured hit started out of (its level and its lead), None when unknown
+    for h in lost:
+        db = None if h["level_db"] is None or h["lead_db"] is None else round(h["level_db"] + h["lead_db"], 1)
+        c = (h["bar"], h["step"])
+        tail_u[c] = db if c not in tail_u or tail_u[c] is None else tail_u[c] if db is None else max(db, tail_u[c])
+    cells_u = sorted(tail_u)
     return {"hits": len(ids), "bars": bars, "first_bar": first, "groups": groups, "unmeasured_pattern": pat(lost),
             "hidden_pattern": [len({b for b in range(first, first + bars) if (b, s) in hidden}) / bars if bars else 0.0
                                for s in range(steps)],
-            "hidden_cells": sorted([b, s] for b, s in hidden if first <= b < first + bars),
-            "unmeasured_cells": sorted([b, st] for b, st in {(h["bar"], h["step"]) for h in lost}),
+            "hidden_cells": [[b, s] for b, s in cells_h], "hidden_tail_db": [hidden[c] for c in cells_h],
+            "unmeasured_cells": [[b, st] for b, st in cells_u], "unmeasured_tail_db": [tail_u[c] for c in cells_u],
             "unmeasured": [{"hit": i, "status": hits[i]["status"], "reason": hits[i]["reason"]}
                            for i in sorted(ids) if hits[i]["status"] not in ("grouped", "assigned")]}
 
@@ -572,7 +579,7 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     Returns {"sample_rate", "tempo", "t0", "threshold", "linkage": "average", "max_cut_s", "grid_onsets", "hat_like"
     (the share of the stem's energy above 4 kHz), "grid_hits" (hits found by `grid_onsets`), "hits", "groups",
     "unmeasured_pattern", "hidden_pattern", "unmeasured", "sections", "notes", "bars", "first_bar", "hidden_cells",
-    "unmeasured_cells"}.
+    "unmeasured_cells", "hidden_tail_db", "unmeasured_tail_db"}.
     A hit is {"id", "source" ("segment" or "grid"), "onset_s", "bar", "step" (16th, 0-15, of the nearest grid line),
     "offset_ms" (onset minus that line), "on_grid" (within 20 ms of it), "level_db" (loudest ms, dBFS), "lead_db" (the
     10 ms before the hit against its loudest ms; None at the start of the stem), "through" (16th lines inside its cut
@@ -617,7 +624,10 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     is what is left after the search. The same two, per bar rather than per 16th, for the roles' judgement of which steps a
     group could be seen playing at: `first_bar` and `bars` (the scope: the bars from the first real hit's, or the
     section's) and `hidden_cells` / `unmeasured_cells`, the [bar, step] pairs that were hidden under a tail, or held an
-    on-grid hit that was not measured (the statuses of `unmeasured_pattern`). The sections carry their own."""
+    on-grid hit that was not measured (the statuses of `unmeasured_pattern`); `hidden_tail_db` and `unmeasured_tail_db`
+    are, cell by cell, the level of the tail there (the 1 ms at the line, dBFS, the scale of a hit's `level_db`; for an unmeasured
+    hit the level of the tail it started out of, None when unknown). Whether a hidden cell hides a given group is `name_roles`'s
+    judgement: only when the tail is within the rise `_segments` needs of that group's level (see `_use`). The sections carry their own."""
     if not (tempo > 0 and math.isfinite(tempo)) or not math.isfinite(t0):
         raise ValueError("tempo must be above 0 and t0 a number of seconds, got %r and %r" % (tempo, t0))
     if beats_per_bar < 1 or sample < 2 or max_groups < 1 or threshold <= 0 or stability_runs < 0:
@@ -641,7 +651,7 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     out = {"sample_rate": sr, "tempo": tempo, "t0": t0, "threshold": threshold, "linkage": "average",
            "max_cut_s": max_cut_s, "grid_onsets": grid_onsets, "hat_like": None, "grid_hits": 0, "hits": [],
            "groups": [], "unmeasured_pattern": [], "hidden_pattern": [], "unmeasured": [], "sections": [], "notes": [],
-           "bars": 0, "first_bar": 0, "hidden_cells": [], "unmeasured_cells": []}
+           "bars": 0, "first_bar": 0, "hidden_cells": [], "unmeasured_cells": [], "hidden_tail_db": [], "unmeasured_tail_db": []}
     if not len(x) or float(np.abs(x).max()) <= 0:
         out["notes"].append("the stem is silent: no hits")
         return out
@@ -684,9 +694,10 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
             i = int(round((t0 + n * step_s) * sr)) - o
             if i + frame > len(cut) - glead:
                 break
-            if i > glead and float((cut[i:i + frame] ** 2).mean()) >= loud * 10 ** (-THROUGH_DB / 10):
+            at_line = float((cut[i:i + frame] ** 2).mean())
+            if i > glead and at_line >= loud * 10 ** (-THROUGH_DB / 10):
                 h["through"] += 1
-                tails.setdefault(k, []).append(n)
+                tails.setdefault(k, []).append((n, round(10.0 * math.log10(max(at_line, 1e-12)), 1)))
         if nxt - o < int(round(MIN_CUT_S * sr)):
             h["status"], h["reason"] = "too_short", "the next hit starts %.0f ms after it (under %.0f ms)" % (
                 1000 * (nxt - o) / sr, 1000 * MIN_CUT_S)
@@ -752,12 +763,15 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     out["hits"] = hits
     if not hits:
         return out
-    hidden = {divmod(n, steps) for ns in tails.values() for n in ns}      # a tail's cut ends at the next hit: no line with a hit
+    hidden = {}                                  # (bar, step) -> the tail's level there (dBFS, loudest-ms scale of `level_db`)
+    for ns in tails.values():                    # a tail's cut ends at the next hit: no line with a hit
+        for n, db in ns:
+            hidden[divmod(n, steps)] = max(db, hidden.get(divmod(n, steps), -math.inf))
     real = [h["bar"] for h in hits if h["status"] not in ("faint", "silent", "no_lead")]
     first, last = (min(real), max(real)) if real else (0, 0)
     whole = _scope(x, sr, hits, found, hidden, {h["id"] for h in hits}, first, last - first + 1, steps)
     out.update({k: whole[k] for k in ("groups", "unmeasured_pattern", "hidden_pattern", "unmeasured", "bars", "first_bar",
-                                      "hidden_cells", "unmeasured_cells")})
+                                      "hidden_cells", "unmeasured_cells", "hidden_tail_db", "unmeasured_tail_db")})
     for sec in sections or []:
         a, b = sec["start_bar"], sec["start_bar"] + sec["bars"]
         got = _scope(x, sr, hits, found, hidden, {h["id"] for h in hits if a <= h["bar"] < b}, a, sec["bars"], steps)
@@ -776,16 +790,25 @@ def _use(result: dict, g: dict) -> dict:
     (their number) and "steps", one row per 16th: the bars the group plays there (`played`), the bars in which that
     16th could be seen (`observable`), and the shares of the group's own bars (every bar it has a hit in) and of the
     observable ones. A bar is not observable at a 16th when the line fell inside another hit's tail with no hit found
-    at it (`hidden_cells`: a hat hidden under an open hat's tail cannot be seen playing there), or held an on-grid hit
-    that was not measured (`unmeasured_cells`: overlapped, too short, without a lead, faint or ungrouped; it may be this
-    group's), and the group does not play there. Only the group's own bars count (the bars in which it plays at
+    at it AND the tail there is within the rise a hit needs to be found (oneshot.RISE_DB, 15 dB; GRID_RISE_DB with
+    `grid_onsets`) of the group's own level (`hidden_cells` with `hidden_tail_db`: a hat hidden under an open hat's tail
+    cannot be seen playing there, but one that rises 15 dB or more out of a quiet tail would have been found: the cell is
+    seen and empty), or held an on-grid hit that was not measured (`unmeasured_cells`: overlapped, too short, without a
+    lead, faint or ungrouped; it may be this group's, whatever the tail), and the group does not play there. Only the group's own bars count (the bars in which it plays at
     all), as in `bars_with`, so a group that lives in one section is judged over that section. A 16th observable in
     fewer than OBSERVE_MIN bars is "unknown"; otherwise "in use" when its share of observable bars is at least STEP_MIN."""
     steps = max(len(g["pattern"]), 1)
     hits = [result["hits"][i] for i in g["members"] + g["assigned_members"]]
     on = [h for h in hits if h["on_grid"]]
     own = {h["bar"] for h in hits}
-    blind = {(b, st) for b, st in list(result.get("hidden_cells", [])) + list(result.get("unmeasured_cells", []))}
+    blind = {(b, st) for b, st in result.get("unmeasured_cells", [])}      # a hit was found there: it may be this group's
+    tails = result.get("hidden_tail_db")
+    rise = GRID_RISE_DB if result.get("grid_onsets") else oneshot.RISE_DB
+    for k, (b, st) in enumerate(result.get("hidden_cells", [])):
+        # hidden FOR THIS GROUP only when a hit of its level would not have risen out of the tail: the tail within `rise` dB of the
+        # group's level. A result without tail levels, or a group without a level, has every hidden cell hidden
+        if tails is None or g.get("level_db") is None or tails[k] > g["level_db"] - rise:
+            blind.add((b, st))
     counts, rows = np.zeros(steps), []
     for st in range(steps):
         at = [h for h in on if h["step"] == st]
