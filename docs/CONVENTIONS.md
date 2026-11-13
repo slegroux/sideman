@@ -517,11 +517,22 @@ The rule is the second review's: on the Flare hats, groups at stability
 
 Pattern: the hits counted are the measured ones and the ones assigned to the
 group under another hit's tail (`assigned` says how many). A 16th is *in use*
-when the group plays there in at least 25 % of the bars it plays in.
+when the group plays there in at least 25 % of the bars it plays in **that it could
+be seen in**. A bar does not count for a 16th when the line fell inside another
+hit's tail with no hit found at it (`hidden_cells`: a closed hat under an open
+hat's tail cannot be seen playing there), or held an on-grid hit that was not
+measured (`unmeasured_cells`: it may have been this group's), and the group does
+not play there. Without that, a hat that plays every "a" but is hidden in three
+bars of four reads 25 %. A 16th observable in fewer than 4 bars is *unknown*: it
+counts neither for nor against, and a name given with unknown 16ths says how many
+in its `note`. The per-16th bar counts and shares (over all bars and over the
+observable ones) are in each role's `steps`. "n of 6 in use" is read over the
+known 16ths: the share asked for (6 of 8, 3 of 4) of the known ones, rounded up,
+with at least half of them known.
 
 | Stem | Name | Rule | Where the number comes from |
 |------|------|------|-----------------------------|
-| hh | `hh offbeat` | at least 90 % of the hits on steps 2, 6, 10, 14 and at least 3 of those 4 in use | 90 %: chosen, a tenth of the hits may be strays or assigned to the wrong 16th; 3 of 4: one offbeat may be taken by the other hat (Flare hh group 0 plays its four offbeats in 56 % to 89 % of the stem's bars) |
+| hh | `hh offbeat` | at least 90 % of the hits on steps 2, 6, 10, 14 and at least 3 of those 4 in use (of the known ones) | 90 %: chosen, a tenth of the hits may be strays or assigned to the wrong 16th; 3 of 4: one offbeat may be taken by the other hat (Flare hh group 0 plays its four offbeats in 56 % to 89 % of the stem's bars) |
 | hh | `hh 16th` | at least 6 of the 8 odd 16ths in use | chosen: a 16th-note hat plays the "e" and "a" of each beat, and 6 of 8 leaves two gaps (4 of 8 let a hat that plays only the "e" of each beat, Flare hh group 2, take the name); an offbeat group has none of them |
 | hh | `hh open` | neither pattern fits and the clean hit falls 20 dB in 140 ms or more | `fall_20_ms` of the 22 closed and open hats of `_PRODUCTION/Drums` that could be measured (below) |
 | snare | `rim` | the clean hit falls 20 dB in under 30 ms | the library's 3 rims: 5, 19 and 28 ms; its other 30 claps and snares: 35 to 167 ms |
