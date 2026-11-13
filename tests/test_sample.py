@@ -1205,7 +1205,8 @@ def test_distance_terms_add_up_to_the_distance():
     assert [r["fft"] for r in t["resolutions"]] == [1024, 2048, 512]
     for key in ("convergence", "log_magnitude"):
         assert t[key] == pytest.approx(sum(r[key] for r in t["resolutions"]) / 3, rel=1e-12)
-    assert t["length_ms"] == pytest.approx(602.0, abs=0.1)    # the 600 ms hit and the 2 ms of lead before its onset
+    assert t["length_ms"] == pytest.approx(600.0, abs=0.1)    # compared from the onset: the 600 ms of the longer hit
+    assert (t["scale"], t["floor_db"]) == ("mel", 60.0)
 
 
 def test_distance_does_not_move_when_the_hit_has_a_dc_offset():
@@ -1218,17 +1219,31 @@ def test_distance_refuses_what_it_cannot_measure():
         dist(np.zeros((SR // 2, 1)), tom())
     with pytest.raises(ValueError, match="NaN"):
         dist(tom() * np.nan, tom())
-    with pytest.raises(ValueError, match="too short"):
-        dist(tom()[:800], tom()[:800])
+    with pytest.raises(ValueError, match="silent"):
+        dist(tom(), np.hstack([tom(), -tom()]))          # mono against antiphase stereo: the mono mix is silence
+    with pytest.raises(ValueError, match="silent"):
+        dist(np.full((SR // 2, 1), 0.5), tom())          # pure DC is silence once the offset is removed
+    with pytest.raises(ValueError, match="channels"):
+        dist(np.zeros((SR // 2, 3)) + 1.0, tom())
+    with pytest.raises(ValueError, match="scale"):
+        dist(tom(), tom(), scale="third")
+
+
+def test_distance_a_very_short_hit_is_compared_not_refused():
+    # 796 samples (17 ms): it used to be refused for not outlasting the reflect padding; the start and end are
+    # padded with silence now, so any hit that is not silent has a distance
+    click = hit(1000, 0.002, seconds=0.0166)
+    assert len(click) == 796
+    assert dist(click, click) < 1e-9
+    assert dist(click, hit(1500, 0.002, seconds=0.0166)) > smallest()
 
 
 def test_distance_reads_the_hit_chosen_from_a_take_and_files_at_two_rates(tmp_path):
     import mcp_server.server as S
     take = np.concatenate([tom(0.04)[:int(0.5 * SR)], tom(0.10)[:int(0.5 * SR)]])
-    p, q, r = tmp_path / "take.wav", tmp_path / "second.wav", tmp_path / "second44.wav"
+    p, q = tmp_path / "take.wav", tmp_path / "second.wav"
     sf.write(str(p), take, SR, subtype="FLOAT")
     sf.write(str(q), pad(tom(0.10)[:int(0.5 * SR)], 20), SR, subtype="FLOAT")
-    sf.write(str(r), fft_resample(tom(0.10)[:int(0.5 * SR)], 48000, 44100), 44100, subtype="FLOAT")
     # hit 1 of the take is the 100 ms hit; hit 0 is the 40 ms one
     same = json.loads(S.sample_compare(str(p), str(q), hit_a=1, hit_b=0))
     other = json.loads(S.sample_compare(str(p), str(q), hit_a=0, hit_b=0))
@@ -1236,10 +1251,22 @@ def test_distance_reads_the_hit_chosen_from_a_take_and_files_at_two_rates(tmp_pa
     assert other["distance"] == pytest.approx(dist(tom(0.04)[:int(0.5 * SR)], tom(0.10)[:int(0.5 * SR)]), abs=1e-3)
     assert same["distance"] == pytest.approx(same["distance_terms"]["convergence"] + same["distance_terms"]["log_magnitude"], abs=2e-4)
     assert set(same) == {"a", "b", "diff", "readings", "distance", "distance_terms"}
-    # the same 100 ms hit at 44.1 kHz: compared at 44.1 kHz, far under a decay difference
-    cross = json.loads(S.sample_compare(str(q), str(r)))
-    assert cross["distance"] < 0.2 * smallest(), cross["distance"]
-    assert cross["readings"] == []
+    # the same 100 ms hit synthesised natively at another rate (not resampled by the code under test): compared at
+    # the lower rate, far under a decay difference
+    for sr, readings_empty in ((44100, True), (96000, True), (22050, False)):
+        r = tmp_path / ("second%d.wav" % sr)
+        sf.write(str(r), hit(200, 0.10, seconds=0.5, partials=BASE, sr=sr), sr, subtype="FLOAT")
+        cross = json.loads(S.sample_compare(str(q), str(r)))
+        assert cross["distance"] < 0.1 * smallest(), (sr, cross["distance"])
+        assert cross["readings"] == [] or not readings_empty, (sr, cross["readings"])
+
+
+def test_resample_keeps_a_tone_and_its_level():
+    # a 1 kHz tone at 96 kHz cut to 48 kHz is the tone synthesised at 48 kHz, away from the file's two ends
+    t96, t48 = np.arange(96000) / 96000, np.arange(48000) / 48000
+    got = oneshot._resample(np.sin(2 * np.pi * 1000 * t96)[:, None], 96000, 48000)
+    assert len(got) == 48000
+    assert np.abs(got[200:-200, 0] - np.sin(2 * np.pi * 1000 * t48)[200:-200]).max() < 1e-3
 
 
 def test_distance_through_the_tool_says_why_when_it_has_none(tmp_path):
@@ -1247,7 +1274,13 @@ def test_distance_through_the_tool_says_why_when_it_has_none(tmp_path):
     p = tmp_path / "blip.wav"
     sf.write(str(p), hit(1000, 0.002, seconds=0.015), SR, subtype="FLOAT")
     out = json.loads(S.sample_compare(str(p), str(p)))
-    assert out["distance"] is None and "too short" in out["distance_note"]
+    assert out["distance"] == 0.0 and "distance_note" not in out        # a 15 ms hit is compared: it was refused
+    # mono against the same hit in antiphase stereo: the mix is silent, so no distance, and the readings still come
+    q, r = tmp_path / "mono.wav", tmp_path / "anti.wav"
+    sf.write(str(q), tom(), SR, subtype="FLOAT")
+    sf.write(str(r), np.hstack([tom(), -tom()]), SR, subtype="FLOAT")
+    out = json.loads(S.sample_compare(str(q), str(r)))
+    assert out["distance"] is None and "silent" in out["distance_note"], out.get("distance_note")
     assert "readings" in out and "distance_terms" not in out
 
 
@@ -1288,3 +1321,126 @@ def test_distance_floor_none_is_the_references_definition_and_a_floor_can_only_l
     assert floored["log_magnitude"] < ref["log_magnitude"]
     assert dist(a, b) == dist(a, b, floor_db=60.0) != dist(a, b, floor_db=40.0)      # the default is 60 dB
     assert oneshot.distance_terms(a, b, SR, floor_db=120.0)["log_magnitude"] == pytest.approx(ref["log_magnitude"], rel=0.02)
+
+
+# ---------------------------------------------------------------- distance: review round 1
+
+def hat_seed(seed, tau=0.03):
+    t = np.arange(int(0.6 * SR)) / SR
+    return (np.diff(np.random.default_rng(seed).standard_normal(len(t) + 1)) * 0.5 * np.exp(-t / tau))[:, None]
+
+
+def snare_seed(seed):
+    t = np.arange(int(0.6 * SR)) / SR
+    return (np.random.default_rng(seed).standard_normal(len(t)) * np.exp(-t / 0.08) * 0.4
+            + np.sin(2 * np.pi * 190 * t) * np.exp(-t / 0.05))[:, None]
+
+
+def with_bed(y, db, lead=0.2, seed=1):
+    """y at `lead` seconds into a white noise bed `db` under y's sample peak, the bed running before, under and after it."""
+    bed = np.random.default_rng(seed).standard_normal(int(lead * SR) + len(y)) * np.abs(y).max() * 10 ** (-db / 20)
+    z = bed.copy()
+    z[int(lead * SR):] += y[:, 0]
+    return z[:, None], bed[int(lead * SR):]
+
+
+@pytest.mark.parametrize("scale", ["mel", "linear"])
+def test_distance_a_hat_read_1_or_5_samples_late_is_the_same_hit(scale):
+    h = hat_seed(2)
+    small = min(dist(tom(0.05), tom(0.04), scale=scale), dist(tom(), tom(semitones=1), scale=scale))
+    for k in (1, 5):
+        assert dist(h, pad(h, k * 1000 / SR), scale=scale) < 0.1 * small, k
+    # what the onset detection cannot undo, by hand: both hits put on equal terms, then one moved k samples. With the
+    # silence before the onset at least half the largest FFT the reflect padding never mirrors the attack: 1 sample
+    # costs under a tenth of the smallest real difference; 5 samples (0.1 ms) under 0.4 (linear) / 0.15 (mel)
+    xa, xb, _ = oneshot._equalise(h, h, SR, True, 2.0)
+
+    def moved(k):
+        rows = oneshot._mrstft(xa, np.roll(xb, k, axis=1), 60.0, SR, scale)
+        return np.mean([0.5 * (r[0] + r[1]) + r[2] for r in rows])
+    assert moved(1) < 0.1 * small and moved(5) < (0.4 if scale == "linear" else 0.15) * small, (moved(1), moved(5), small)
+
+
+def test_distance_a_hit_over_a_noise_bed_is_aligned_and_costs_what_the_bed_adds():
+    # the same hit with and without a white bed, 200 ms of it before the hit. The bed is a real difference, so not 0:
+    # the convergence term is the bed's share of the energy, sqrt(E_bed / E_hit) (twice that allows for the mel
+    # weights); for a flat-spectrum hat the log term reads the frames where the clean hit has fallen to the floor
+    # (60 dB under its loudest bin: tau * ln(1000) = 207 ms of the 600) and the bed is `60 - B` dB above it
+    # (B: the bed's rms under the hit's loudest ms): (1 - 0.207 / 0.6) * ln(10 ** ((60 - B) / 20)). A tone's
+    # loudest bin stands ~25 dB over its mean level, which puts a bed that is 44 dB under under the floor.
+    hat_, tom_ = hat_seed(2), tom()
+    for y, db in ((hat_, 50), (tom_, 45)):
+        z, bed = with_bed(y, db)
+        assert abs(oneshot._hit_onset(z, SR) - int(0.2 * SR)) <= 2, (db, oneshot._hit_onset(z, SR) - int(0.2 * SR))
+        t = oneshot.distance_terms(y, z, SR)
+        assert t["convergence"] < 2 * math.sqrt((bed ** 2).sum() / (y ** 2).sum()), t
+        if y is hat_:
+            b_db = 20 * math.log10(math.sqrt((bed ** 2).mean()) / oneshot._loudest_ms(y, SR))
+            expect = (1 - 0.207 / 0.6) * math.log(10 ** ((60 + b_db) / 20))
+            assert t["log_magnitude"] == pytest.approx(expect, rel=0.25), (t["log_magnitude"], expect)
+        else:
+            assert t["distance"] < 0.5 * smallest(), t
+        assert t["distance"] < 0.5 * dist(hat_, tom_)       # far closer than a different drum
+        assert dist(y, z) == pytest.approx(dist(z, y), rel=1e-12)
+    # and a bed alone does not move the hit: without it the onset is where it always was
+    assert oneshot._hit_onset(np.vstack([np.zeros((int(0.2 * SR), 1)), tom_]), SR) == oneshot._hit_onset(
+        np.vstack([np.zeros((int(0.05 * SR), 1)), tom_]), SR) + int(0.15 * SR)
+
+
+def test_distance_does_not_depend_on_the_silence_after_the_hit():
+    a, b = tom(0.04)[:int(0.3 * SR)], tom(0.10)[:int(0.3 * SR)]
+    d = [dist(np.vstack([a, np.zeros((int(e * SR), 1))]), np.vstack([b, np.zeros((int(e * SR), 1))]))
+         for e in (0.0, 0.3, 1.0, 1.7)]
+    assert max(d) < 1.02 * min(d) and d[0] > smallest(), d
+    # the reference definition (floor None) averages over every frame, silent ones too, and does dilute
+    raw = [dist(np.vstack([a, np.zeros((int(e * SR), 1))]), np.vstack([b, np.zeros((int(e * SR), 1))]), floor_db=None)
+           for e in (0.0, 1.7)]
+    assert raw[1] < 0.8 * raw[0], raw
+
+
+def test_distance_two_noise_takes_of_one_hat_are_far_closer_than_a_hat_and_a_snare():
+    # the noise realisation is not timbre, and the distance cannot tell it apart: two seeds of one hat read ~0.6 (mel),
+    # about two thirds of a hat with a 50 % longer decay, so a threshold under that is not usable on noisy hits;
+    # what holds, and what matters: a hat is far closer to another take of itself than to a snare
+    seeds = [dist(hat_seed(2), hat_seed(s)) for s in (3, 4, 5)]
+    snare = dist(hat_seed(2), snare_seed(2))
+    assert max(seeds) < 0.25 * snare and min(seeds) > 0.1, (seeds, snare)
+    assert max(dist(snare_seed(2), snare_seed(s)) for s in (3, 4)) < 0.25 * snare
+    assert max(seeds) < 1.2 * dist(hat_seed(2), hat_seed(2, 0.045))
+
+
+def test_distance_stereo_channels_are_compared_pairwise_and_a_mixed_count_is_mono():
+    x, y = hat_seed(2), hat_seed(5)
+    left_loud, right_loud = np.hstack([x, 0.3 * y]), np.hstack([0.3 * y, x])
+    assert dist(left_loud, left_loud) < 1e-9
+    assert dist(left_loud, right_loud) > smallest()                       # an L/R swap is a difference
+    assert dist(x, np.hstack([x, y])) == pytest.approx(dist(x, 0.5 * (x + y)), rel=1e-9)   # against mono: the mix (L + R) / 2
+    assert dist(x, np.hstack([x, y])) > smallest()
+
+
+@pytest.mark.parametrize("scale", ["mel", "linear"])
+def test_distance_scale_is_an_option_and_mel_is_the_default(scale):
+    a, b = tom(0.04), tom(0.07)
+    assert dist(a, b, scale=scale) == oneshot.distance_terms(a, b, SR, scale=scale)["distance"]
+    assert (dist(a, b) == dist(a, b, scale="mel")) and dist(a, b, scale="mel") != dist(a, b, scale="linear")
+    assert dist(a, a, scale=scale) < 1e-9
+
+
+def test_mel_filterbank_is_slaneys():
+    # Slaney's scale: 200/3 Hz per mel up to 1 kHz (15 mel), 27 mel steps per factor 6.4 above
+    assert oneshot._hz_to_mel(np.array([200 / 3 * 10, 1000.0, 6400.0])) == pytest.approx([10.0, 15.0, 42.0])
+    assert oneshot._mel_to_hz(np.array([10.0, 15.0, 42.0])) == pytest.approx([200 / 3 * 10, 1000.0, 6400.0])
+    for sr, fft, n in ((48000, 2048, 128), (44100, 1024, 64), (48000, 512, 32)):
+        fb = oneshot._mel_fb(sr, fft, n)
+        assert fb.shape == (n, fft // 2 + 1) and (fb >= 0).all()
+        # each triangle has area 1 (height 2 / width) when its width is several bins
+        area = fb.sum(axis=1) * sr / fft
+        assert area[n // 2:] == pytest.approx(1.0, rel=0.1)
+        # centres rise: the filters are in order
+        assert (np.diff((fb * np.arange(fb.shape[1])).sum(axis=1) / fb.sum(axis=1)) > 0).all()
+
+
+def test_hit_audio_stops_max_s_after_the_onset():
+    take = np.concatenate([tom(0.04)[:int(0.5 * SR)], tom(0.10)[:int(0.5 * SR)]])
+    assert abs(len(oneshot.hit_audio(take, SR, 1)) - int(0.5 * SR)) <= 2        # to the end of the take
+    assert len(oneshot.hit_audio(take, SR, 1, max_s=0.1)) == int(0.1 * SR)
