@@ -75,6 +75,7 @@ import json
 import math
 import numbers
 import pathlib
+import re
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -329,9 +330,9 @@ FALL20_PER_T = 0.227     # Operator Ae Decay T: the amp envelope of a device fro
 #                          and 0.2266; exponential, linear in dB; noise, Be Decay 500 ms: 0.216; live-assumptions report).
 #                          The 0.29 of 2026-11-09 and 11 was measured on a kit built through the preset XML with
 #                          DecaySlope 1; the slope is not a LOM parameter, so the device a LOM session gets has its own.
-TAU_PER_FALL20 = 1.0 / math.log(10.0)       # tau = fall_20 / ln(10), for an exponential amplitude decay
 FALL20_PER_T_NOISE = 0.216   # the same for Be Decay (the noise's amp envelope): ONE measurement, 2026-11-12: Be Decay 500 ms read a
 #                          20 dB fall of 108 ms. The tone's 0.227 has two (300 and 1000 ms); the noise decays use this one.
+TAU_PER_FALL20 = 1.0 / math.log(10.0)       # tau = fall_20 / ln(10), for an exponential amplitude decay
 T_PER_TAU = math.log(10.0) / FALL20_PER_T   # Operator T = 10.1 tau: the amp curve is 88 dB down at T
 PE_DECAY_PER_TAU = 7.94  # Pe Decay = tau * this, measured 2026-11-12 on a scratch device and NOT the amp envelope's
 #                          constant (10.1): Pe Init = Peak 12 st, Pe Decay 400 ms read 11.0 / 8.5 / 5.85 / 2.6 / 1.69 /
@@ -1030,6 +1031,10 @@ def from_live(values: dict, units: dict) -> dict:
 PARAM_KEYS = ("peak_db", "attack_ms", "fall_20_ms", "fall_40_ms", "pitch_body_hz", "click_db")   # readings repeat_check spreads
 
 
+QUANT_BEATS = (0.0, 32.0, 16.0, 8.0, 4.0, 2.0, 4.0 / 3, 1.0, 2.0 / 3, 0.5, 1.0 / 3, 0.25, 1.0 / 6, 0.125)    # Song.clip_trigger_quantization 0..13 in beats (4/4)
+_TRACK = re.compile(r"live_set tracks \d+")
+
+
 class LiveRenderer:
     """`render(patches) -> [hit]` for `search`, one hit (an [n, channels] array at `sample_rate`) per patch, played on
     the device at `device` by the one-note-per-candidate MIDI clip at `clip` and recorded on the audio track
@@ -1042,35 +1047,51 @@ class LiveRenderer:
     device's parameter list in index order (default Operator's), which gives each written name its path
     "<device> parameters <index>".
 
+    Identity. Paths are positions: a track inserted or deleted above the scratch tracks moves them. The record
+    track's name, the MIDI track's name and the device's class_name are captured when the renderer is built
+    (`expect={"record":, "midi":, "device":}` gives them instead; capture=False leaves them to the first take's
+    state batch), read again in every take's state batch, and the take is refused before anything is written
+    unless all three are as captured. They are read once more, with every track's solo and arm, just before the
+    cleanup writes, which are skipped (and the take raises after the transport is stopped) if the names moved.
+    The constructor checks that the device and the clip are on one track and that the record track is another.
+
     EVERY request to Live costs about 0.4 to 0.7 s of wall time whatever it holds (measured 2026-11-13: one `get`
     599 ms, a `transaction` of 1 to 38 sets 400 to 710 ms). The schedule is built on that:
     - during a take there is exactly ONE request per candidate, its parameter write; nothing is re-read between
       candidates. The wall clock is synchronised to the clip once, after firing (see below), and the writes are
       timed from it;
-    - the request time m is measured at the start of each take from the three guard reads the take needs anyway
-      (median of is_playing, tempo and the state batch);
+    - the request time m is the LARGEST of the three guard reads at the start of the take (is_playing, tempo, the
+      state batch);
     - a candidate's write STARTS `lead` before its note, lead = max(lead_factor * m, m + lead_floor_s) + lead_extra_s
-      (1.5 and 0.3 s: 0.9 s for m = 0.6), so it returns at least 0.5 m (0.3 s) before the note; it counts as late
-      when it returns less than `min_lead_s` before the note, and then fails that candidate;
+      (1.5 and 0.5 s: 1.14 s for m = 0.6, 1.26 for m = 0.76), so it returns at least 0.5 s before the note; it
+      counts as late when it returns less than `min_lead_s` before the note, and then fails that candidate;
     - the write starts after the previous note has ended (the voice has sounded out: the note is held for the
       candidate's decay T, where Operator's amp curve is 88 dB down), so
-      spacing = max(longest note + lead + margin, hit_s + margin), rounded up to 1/16 beat, margin = max(0.2 s, 0.5 m)
-      (absorbing the uncertainty of the clock sync, below). The first note is at max(start_beat, 3 m + 0.3 s) so the
-      sync is done before the second candidate's write;
-    - `lead_extra_s` starts at 0 and adapts: when more than a quarter of a batch's writes were late, it is raised
-      by the largest shortfall plus 0.1 s (logged in the take, kept for the renderer's life), so the next batch
-      starts earlier. Slower requests during the take than at its start (the engine is busier) show up as that.
+      spacing = max(longest note + lead + margin, hit_s + margin), rounded up to 1/16 beat, margin =
+      max(0.2 s, repoll_ratio * m, the last take's sync poll) (1.25 m: the sync's uncertainty, below). The first note is at max(start_beat,
+      3 m + 0.3 s) so the sync is done before the second candidate's write;
+    - `lead_extra_s` starts at 0 and adapts: when more than a quarter of a batch's writes were late it is raised by
+      the largest shortfall plus 0.1 s (logged in the take); after a take without late writes it falls back by half.
 
     Sync: after both slots are fired the clip is polled (is_playing, playing_position, length in one batch) until it
     plays; beat 0 is at the wall time the request was SENT at, minus position x seconds per beat. Live read the
-    position somewhere between sending and returning (unknown where), so beat 0 is uncertain by up to m. Taking the
-    send time assumes the earliest reading, which puts the believed notes as early as they can be: the writes are
-    then early rather than late. Late is the dangerous side (parameters landing after their note sound as the
-    previous candidate's), early costs only the previous voice's last moments, which are inaudible (the note is
-    held for the voice's whole decay) and are covered by the margin (0.5 m). The midpoint was tried first and failed
-    when Live read at the start of the request (a hit with the previous candidate's parameters, undetected: the
-    lead's 0.5 m of slack equals the midpoint's error). A drift estimate comes from the take itself afterwards:
+    position somewhere between sending and returning (unknown where), so the true beat 0 is between that estimate
+    and the estimate plus the poll's duration d (logged as `sync_poll_s`): the notes sound NO EARLIER than believed,
+    which makes the late check a lower bound on the real lead. A poll longer than repoll_ratio * m (1.25) is
+    repeated once and the shorter one used. The early side is guarded: write k must not start before the believed
+    note k-1 + d + note k-1's length, else candidate k-1 fails ("could have ended"): its voice may have been
+    sounding when the parameters landed. A drift estimate comes from the take itself afterwards:
     `offset_median_ms` and `offset_trend_ms` (found against expected onsets), not from extra requests.
+
+    The file. Launch quantization starts the record slot and the clip on the grid (`clip_trigger_quantization`,
+    read in the state batch), and the two fires are two requests apart: the record slot can start one or more grid
+    steps before the clip (or, with no quantization, by the time between the two fires). The first onset in the file
+    is note 0 (the record slot is fired first). Its shift against the expected time is applied only when it is no more
+    than the time the two fires took (`fire_window_s`) or within `shift_tol_s` (30 ms) of a whole number of grid steps and, when it
+    is as long as a spacing or longer (which is also what a missing note 0 looks like: the first onset is then note 1),
+    the number of onsets in the file equals the number of notes; otherwise the take is rejected with a reason, every
+    candidate fails, and nothing is cut at a guessed place. (A rule of "under half a spacing" would reject the usual
+    straddle: with a bar of 2 s and a spacing of 3 s the shift is 2 s.)
 
     Batch mode (default): ONE take per batch, the clip rewritten with one note per candidate (its pitch and length,
     velocity `velocity`), each cut with oneshot.hit_cut at its expected time: an onset must be found from
@@ -1078,37 +1099,55 @@ class LiveRenderer:
     not be silent. Single mode (batch=False): one take per candidate, the manual way, each at the next empty slot.
 
     Requests per take: 3 guards (+ 2 counts the first time), notes_remove, notes_add, one transaction (record
-    track solo and arm, clip looping and length, and candidate 0's parameters), 2 fires, the sync (1 or more), one
-    write per further candidate, then stop of the record slot, stop_playing, one restore transaction (the record
-    track's solo and arm, and a solo of any track that was soloed before: Live's exclusive solo can clear it) and
-    file_path. The clip slot is not stopped separately: stop_playing stops it.
+    track solo and arm, clip looping and length, and candidate 0's parameters), 2 fires, the sync (1 or 2), one
+    write per further candidate, then the identity / solo / arm re-read, stop of the record slot, stop_playing, a
+    restore transaction (only the differences from the state before the take) and file_path. The clip slot is
+    not stopped separately: stop_playing stops it.
 
-    Guards, each before anything is changed: the Set must not be playing; the record track needs an empty clip slot
-    (the first one is used; none left raises RuntimeError naming the track, and nothing is deleted: clear_takes()
-    does that, on request). The restores, the stops and the transport stop run in a finally. Only the two scratch
-    tracks are written to, except for restoring a solo that was set. Track and slot counts are read at the first take
-    and kept (the paths are index-based: rebuild the renderer if tracks are added). `sleep` and `clock` are injectable.
+    Guards, each before anything is changed: the Set must not be playing (read twice: the second time in the state
+    batch, a few seconds before the first write) and Arrangement Record (`record_mode`) must be off; the identity
+    must match; the record track needs an empty clip slot (the first one is used; none left raises RuntimeError
+    naming the track, and nothing is deleted: clear_takes() does that, on request). Any error in the setup
+    transaction aborts the take, and so does a clip shorter than its notes. The stops and the restores run
+    after any exception, including KeyboardInterrupt, each step guarded separately (a second Ctrl-C does not skip
+    the rest); the first exception is re-raised after all of them. A failed restore (checked per operation)
+    raises after the cleanup, and the next take restores to the state before the failed one. Solo and ARM
+    of every track are read at the start (Exclusive Arm can disarm another track when the record track is
+    armed) and restored where they differ; track and slot counts are read at the first take and kept (rebuild the
+    renderer if tracks are added). `sleep` and `clock` are injectable.
 
     `takes` is the log, one dict per take: file, slot, tempo, request_s (m), request_samples, lead_s, margin_s,
-    start_s, spacing_beats, spacing_s, planned_s, lead_extra_s, lead_raised_s, clip_length_beats, setup_errors,
-    sample_rate, file_shift_s (how far into the file note 0 sounded, against where the clip puts it), offset_median_ms, offset_trend_ms, and per candidate: index, note, expected_s, found_s, offset_ms,
-    write_ms, lead_ms (note time minus the return of its write), ok, reason."""
+    start_s, spacing_beats, spacing_s, planned_s, lead_extra_s, lead_raised_s, sync_poll_s, sync_repolled,
+    clip_length_beats, quantization_beats, file_shift_s, onsets_found, rejected, setup_errors, cleanup_errors,
+    sample_rate, offset_median_ms, offset_trend_ms, and per candidate: index, note, expected_s, found_s, offset_ms,
+    write_ms, lead_ms (note time minus the return of its write), early_ms (the start of its write against the
+    earliest it could be), ok, reason."""
 
     def __init__(self, client, device: str, clip: str, record_track: str, units: dict, to_params, *, names=None,
                  convert=None, batch: bool = True, hit_s: float = 1.0, start_beat: float = 1.0, lead_factor: float = 1.5,
-                 lead_floor_s: float = 0.3, min_lead_s: float = 0.03, margin_s: float | None = None,
+                 lead_floor_s: float = 0.5, min_lead_s: float = 0.03, margin_s: float | None = None,
                  spacing_beats: float | None = None, onset_early_s: float = 0.04, onset_late_s: float = 0.10,
-                 settle_s: float = 0.3, sync_timeout_s: float | None = None, velocity: int = 100, sleep=None, clock=None):
-        if hit_s <= 0 or start_beat <= 0 or lead_factor < 1.0 or lead_floor_s < 0 or min_lead_s < 0:
-            raise ValueError("need hit_s > 0, start_beat > 0, lead_factor >= 1, lead_floor_s >= 0 and min_lead_s >= 0")
+                 settle_s: float = 0.3, sync_timeout_s: float | None = None, velocity: int = 100,
+                 repoll_ratio: float = 1.25, shift_tol_s: float = 0.03, expect: dict | None = None, capture: bool = True,
+                 sleep=None, clock=None):
+        if hit_s <= 0 or start_beat <= 0 or lead_factor < 1.0 or lead_floor_s < 0 or min_lead_s < 0 or repoll_ratio < 1.0:
+            raise ValueError("need hit_s > 0, start_beat > 0, lead_factor >= 1, lead_floor_s >= 0, min_lead_s >= 0 and repoll_ratio >= 1")
+        mrec, mdev, mclip = _TRACK.fullmatch(record_track.strip()), _TRACK.match(device), _TRACK.match(clip)
+        if not (mrec and mdev and mclip):
+            raise ValueError("record_track must be 'live_set tracks N' and device and clip paths must start with 'live_set tracks N'")
+        if mdev.group(0) != mclip.group(0):
+            raise ValueError("the device (%s) and the MIDI clip (%s) are on different tracks" % (mdev.group(0), mclip.group(0)))
+        if mdev.group(0) == mrec.group(0):
+            raise ValueError("the record track is the MIDI track (%s): they must be two tracks" % mrec.group(0))
         import time as _time
-        self.client, self.device, self.clip, self.record_track = client, device, clip, record_track
+        self.client, self.device, self.clip, self.record_track = client, device, clip, mrec.group(0)
+        self.midi_track = mdev.group(0)
         self.units, self.to_params = units, to_params
         self.names = list(names) if names is not None else list(operator_parameters())
         self.convert = convert or (lambda params: to_live(params, units))
         self.batch, self.hit_s, self.start_beat = batch, hit_s, start_beat
         self.lead_factor, self.lead_floor_s, self.min_lead_s, self.margin_s = lead_factor, lead_floor_s, min_lead_s, margin_s
-        self.spacing_beats = spacing_beats
+        self.spacing_beats, self.repoll_ratio, self.shift_tol_s = spacing_beats, repoll_ratio, shift_tol_s
         self.onset_early_s, self.onset_late_s, self.settle_s, self.sync_timeout_s = onset_early_s, onset_late_s, settle_s, sync_timeout_s
         self.velocity = velocity
         self.sleep = sleep or _time.sleep
@@ -1117,10 +1156,27 @@ class LiveRenderer:
         self.takes: list = []
         self.sample_rate: int | None = None
         self.request_s: float | None = None
+        self.expect: dict | None = dict(expect) if expect is not None else None
         self._ntracks: int | None = None
         self._nslots: int | None = None
+        self._baseline = None                        # (solo, arm) of every track before the take, kept across a failed restore
+        self._restore_failed = False
+        self._poll_s = 0.0                           # the last take's sync poll: the margin is never shorter than the poll was
+        if self.expect is None and capture:
+            self.capture()
 
     # ---------------------------------------------------------------- the public face
+    def capture(self) -> dict:
+        """Read the record track's name, the MIDI track's name and the device's class_name (one request) and keep them
+        as the identity every take is checked against."""
+        res = self.client.get_batch([{"path": self.record_track, "property": "name"}, {"path": self.midi_track, "property": "name"},
+                                     {"path": self.device, "property": "class_name"}])["results"]
+        got = {"record": _value(res[0]), "midi": _value(res[1]), "device": _value(res[2])}
+        if any(v is None for v in got.values()):
+            raise RuntimeError("could not read the track names and the device class (%s): the paths are wrong, or Live refused" % got)
+        self.expect = got
+        return got
+
     def render(self, patches: list) -> list:
         """One hit per patch (an empty array for one that failed), in order: one take for the batch, or one per patch."""
         patches = list(patches)
@@ -1141,7 +1197,7 @@ class LiveRenderer:
         spb = 60.0 / tempo
         m = request_s
         lead = max(self.lead_factor * m, m + self.lead_floor_s) + self.lead_extra_s
-        margin = self.margin_s if self.margin_s is not None else max(0.2, 0.5 * m)
+        margin = self.margin_s if self.margin_s is not None else max(0.2, self.repoll_ratio * m, self._poll_s)
         longest = max(note_lengths_s)
         need = max(longest + lead + margin, self.hit_s + margin)
         if self.spacing_beats is not None:
@@ -1158,20 +1214,36 @@ class LiveRenderer:
                 "spacing_beats": spacing_beats, "spacing_s": spacing_beats * spb, "planned_s": planned}
 
     def clear_takes(self, confirm: bool = False) -> int:
-        """Delete every clip on the record track (the recordings stay on disk). Only with confirm=True; returns how many."""
+        """Delete every clip on the record track (the recordings stay on disk). Only with confirm=True, only when the
+        track names and the device class are as captured, and each delete carries expect=<the clip's name>, so a
+        shifted index is refused by Live. Returns how many."""
         if not confirm:
             raise ValueError("clear_takes deletes the clips of %s: pass confirm=True" % self.record_track)
         count = self.client.get(self.record_track, "clip_slots", limit=1)["value"]["count"]
-        has = self.client.get_batch([{"path": "%s clip_slots %d" % (self.record_track, k), "property": "has_clip"}
-                                     for k in range(count)])["results"]
+        specs = [{"path": self.record_track, "property": "name"}, {"path": self.midi_track, "property": "name"},
+                 {"path": self.device, "property": "class_name"}]
+        specs += [{"path": "%s clip_slots %d" % (self.record_track, k), "property": "has_clip"} for k in range(count)]
+        specs += [{"path": "%s clip_slots %d clip" % (self.record_track, k), "property": "name"} for k in range(count)]
+        res = self.client.get_batch(specs)["results"]
+        self._check_identity({"record": _value(res[0]), "midi": _value(res[1]), "device": _value(res[2])})
         n = 0
-        for k, r in enumerate(has):
-            if r.get("value"):
-                self.client.call("%s clip_slots %d" % (self.record_track, k), "delete_clip", confirm=True)
+        for k in range(count):
+            if _value(res[3 + k]):
+                self.client.call("%s clip_slots %d" % (self.record_track, k), "delete_clip", confirm=True,
+                                 expect=_value(res[3 + count + k]))
                 n += 1
         return n
 
     # ---------------------------------------------------------------------- helpers
+    def _check_identity(self, got: dict) -> None:
+        if self.expect is None:
+            if any(v is None for v in got.values()):
+                raise RuntimeError("could not read the track names and the device class (%s)" % got)
+            self.expect = dict(got)
+        elif got != self.expect:
+            raise RuntimeError("the scratch tracks are not where they were: expected %s, found %s (a track was inserted, deleted or "
+                               "renamed above them?): nothing was written" % (self.expect, got))
+
     def _timed(self, fn, *a, **k):
         t0 = self.clock()
         r = fn(*a, **k)
@@ -1192,20 +1264,31 @@ class LiveRenderer:
             return False, "%d of %d parameter writes failed (first: %s)" % (len(bad), len(ops), bad[0].get("error"))
         return True, None
 
-    def _position(self) -> tuple[bool, float, float | None, float]:
-        """(playing, position in beats, clip length in beats, wall time the request was sent at) of the MIDI clip."""
+    def _position(self) -> tuple[bool, float, float | None, float, float]:
+        """(playing, position in beats, clip length in beats, wall time the request was sent at, its duration)."""
         t0 = self.clock()
         r = self.client.get_batch([{"path": self.clip, "property": "is_playing"},
                                    {"path": self.clip, "property": "playing_position"},
                                    {"path": self.clip, "property": "length"}])["results"]
-        length = r[2].get("value")
-        return bool(r[0].get("value")), float(r[1].get("value") or 0.0), None if length is None else float(length), t0
+        d = self.clock() - t0
+        length = _value(r[2])
+        return bool(_value(r[0])), float(_value(r[1]) or 0.0), None if length is None else float(length), t0, d
 
     def _clip_slot(self) -> str:
         """The clip slot that holds the MIDI clip: its path without the trailing ' clip'."""
         if not self.clip.endswith(" clip"):
             raise ValueError("clip must be a clip path ('live_set tracks N clip_slots K clip'), got %r" % self.clip)
         return self.clip[:-len(" clip")]
+
+    def _state_specs(self) -> list:
+        nt, ns = self._ntracks, self._nslots
+        specs = [{"path": self.record_track, "property": "name"}, {"path": self.midi_track, "property": "name"},
+                 {"path": self.device, "property": "class_name"}, {"path": "live_set", "property": "is_playing"},
+                 {"path": "live_set", "property": "record_mode"}, {"path": "live_set", "property": "clip_trigger_quantization"}]
+        specs += [{"path": "live_set tracks %d" % i, "property": "solo"} for i in range(nt)]
+        specs += [{"path": "live_set tracks %d" % i, "property": "arm"} for i in range(nt)]
+        specs += [{"path": "%s clip_slots %d" % (self.record_track, k), "property": "has_clip"} for k in range(ns)]
+        return specs
 
     def _take(self, patches: list) -> list:
         import soundfile as sf
@@ -1237,21 +1320,31 @@ class LiveRenderer:
         if self._ntracks is None:
             self._ntracks = cl.get("live_set", "tracks", limit=1)["value"]["count"]
             self._nslots = cl.get(self.record_track, "clip_slots", limit=1)["value"]["count"]
-        nt, ns = self._ntracks, self._nslots
-        specs = [{"path": self.record_track, "property": "arm"}]
-        specs += [{"path": "live_set tracks %d" % i, "property": "solo"} for i in range(nt)]
-        specs += [{"path": "%s clip_slots %d" % (self.record_track, k), "property": "has_clip"} for k in range(ns)]
-        state, t3 = self._timed(cl.get_batch, specs)
-        res = state["results"]
-        was_armed = bool(res[0]["value"]) if res[0].get("ok", True) and res[0].get("value") is not None else None
-        was_solo = [bool(r.get("value")) for r in res[1:1 + nt]]
-        slots = [bool(r.get("value")) for r in res[1 + nt:]]
+        nt = self._ntracks
+        state, t3 = self._timed(cl.get_batch, self._state_specs())
+        v = [_value(r) for r in state["results"]]
+        ident = {"record": v[0], "midi": v[1], "device": v[2]}
+        if v[3]:
+            raise RuntimeError("the Set is playing: not starting a take (it started after the first check)")
+        if v[4]:
+            raise RuntimeError("Arrangement Record is on (live_set record_mode): a take would record into the arrangement; turn it off")
+        self._check_identity(ident)
+        quant_enum = v[5]
+        quant = QUANT_BEATS[int(quant_enum)] if isinstance(quant_enum, (int, float)) and 0 <= int(quant_enum) < len(QUANT_BEATS) else None
+        now_solo = [bool(x) for x in v[6:6 + nt]]
+        now_arm = [None if x is None else bool(x) for x in v[6 + nt:6 + 2 * nt]]
+        slots = [bool(x) for x in v[6 + 2 * nt:]]
         if all(slots):
             raise RuntimeError("no empty clip slot on %s (all %d hold clips): delete the takes, or add scenes (clear_takes(confirm=True) "
                                "deletes the clips; the recordings stay on disk)" % (self.record_track, len(slots)))
+        rec_index = int(self.record_track.split()[-1])
+        if rec_index >= nt or len(now_solo) != nt:
+            raise RuntimeError("the record track index %d is outside the %d tracks counted at the first take: rebuild the renderer" % (rec_index, nt))
+        if self._baseline is None or not self._restore_failed:
+            self._baseline = (now_solo, now_arm)                  # what the cleanup restores: kept across a failed restore
+        base_solo, base_arm = self._baseline
         slot_index = slots.index(False)
-        samples = sorted([t1, t2, t3])
-        m = self.request_s = samples[1]                                    # the median
+        m = self.request_s = max(t1, t2, t3)
         spb = 60.0 / tempo
         sched = self.plan([length for *_, length in plans], m, tempo)
         lead, spacing_beats = sched["lead_s"], sched["spacing_beats"]
@@ -1260,20 +1353,30 @@ class LiveRenderer:
                  for (_, _, n, length), b in zip(plans, beats)]
         end_beat = beats[-1] + math.ceil((max(self.hit_s, plans[-1][3]) + sched["margin_s"]) / spb) + 1
         slot = "%s clip_slots %d" % (self.record_track, slot_index)
-        rec_index = int(self.record_track.split()[-1])
-        take = dict(sched, file=None, slot=slot_index, tempo=tempo, request_s=m, request_samples=[round(v, 3) for v in (t1, t2, t3)],
+        take = dict(sched, file=None, slot=slot_index, tempo=tempo, request_s=m, request_samples=[round(x, 3) for x in (t1, t2, t3)],
                     notes=notes, candidates=cands, sample_rate=None, failures=[], lead_extra_s=self.lead_extra_s, lead_raised_s=0.0,
-                    setup_errors=[], offset_median_ms=None, offset_trend_ms=None, clip_length_beats=None)
+                    setup_errors=[], cleanup_errors=[], offset_median_ms=None, offset_trend_ms=None, clip_length_beats=None,
+                    quantization_beats=quant, fire_window_s=None, file_shift_s=None, onsets_found=None, rejected=None, sync_poll_s=None,
+                    sync_repolled=False)
         self.takes.append(take)
+        # what the cleanup writes if its own re-read fails: the record track's solo and arm, which this take changes
+        blind_restore = []
+        if not base_solo[rec_index]:
+            blind_restore.append({"op": "set", "path": self.record_track, "property": "solo", "value": False})
+        if base_arm[rec_index] is False:
+            blind_restore.append({"op": "set", "path": self.record_track, "property": "arm", "value": False})
         started = touched = False
+        pending = None
         try:
             try:
                 cl.notes_remove(self.clip)
             except Exception:
                 pass                                                  # an empty clip may refuse
             cl.notes_add(self.clip, notes)
-            ops = [{"op": "set", "path": self.record_track, "property": "solo", "value": True}]
-            if was_armed is False:
+            ops = []
+            if not base_solo[rec_index]:
+                ops.append({"op": "set", "path": self.record_track, "property": "solo", "value": True})
+            if base_arm[rec_index] is False:
                 ops.append({"op": "set", "path": self.record_track, "property": "arm", "value": True})
             ops += [{"op": "set", "path": self.clip, "property": "looping", "value": False},
                     {"op": "set", "path": self.clip, "property": "loop_end", "value": float(end_beat)},
@@ -1286,27 +1389,45 @@ class LiveRenderer:
             t_d = self.clock()
             results = tr.get("results", [])
             take["setup_errors"] = [r.get("error") for r in results[:nsetup] if not r.get("ok")]
+            if take["setup_errors"]:
+                raise RuntimeError("setting up the take failed (%s): nothing was played" % take["setup_errors"][:2])
             bad0 = [r for r in results[nsetup:] if not r.get("ok")]
             writes = [(not bad0, None if not bad0 else "%d of %d parameter writes failed (first: %s)" % (
                 len(bad0), len(ops) - nsetup, bad0[0].get("error")), t_d - t_w, t_d)]
+            t_fire = self.clock()
             cl.call(slot, "fire")
             started = True
             cl.call(self._clip_slot(), "fire")
-            deadline = self.clock() + (self.sync_timeout_s if self.sync_timeout_s is not None else max(3.0, 8.0 * m))
+            take["fire_window_s"] = round(self.clock() - t_fire, 3)
+            limit = self.sync_timeout_s if self.sync_timeout_s is not None else max(3.0, 8.0 * m)
+            deadline = self.clock() + limit
             while True:
-                playing, pos, length, wall = self._position()
+                playing, pos, length, t_sent, d = self._position()
                 if playing:
                     break
                 if self.clock() > deadline:
-                    raise RuntimeError("the MIDI clip did not start playing within %.1f s of being fired" % (
-                        self.sync_timeout_s if self.sync_timeout_s is not None else max(3.0, 8.0 * m)))
+                    raise RuntimeError("the MIDI clip did not start playing within %.1f s of being fired" % limit)
                 self.sleep(0.005)
+            if d > self.repoll_ratio * m:                              # a slow poll is a poor sync: once more, keep the shorter
+                playing2, pos2, length2, t_sent2, d2 = self._position()
+                take["sync_repolled"] = True
+                if playing2 and d2 < d:
+                    pos, length, t_sent, d = pos2, length2, t_sent2, d2
+            take["sync_poll_s"] = round(d, 3)
+            self._poll_s = d
             take["clip_length_beats"] = length
-            beat0 = wall - pos * spb                                  # wall time of beat 0 of the clip
+            if length is not None and length < beats[-1] + 0.1:
+                raise RuntimeError("the MIDI clip is %g beats long, the last note starts at %g: it could not be lengthened" % (length, beats[-1]))
+            beat0 = t_sent - pos * spb                                # believed wall time of beat 0; the true one is up to d later
             for k in range(1, len(plans)):
                 note_wall = beat0 + beats[k] * spb
                 self.sleep(max(0.0, note_wall - lead - self.clock()))
                 t_w = self.clock()
+                earliest = beat0 + beats[k - 1] * spb + d + plans[k - 1][3]
+                plans[k][0]["early_ms"] = round(1000.0 * (t_w - earliest), 1)
+                if t_w < earliest - 1e-9 and not plans[k - 1][0]["reason"]:
+                    plans[k - 1][0]["reason"] = ("the next candidate's write started %.0f ms before this hit could have ended (clock sync "
+                                                 "uncertainty %.0f ms + note %.0f ms)" % (1000 * (earliest - t_w), 1000 * d, 1000 * plans[k - 1][3]))
                 ok, why = self._write(plans[k][1])
                 t_d = self.clock()
                 writes.append((ok, why, t_d - t_w, t_d))
@@ -1315,35 +1436,26 @@ class LiveRenderer:
                 c = plans[k][0]
                 got = beat0 + beats[k] * spb - ended
                 c["write_ms"], c["lead_ms"] = round(1000.0 * took, 1), round(1000.0 * got, 1)
+                if c["reason"]:
+                    continue
                 if not ok:
                     c["reason"] = why
                 elif k and got < self.min_lead_s:
                     c["reason"] = "parameters written only %.0f ms before the note (at least %.0f ms)" % (1000 * got, 1000 * self.min_lead_s)
             self.sleep(max(0.0, beat0 + beats[-1] * spb + max(self.hit_s, plans[-1][3]) + 0.1 - self.clock()))
-        finally:
-            errors = []
-            steps = []
-            if started:
-                steps.append(lambda: cl.call(slot, "stop"))
-            if touched:
-                steps.append(lambda: cl.call("live_set", "stop_playing"))
-                restore = [{"op": "set", "path": self.record_track, "property": "solo", "value": was_solo[rec_index]}]
-                restore += [{"op": "set", "path": "live_set tracks %d" % i, "property": "solo", "value": True}
-                            for i, s in enumerate(was_solo) if s and i != rec_index]
-                if was_armed is False:
-                    restore.append({"op": "set", "path": self.record_track, "property": "arm", "value": False})
-                steps.append(lambda: cl.transaction(restore, stop_on_error=False))
-            for step in steps:
-                try:
-                    step()
-                except Exception as e:                                # keep going: every stop and restore must be tried
-                    errors.append(str(e))
-            take["cleanup_errors"] = errors
-        late = [c for c, *_ in plans if c["reason"] and c["reason"].startswith("parameters written only")]
+        except BaseException as e:                                    # cleanup first, then this is raised again
+            pending = e
+        errors = self._cleanup(take, slot, started, touched, base_solo, base_arm, blind_restore, nt)
+        first = pending if pending is not None else (errors[0] if errors else None)
+        if first is not None:
+            raise first
+        late = [c for c, *_ in plans[1:] if c.get("lead_ms") is not None and c["lead_ms"] / 1000.0 < self.min_lead_s]
         if late and len(late) > len(plans) / 4.0:                     # adapt: the next batch starts earlier
             short = max(self.min_lead_s - c["lead_ms"] / 1000.0 for c in late)
             take["lead_raised_s"] = round(short + 0.1, 3)
             self.lead_extra_s += short + 0.1
+        elif not late and self.lead_extra_s:
+            self.lead_extra_s = 0.0 if self.lead_extra_s < 0.02 else self.lead_extra_s / 2.0
         try:
             path = cl.get(slot + " clip", "file_path")["value"]
         except Exception as e:
@@ -1356,16 +1468,12 @@ class LiveRenderer:
         x, sr = sf.read(path, dtype="float64", always_2d=True)
         self.sample_rate = take["sample_rate"] = int(sr)
         out = [empty] * len(patches)
-        # Launch quantization starts the two slots on the grid, and the two fires are two requests apart: the record
-        # slot can start a whole grid step before the clip. The recording then has that much extra lead. The first
-        # onset in the file is note 0 (the record slot is fired first, so it never starts after the clip), and the
-        # shift it shows is applied to every expected time when it is more than the late tolerance.
-        shift = 0.0
-        mag = np.abs(x).max(axis=1)
-        if len(mag) and mag.max() > 0:
-            take["file_shift_s"] = round(oneshot._onset(x, mag, sr, False) / sr - beats[0] * spb, 4)
-            if take["file_shift_s"] > self.onset_late_s:
-                shift = take["file_shift_s"]
+        shift = self._file_shift(take, x, sr, beats[0] * spb, len(plans), spacing_beats * spb, quant)
+        if shift is None:
+            for c, *_ in plans:
+                c["reason"] = c["reason"] or "the take was rejected: %s" % take["rejected"]
+            take["failures"] = [(c["index"], c["reason"]) for c in cands if c["reason"]]
+            return out
         for k, (c, _, _, _) in enumerate(plans):
             c["expected_s"] = round(beats[k] * spb + shift, 4)
             if c["reason"]:
@@ -1392,6 +1500,113 @@ class LiveRenderer:
             take["offset_trend_ms"] = found[-1] - found[0]
         take["failures"] = [(c["index"], c["reason"]) for c in cands if c["reason"]]
         return out
+
+    def _file_shift(self, take: dict, x: np.ndarray, sr: int, first_s: float, n_notes: int, spacing_s: float, quant: float | None):
+        """How far into the file the clip's first note sounds, against where the clip puts it (0 within the late
+        tolerance), or None with take["rejected"] set when it cannot be trusted: see the class docstring."""
+        mag = np.abs(x).max(axis=1)
+        if not len(mag) or mag.max() <= 0:
+            take["rejected"] = "the recording is silent"
+            return None
+        shift = oneshot._onset(x, mag, sr, False) / sr - first_s
+        take["file_shift_s"] = round(shift, 4)
+        take["onsets_found"] = len(oneshot._segments(x, sr))
+        if -self.onset_early_s <= shift <= self.onset_late_s:
+            return 0.0
+        if shift < 0:
+            take["rejected"] = ("the first sound is %.2f s before where the clip puts note 0: the recording started after the clip, "
+                                "or the clip started earlier than believed" % -shift)
+            return None
+        step = quant * 60.0 / take["tempo"] if quant else None
+        window = take["fire_window_s"] or 0.0
+        on_grid = bool(step) and abs(shift - round(shift / step) * step) <= self.shift_tol_s
+        if shift > window + self.shift_tol_s and not on_grid:
+            take["rejected"] = ("the first sound is %.2f s after where the clip puts note 0: more than the %.2f s between the two fires and "
+                                "not a whole number of launch-quantization steps (%s): note 0 may be missing from the recording, so no hit "
+                                "is cut by a guessed shift" % (shift, window, "no quantization" if not step else "step %.2f s" % step))
+            return None
+        if shift >= spacing_s - 0.1 and take["onsets_found"] != n_notes:
+            # a shift of about a spacing or more is also what a MISSING note 0 looks like (the first onset is then note 1)
+            take["rejected"] = ("the first sound is %.2f s late, about a spacing (%.2f s), and the recording has %d onsets for %d notes: "
+                                "note 0 may be missing, so the shift cannot be trusted" % (shift, spacing_s, take["onsets_found"], n_notes))
+            return None
+        return shift
+
+    def _cleanup(self, take: dict, slot: str, started: bool, touched: bool, base_solo: list, base_arm: list, blind_restore: list,
+                 nt: int) -> list:
+        """Re-read the identity and every track's solo and arm, stop the record slot and the transport, restore what
+        differs. Every step runs whatever happened to the others, BaseException included; the caught exceptions
+        are returned in the order they happened (the caller raises the first)."""
+        cl = self.client
+        errors: list = []
+        ctx: dict = {"moved": False}
+
+        def reread():
+            specs = [{"path": self.record_track, "property": "name"}, {"path": self.midi_track, "property": "name"},
+                     {"path": self.device, "property": "class_name"}]
+            specs += [{"path": "live_set tracks %d" % i, "property": "solo"} for i in range(nt)]
+            specs += [{"path": "live_set tracks %d" % i, "property": "arm"} for i in range(nt)]
+            r = [_value(x) for x in cl.get_batch(specs)["results"]]
+            ctx["ident"] = {"record": r[0], "midi": r[1], "device": r[2]}
+            ctx["solo"] = [bool(x) for x in r[3:3 + nt]]
+            ctx["arm"] = [None if x is None else bool(x) for x in r[3 + nt:3 + 2 * nt]]
+            if ctx["ident"] != self.expect:
+                ctx["moved"] = True
+                raise RuntimeError("the scratch tracks moved during the take (expected %s, found %s): the record slot and the solo/arm "
+                                   "states were NOT written to; the real record track may still be soloed and armed" % (self.expect, ctx["ident"]))
+
+        def twice(fn):
+            """fn, and once more if it raised (a Ctrl-C or a timeout may have cost the request): the recording and the
+            transport must not be left running. The first failure is kept; a second one propagates."""
+            try:
+                return fn()
+            except BaseException as e:
+                errors.append(e)
+                return fn()
+
+        def stop_slot():
+            if started and not ctx["moved"]:
+                twice(lambda: cl.call(slot, "stop"))
+
+        def stop_transport():
+            if touched:
+                twice(lambda: cl.call("live_set", "stop_playing"))
+
+        def restore():
+            if not touched or ctx["moved"]:
+                return
+            if "solo" in ctx:
+                ops = [{"op": "set", "path": "live_set tracks %d" % i, "property": "solo", "value": base_solo[i]}
+                       for i, (a, b) in enumerate(zip(ctx["solo"], base_solo)) if a != b]
+                arm = [(i, b) for i, (a, b) in enumerate(zip(ctx["arm"], base_arm)) if a is not None and b is not None and a != b]
+                ops += [{"op": "set", "path": "live_set tracks %d" % i, "property": "arm", "value": b} for i, b in sorted(arm, key=lambda t: t[1])]
+            else:
+                ops = blind_restore                                   # the re-read failed: at least the record track
+            if ops:
+                res = twice(lambda: cl.transaction(ops, stop_on_error=False)).get("results", [])
+                bad = [r for r in res if not r.get("ok")]
+                if bad or len(res) < len(ops):
+                    self._restore_failed = True
+                    raise RuntimeError("restoring solo/arm failed (%d of %d operations: %s): the Set's track states may be wrong" % (
+                        len(bad) or len(ops) - len(res), len(ops), bad[0].get("error") if bad else "no result"))
+            self._restore_failed = False
+
+        for step in ((reread if touched else None), stop_slot, stop_transport, restore):
+            if step is None:
+                continue
+            try:
+                step()
+            except BaseException as e:                                # a second Ctrl-C included: the other steps still run
+                errors.append(e)
+                if step is restore:
+                    self._restore_failed = True
+        take["cleanup_errors"] = [str(e) for e in errors]
+        return errors
+
+
+def _value(r):
+    """The value of one get_batch result, None when the read failed."""
+    return r.get("value") if r.get("ok", True) else None
 
 
 def operator_to_params(structure: dict):
@@ -1499,19 +1714,31 @@ def noise_floor_db(x: np.ndarray, sr: int, profile: dict) -> tuple[float, str]:
 
 
 def patch_match(sample_path, renderer, rounds: int = 8, population: int = 16, seed: int = 0, sr: int | None = None,
-                hit_s: float | None = None, floor_db: float | None = None, units: dict | None = None) -> dict:
+                hit_s: float | None = None, floor_db: float | None = None, units: dict | None = None,
+                verify: int = 4) -> dict:
     """Match an Operator patch to the one-shot at `sample_path` by search through `renderer`: profile the sample,
     operator_guess, search_arguments (start, bounds, probes), the distance's floor_db from the sample's own noise
-    bed (noise_floor_db, at most 60; `floor_db` overrides), then `search` with the renderer's `render`.
+    bed (noise_floor_db, at most 60; `floor_db` overrides), then `search` with the renderer's `render`, then ONE
+    verification take.
     `renderer` is a LiveRenderer / OperatorRenderer (bound to the guess's structure here) or any callable
     render(patches) -> hits (then `sr`, the renders' sample rate, is required unless it has a `sample_rate`
     attribute set; a renderer that does not know its rate yet is asked for one hit of the start first). The hit
-    is compared over `hit_s` seconds (default: the sample's duration, at most oneshot.DIST_MAX_S; also set on a
-    renderer that has `hit_s`).
-    Returns {"best" (semantic patch), "live" (Live's values for it, through to_live), "distance", "start_distance",
-    "per_round", "rounds", "renders", "takes" (the renderer's takes used), "repeat_spread", "stalled", "floor_db",
-    "floor_reading", "readings" (oneshot.compare of the best render against the sample: past-threshold lines),
-    "guess", "search" (the SearchResult), "best_render"}."""
+    is compared over `hit_s` seconds (default: the sample's duration, at most oneshot.DIST_MAX_S); a renderer's own
+    `hit_s` is set for the run and put back afterwards.
+    A RUN CAN END EARLY: when the renderer raises (no empty slot left, the Set started playing, a track moved) the
+    search returns what it had and the exception is in the top-level "error" (None when the run completed); check
+    it before reading the rest. A failed verification take is in "verification_error".
+    The scores are NOT comparable as they stand: "start_distance" (alias "start_distance_round0") is ONE render of
+    the start in round 0, "distance" (alias "distance_search") is the mean over the renders of the best patch, one of
+    which won its selection, and a noise-like hit never repeats exactly (the spread is 0.01 to 0.02). The comparable
+    pair is "start_distance_verified" and "distance_verified": `verify` fresh renders of the start and of the best in
+    ONE take, with their std ("..._std"); gain = start - best, to be read against those stds.
+    Returns {"best" (semantic patch), "live" (Live's values for it, through to_live), "error", "distance",
+    "distance_search", "start_distance", "start_distance_round0", "start_distance_verified",
+    "start_distance_verified_std", "distance_verified", "distance_verified_std", "verification_error", "per_round",
+    "rounds", "renders", "takes" (the renderer's takes used, the verification included), "repeat_spread", "stalled",
+    "floor_db", "floor_reading", "readings" (oneshot.compare of a best render against the sample: past-threshold
+    lines), "guess", "search" (the SearchResult), "best_render"}."""
     import soundfile as sf
     units = units if units is not None else operator_units()
     profile = oneshot.profile(sample_path)
@@ -1524,45 +1751,66 @@ def patch_match(sample_path, renderer, rounds: int = 8, population: int = 16, se
         hit_s = min(oneshot.DIST_MAX_S, (dur / 1000.0 + 0.1) if dur else max(0.1, len(x) / sr0 - onset))
     if hasattr(renderer, "bind"):
         renderer.bind(guess["structure"])
+    had_hit_s = getattr(renderer, "hit_s", None)
     if hasattr(renderer, "hit_s"):
         renderer.hit_s = hit_s
-    takes0 = len(getattr(renderer, "takes", []))
-    render = renderer.render if hasattr(renderer, "render") else renderer
-    sr = sr or getattr(renderer, "sample_rate", None)
-    if sr is None:
-        render([args["start"]])                                    # one hit of the start, to learn the recording's rate
-        sr = getattr(renderer, "sample_rate", None)
+    try:
+        takes0 = len(getattr(renderer, "takes", []))
+        render = renderer.render if hasattr(renderer, "render") else renderer
+        sr = sr or getattr(renderer, "sample_rate", None)
         if sr is None:
-            raise ValueError("the renderer does not know its sample rate: pass sr=")
-    cut, _ = oneshot.hit_cut(x, sr0, onset, hit_s)
-    target = oneshot._resample(cut, sr0, sr) if sr != sr0 else cut
-    if floor_db is None:
-        floor_db, how = noise_floor_db(x, sr0, profile)
-    else:
-        how = "given"
-    cache = {}
+            render([args["start"]])                                # one hit of the start, to learn the recording's rate
+            sr = getattr(renderer, "sample_rate", None)
+            if sr is None:
+                raise ValueError("the renderer does not know its sample rate: pass sr=")
+        cut, _ = oneshot.hit_cut(x, sr0, onset, hit_s)
+        target = oneshot._resample(cut, sr0, sr) if sr != sr0 else cut
+        if floor_db is None:
+            floor_db, how = noise_floor_db(x, sr0, profile)
+        else:
+            how = "given"
+        cache = {}
 
-    def key(p):
-        return tuple(sorted(p.items()))
+        def key(p):
+            return tuple(sorted(p.items()))
 
-    def recording(patches):
-        hits = render(patches)
-        for p, h in zip(patches, hits):
-            if len(h):
-                cache[key(p)] = h
-        return hits
+        def recording(patches):
+            hits = render(patches)
+            for p, h in zip(patches, hits):
+                if len(h):
+                    cache[key(p)] = h
+            return hits
 
-    res = search(args["start"], args["bounds"], recording, target, sr, rounds=rounds, population=population, seed=seed,
-                 floor_db=floor_db, probes=args.get("probes"))
-    best_hit = cache.get(key(res.best))
-    if best_hit is None:
-        best_hit = next((h for h in render([res.best]) if len(h)), None)
-    readings = None
-    if best_hit is not None:
-        readings = oneshot.compare(oneshot.profile_array(best_hit, sr, single=True), profile)["readings"]
-    live = to_live(operator_live(res.best, guess["structure"])["params"], units)
-    return {"best": res.best, "live": live, "distance": res.distance, "start_distance": res.start_distance,
-            "per_round": res.per_round, "rounds": res.rounds, "renders": res.renders,
-            "takes": len(getattr(renderer, "takes", [])) - takes0, "repeat_spread": res.repeat_spread, "stalled": res.stalled,
-            "floor_db": floor_db, "floor_reading": how, "readings": readings, "guess": guess, "search": res,
-            "best_render": best_hit}
+        res = search(args["start"], args["bounds"], recording, target, sr, rounds=rounds, population=population, seed=seed,
+                     floor_db=floor_db, probes=args.get("probes"))
+        best_hit = cache.get(key(res.best))
+        out = {"start_distance_verified": None, "start_distance_verified_std": None, "distance_verified": None,
+               "distance_verified_std": None, "verification_error": None}
+        if verify:
+            try:
+                hits = render([args["start"]] * verify + [res.best] * verify)
+                for name, part in (("start_distance_verified", hits[:verify]), ("distance_verified", hits[verify:])):
+                    d = [spectral_distance(h, target, sr, floor_db=floor_db) for h in part if len(h)]
+                    if d:
+                        out[name] = float(np.mean(d))
+                        out[name + "_std"] = float(np.std(d, ddof=1)) if len(d) > 1 else None
+                best_hit = next((h for h in hits[verify:] if len(h)), best_hit)
+            except Exception as e:                                 # the search's result is still worth returning
+                out["verification_error"] = "%s: %s" % (type(e).__name__, e)
+        if best_hit is None:
+            try:
+                best_hit = next((h for h in render([res.best]) if len(h)), None)
+            except Exception as e:
+                out["verification_error"] = out["verification_error"] or "%s: %s" % (type(e).__name__, e)
+        readings = None
+        if best_hit is not None:
+            readings = oneshot.compare(oneshot.profile_array(best_hit, sr, single=True), profile)["readings"]
+        live = to_live(operator_live(res.best, guess["structure"])["params"], units)
+        return dict(out, best=res.best, live=live, error=res.error, distance=res.distance, distance_search=res.distance,
+                    start_distance=res.start_distance, start_distance_round0=res.start_distance, per_round=res.per_round,
+                    rounds=res.rounds, renders=res.renders, takes=len(getattr(renderer, "takes", [])) - takes0,
+                    repeat_spread=res.repeat_spread, stalled=res.stalled, floor_db=floor_db, floor_reading=how,
+                    readings=readings, guess=guess, search=res, best_render=best_hit)
+    finally:
+        if hasattr(renderer, "hit_s"):
+            renderer.hit_s = had_hit_s
