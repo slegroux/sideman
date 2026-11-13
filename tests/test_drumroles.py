@@ -1,7 +1,7 @@
 """sideman.drumroles.hit_groups on synthetic drum stems at 124 BPM whose answers follow from how they are built.
 
 Needs the `listen` extra:  uv run --extra listen pytest tests/test_drumroles.py -q
-Skipped (not failed) when numpy or soundfile is missing. Three tests that take over 6 s are marked `slow`:
+Skipped (not failed) when numpy or soundfile is missing. Four tests that take over 6 s are marked `slow`:
 `-m "not slow"` leaves them out, a plain run includes them.
 
 Conventions used below: bar 0 starts at T0; a 16th is 60 / 124 / 4 s; step 0 is the downbeat, 4 / 8 / 12 are the other
@@ -779,6 +779,7 @@ def test_names_an_unmeasured_hit_at_a_16th_makes_that_bar_unobservable_there_lik
     assert (row["played_bars"], row["observable_bars"], row["share_all"], row["share_observable"]) == (4, 4, 0.5, 1.0)
 
 
+@pytest.mark.slow
 def test_observable_cells_of_a_real_stem_are_the_hidden_and_unmeasured_lines():
     # open hats (tau 120 ms) on the offbeats, closed hats (12 ms) on the 96 other 16ths of 8 bars: the 16th after each open hat
     # lies in its tail with no hit found (without the search every such line, steps 3, 7, 11, 15, in all 8 bars), and with the
