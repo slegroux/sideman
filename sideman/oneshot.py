@@ -1317,8 +1317,9 @@ def _equalise(a: np.ndarray, b: np.ndarray, sr: int, match_level: bool, max_s: f
         onset = _hit_onset(x, sr)
         pre = x[max(0, onset - int(round(HIT_LEAD_S * sr))):onset]          # the ms before the onset stay
         x = x[onset:]
-        if match_level:
-            x = x * (DIST_RMS / _loudest_ms(x, sr))
+        if match_level:                                    # one gain for the hit and the ms before it
+            gain = DIST_RMS / _loudest_ms(x, sr)
+            x, pre = x * gain, pre * gain
         cut.append((np.concatenate([np.zeros((lead - len(pre), x.shape[1])), pre]), x))
     n = min(max(len(x) for _, x in cut), int(round(max_s * sr)))
     tail = max(f for f, _, _ in MRSTFT) // 2
@@ -1342,7 +1343,7 @@ def distance_terms(a: np.ndarray, b: np.ndarray, sr: int, match_level: bool = Tr
       - scale="mel" (default): the magnitudes are first summed into Slaney mel bands (128, 64 and 32 bands at FFT
         2048, 1024, 512, as its scale="mel" with a band count that follows the FFT size). A noise burst's bin
         magnitudes fluctuate from one realisation to the next, and a one-sample shift moves them; mel bands average
-        that out (the same hat with another noise seed: 0.38 mel, 0.84 linear);
+        that out (the same hat with another noise seed: 0.6 mel, 1.16 linear);
       - symmetry: the reference divides the convergence by the norm of the target only, so d(a, b) != d(b, a);
         here it is the mean of the two divisions;
       - dynamic-range floor: the log term clamps every magnitude at `floor_db` (DIST_FLOOR_DB, 60) under the
@@ -1364,7 +1365,7 @@ def distance_terms(a: np.ndarray, b: np.ndarray, sr: int, match_level: bool = Tr
     proportion to how far it rises above the floor (a file merely cut short counts as a hit that ended there; cut
     both to the same length first when that is not what is compared).
     Not removed: a bed under one hit but not the other is a real difference and counts; so does the noise
-    realisation of a noise-like hit (two takes of one hat read 0.38; of one snare 0.32). Alignment is only as good
+    realisation of a noise-like hit (two takes of one hat read 0.6; of one snare 0.45). Alignment is only as good
     as the onset: a hit with a slow attack, or a bed within 40 dB of it, can be misplaced by a few ms.
     Channels: equal counts are compared channel against channel, so swapping L and R of a stereo hit reads as a
     difference; hits of different counts are both averaged to mono (a wide stereo hit can comb in the mix).

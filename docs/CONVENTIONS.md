@@ -300,6 +300,10 @@ listening, only against `sample_analyze`'s readings and role-sorted samples
   hat's peak adds 1.4 (it is 41 dB under the hat's loudest millisecond, 19 dB
   above the floor), and one 45 dB under a tom adds 0.06 (a tone's loudest bin
   stands about 25 dB over its mean level, so the bed is under the floor).
+  A sample with a noise bed against a clean synth render therefore reads the
+  bed: a hat 60 dB over its bed reads 0.5 to 0.6 (0.16 to 0.18 on linear
+  bins). Pass a `floor_db` a few dB under the sample's own noise floor
+  (`floor_db=50` there leaves 0.07 and keeps a decay change at 0.69).
   `floor_db=None` is the `auraloss` definition (symmetry aside).
 - **Equalised first**: DC removed; the onsets aligned (the first 1 ms within
   40 dB of the loudest, or 12 dB over a noise bed that precedes the hit: a
@@ -326,7 +330,7 @@ longer (tau 50 against 40 ms) 0.23, 2.5 times longer 0.91; one semitone on the
 200 Hz tom 0.30, seven 1.05, twelve 1.39; a kick against a hat 3.9, a hat
 against a snare 3.7. **Low pitches have a shelf**: on the 50 Hz kick 0.05, 0.1,
 0.2, 0.3 and 0.5 semitones read 0.06, 0.11, 0.18, 0.22 and 0.25, then 0.75 to
-1.5 semitones read 0.25, 0.24, 0.24, 0.25 (a local minimum: no step downhill),
+1.5 semitones read 0.25, 0.24, 0.24, 0.25 (a shallow local minimum near 1 semitone),
 2 semitones 0.27 and twelve 0.79, because partials that do not overlap are as
 far apart at 0.75 semitones as at 1.5. So the distance does not guide pitch
 below about 2 semitones on a low drum; the search must start from the

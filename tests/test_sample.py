@@ -1159,6 +1159,15 @@ def test_distance_the_same_hit_at_another_gain_is_zero_unless_the_gain_is_kept()
     assert kept[0] < 1e-9 and kept[1] > 0.3 * smallest() and kept == sorted(kept), kept
 
 
+def test_distance_the_gain_is_matched_before_the_onset_too():
+    # a 5 ms linear attack leaves audible content in the ms before the onset found: it takes the hit's gain
+    x = tom()
+    ramp = np.minimum(1.0, np.arange(len(x)) / (0.005 * SR))
+    slow = x * (ramp[:, None] if x.ndim == 2 else ramp)
+    for db in (-30.0, 6.0):
+        assert dist(slow, slow * 10 ** (db / 20)) < 1e-9, db
+
+
 def test_distance_grows_with_the_decay_time():
     d = [dist(tom(0.04), tom(tau)) for tau in (0.04, 0.05, 0.07, 0.10)]
     assert d[0] < 1e-9 and d[0] < d[1] < d[2] < d[3], d
