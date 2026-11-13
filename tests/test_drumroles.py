@@ -404,12 +404,15 @@ def test_grid_onsets_on_a_tom_or_kick_stem_count_the_bleed_as_hits_and_say_so(ki
     assert sorted(h["bar"] * 16 + h["step"] for h in grid) == expected and all(abs(h["offset_ms"]) < 20 for h in grid)
     # and the stem is not hat-like, which is what the option is for: nearly all of its energy lies under 4 kHz
     assert off["hat_like"] < 0.01 and on["hat_like"] == off["hat_like"]
+    assert any("meant for hat-like stems" in n and "hat_like 0.00" in n for n in on["notes"])
+    assert not any("meant for hat-like stems" in n for n in off["notes"])
 
 
 def test_grid_onsets_on_the_hat_stem_find_only_hats_and_the_stem_reads_hat_like(hat_stem):
     # the same stem as the first test, the search on: nothing is added (every 16th has a hit), and the stem is hat-like
     r = run(hat_stem, grid_onsets=True)
     assert r["grid_hits"] == 0 and len(r["hits"]) == 128 and r["hat_like"] > 0.9
+    assert not any("meant for hat-like stems" in n for n in r["notes"])
 
 
 # ---------------------------------------------------------------- pitch: toms an octave or a fifth apart
@@ -446,9 +449,20 @@ def test_well_separated_sounds_are_stable_and_a_decay_continuum_is_not():
     taus = np.random.default_rng(6).permutation(np.tile(np.arange(6, 31, 2) * 1e-3, 5))[:64]
     ev = [(at(i), noise_hit(i, float(tau))) for i, tau in enumerate(taus)]
     c = run(stem(ev, 4), stability_runs=2)
-    assert c["groups"] and min(g["stability"] for g in c["groups"]) < 0.8, [(g["count"], g["stability"]) for g in c["groups"]]
-    assert all(0.0 <= g["stability"] <= 1.0 for g in c["groups"])
-    assert run(stem(hat_events(4), 4))["groups"][0]["stability"] is None             # not measured when not asked for
+    measured = [g for g in c["groups"] if not g["tentative"]]
+    assert measured and min(g["stability"] for g in measured) < 0.8, [(g["count"], g["stability"]) for g in c["groups"]]
+    assert all(0.0 <= g["stability"] <= 1.0 for g in measured)
+    assert all(g["stability"] is None for g in c["groups"] if g["tentative"])            # a tentative group has none
+    # separation: the mean distance to the nearest other group's members. Separated sounds lie well over the threshold
+    # from each other (closed against open 2.9 here, each the other's nearest); a continuum has groups that touch
+    assert [g["nearest_group"] for g in r["groups"]] == [1, 0]
+    assert all(g["separation"] > 1.4 * drumroles.THRESHOLD for g in r["groups"])
+    assert min(g["separation"] for g in measured) < 1.4 * drumroles.THRESHOLD, [(g["count"], g["separation"]) for g in measured]
+    assert all(g["nearest_group"] != g["id"] for g in c["groups"] if g["nearest_group"] is not None)
+    # with no more measured hits than the sample the sample cannot move: no figure, a note, and no regrouping
+    short = run(stem([(at(i), noise_hit(i, float(tau))) for i, tau in enumerate(taus[:32])], 2), stability_runs=2)
+    assert all(g["stability"] is None for g in short["groups"]) and any("cannot move" in n for n in short["notes"])
+    assert run(stem(hat_events(2), 2))["groups"][0]["stability"] is None             # not measured when not asked for
 
 
 def test_a_group_of_under_4_hits_is_tentative():
@@ -538,10 +552,52 @@ def test_an_overlapped_hit_between_two_alike_groups_is_not_assigned_and_one_next
     def assign(medoids):
         hits[2].update(group=None, distance=None)
         hits[2]["status"], hits[2]["reason"] = "overlapped", "it starts out of a tail or bed only 20 dB under its own loudest ms (it needs 30)"
-        found = [(gid, {"medoid": m, "assigned": []}) for gid, m in enumerate(medoids)]
+        found = [(gid, {"medoid": m, "members": [m] * drumroles.TENTATIVE_N, "assigned": []}) for gid, m in enumerate(medoids)]
         drumroles._assign_overlapped(x, SR, hits, found, drumroles.THRESHOLD)
         return hits[2]["status"], hits[2]["reason"], found
     status, reason, _ = assign([0, 1])
     assert status == "overlapped" and "not assigned" in reason and "groups 0 and 1" in reason, reason
     status, reason, found = assign([0, 3])
     assert status == "assigned" and hits[2]["group"] == 0 and found[0][1]["assigned"] == [2] and "first 40 ms" in reason, reason
+
+
+def test_a_lone_hit_on_a_tail_does_not_attract_the_hits_of_a_real_group():
+    # a real group (6 clean hats, medoid 0, rose out of silence) and a lone hit heard over a noise tail 36 dB under it;
+    # two overlapped hats over the same kind of tail, 29 dB under them. Their tail makes them nearer the lone hit than
+    # the clean group, which is the tail's doing: a group of fewer than 4 hits takes assigned hits only when its medoid
+    # rose out of near silence (-40 dB or under), so the real group gets them; with a clean medoid the lone one takes them
+    n = int(STEP * SR)
+    tail = noise_hit(77, 0.12)[:n]
+
+    def over(seed, db):
+        h = noise_hit(seed, 0.012)[:n]
+        g = oneshot._loudest_ms(h[:, None], SR) * 10 ** (db / 20) / np.sqrt((tail[:int(0.01 * SR)] ** 2).mean())
+        return h + g * tail
+    parts = [noise_hit(i, 0.012)[:n] for i in range(1, 7)] + [over(10, -36.0), over(11, -29.0), over(12, -29.0)]
+    x = np.concatenate([np.concatenate([p, np.zeros(SR // 10)]) for p in parts])[:, None]
+    starts = np.cumsum([0] + [len(p) + SR // 10 for p in parts])[:len(parts)]
+    d_lone = drumroles._pair_distance(x[starts[7]:starts[7] + n], x[starts[6]:starts[6] + n], SR)
+    d_real = drumroles._pair_distance(x[starts[7]:starts[7] + n], x[starts[0]:starts[0] + n], SR)
+    assert d_lone < d_real < drumroles.THRESHOLD, (d_lone, d_real)          # the premise: nearer the tail, still within reach
+
+    def assign(lone_lead):
+        hits = [{"id": i, "start": int(a), "end": int(a) + n, "status": "grouped", "reason": None, "lead_db": -90.0,
+                 "group": None, "distance": None} for i, a in enumerate(starts)]
+        hits[6]["lead_db"] = lone_lead
+        for i in (7, 8):
+            hits[i].update(status="overlapped", lead_db=-29.0,
+                           reason="it starts out of a tail or bed only 29 dB under its own loudest ms (it needs 30)")
+        found = [(0, {"members": list(range(6)), "medoid": 0, "assigned": []}), (1, {"members": [6], "medoid": 6, "assigned": []})]
+        drumroles._assign_overlapped(x, SR, hits, found, drumroles.THRESHOLD)
+        return [g["assigned"] for _, g in found], [hits[i]["status"] for i in (7, 8)]
+    assert assign(-36.0) == ([[7, 8], []], ["assigned", "assigned"])        # the lone hit sits on a tail: the real group
+    assert assign(-45.0) == ([[], [7, 8]], ["assigned", "assigned"])        # a lone hit from near silence is a candidate
+
+
+def test_a_hat_of_tau_60_ms_with_a_rest_sounds_through_two_lines():
+    # -17.5 and -35 dB at the next two 16th lines, -52 at the third: two lines inside 40 dB (a tau 30 ms hat has one,
+    # -35 then -70)
+    r = run(stem([(at(i), noise_hit(i, 0.06)) for i in range(2, 32, 4)], 2))
+    assert [h["through"] for h in r["hits"]] == [2] * 8
+    r = run(stem([(at(i), noise_hit(i, 0.03)) for i in range(2, 32, 4)], 2))
+    assert [h["through"] for h in r["hits"]] == [1] * 8

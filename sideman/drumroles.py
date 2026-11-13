@@ -65,8 +65,9 @@ Choices that are not obvious from the code:
   Material whose distances lie around the threshold (a continuum of decays, a velocity gradient: 48 of 247 hat member
   distances on Flare lie between 1.3 and 1.5) is cut where the sample puts the cut: a different sample, or the same
   bars inside a longer stem, gives other groups for it (the review: ARI 0.65-0.95 for the sample at 16 to 128 hits). Well
-  separated sounds do not move. `stability` says which groups moved (see hit_groups), and groups under 4 measured
-  hits are `tentative`.
+  separated sounds do not move. `stability` says which groups moved (see hit_groups; None when the sample cannot move,
+  and for tentative groups), `separation` how far each group lies from the next, and groups under 4 measured hits are
+  `tentative`.
 - Pitch: the distance moves little with pitch on low drums, so a group whose members' body pitches (`profile_array`'s
   `pitch_body_hz` on each member's cut) fall in two clusters more than 3 semitones apart is split after grouping, each
   side keeping at least two hits; members with no pitch stay with the larger cluster. Measured as the same drum
@@ -78,7 +79,8 @@ Choices that are not obvious from the code:
   compared pairwise: a deterministic sample of SAMPLE_HITS hits (evenly spaced in time) is grouped (S^2 / 2 distances),
   every other hit goes to the nearest of the sample's medoids if within `threshold` of it (n * k distances for k
   groups), and what is left over is sampled again, until nothing is or `max_groups` groups exist. Overlapped hits cost
-  one distance per group. `stability_runs` regroupings with a shifted sample reuse every distance already measured, and
+  one distance per group (a tentative group is a candidate only when its medoid rose out of near silence, lead -40 dB or
+  less: a lone hit on a tail is the tail's sound as much as its own). `stability_runs` regroupings with a shifted sample reuse every distance already measured, and
   cost about as much again for each (Flare hh, bars 32-64, 374 hits: 41 s; the whole stem, 2522 hits: 441 s, 175 ms a
   hit, with the default two regroupings and the pitch reads of the groups that have one). The hits are put in time order first, so the order they come in never matters;
   ties go to the earlier hit. Memory: the stem as float64.
@@ -121,6 +123,9 @@ PITCH_SPLIT_ST = 3.0     # a group whose members' body pitches fall in two clust
 PITCH_SCREEN = 8         # members whose pitch is read first; a group under half pitched is not read further
 STABILITY_RUNS = 2       # regroupings with a shifted sample that `stability` is measured against
 TENTATIVE_N = 4          # a group under this many hits is tentative
+CLEAN_START_DB = -40.0   # a tentative group takes assigned hits only when its medoid rose out of a lead this far under it
+SEP_MEMBERS = 16         # `separation`: members of a group read...
+SEP_OTHERS = 12          # ...against this many of the nearest other group's
 
 
 def _fade(x: np.ndarray, sr: int) -> np.ndarray:
@@ -377,6 +382,29 @@ def _clean_hit(x: np.ndarray, sr: int, hits: list, ids: list, dist: dict) -> tup
             "audio": x[h["start"]:h["end"]].copy()}, None
 
 
+def _evenly(ids: list, n: int) -> list:
+    """At most `n` of `ids` (in time order), evenly spaced, the first and the last included."""
+    return ids if len(ids) <= n else [ids[int(round(k * (len(ids) - 1) / (n - 1)))] for k in range(n)]
+
+
+def _separation(x: np.ndarray, sr: int, hits: list, found: list) -> None:
+    """Sets g["separation"] and g["nearest_group"] on each group of `found`: the nearest other group is the one whose
+    medoid is nearest this group's medoid (spectral distance, ties to the lower id); separation is the mean distance from
+    SEP_MEMBERS of this group's measured members to SEP_OTHERS of that group's, both taken evenly spaced in time (the first
+    and the last included). None for a lone group. One distance per pair of groups plus at most 192 per group."""
+    cut = lambda i: x[hits[i]["start"]:hits[i]["end"]]  # noqa: E731
+    for gid, g in found:
+        others = [(o, og) for o, og in found if o != gid]
+        if not others:
+            g["separation"], g["nearest_group"] = None, None
+            continue
+        mine = cut(g["medoid"])
+        o, og = min(others, key=lambda t: (_pair_distance(mine, cut(t[1]["medoid"]), sr), t[0]))
+        ds = [_pair_distance(cut(i), cut(j), sr) for i in _evenly(g["members"], SEP_MEMBERS)
+              for j in _evenly(og["members"], SEP_OTHERS)]
+        g["separation"], g["nearest_group"] = round(float(np.mean(ds)), 3), o
+
+
 def _scope(x: np.ndarray, sr: int, hits: list, found: list, hidden: set, ids: set, first: int, bars: int, steps: int) -> dict:
     """The groups of `found` (hit ids; see hit_groups) restricted to the hits in `ids`, over the `bars` bars from bar
     `first`. Ordered by count, then by the first member's time; "id" is the group's number in the whole stem.
@@ -394,7 +422,7 @@ def _scope(x: np.ndarray, sr: int, hits: list, found: list, hidden: set, ids: se
         dists = [g["distance"][i] for i in mine]
         groups.append({
             "id": gid, "count": len(mine), "assigned": len(extra), "tentative": len(mine) < TENTATIVE_N,
-            "stability": g["stability"], "bars_with": len({hits[i]["bar"] for i in mine + extra}),
+            "stability": g["stability"], "separation": g["separation"], "nearest_group": g["nearest_group"], "bars_with": len({hits[i]["bar"] for i in mine + extra}),
             "pattern": [len({h["bar"] for h in on if h["step"] == s}) / bars if bars else 0.0 for s in range(steps)],
             "assigned_pattern": [len({h["bar"] for h in on_assigned if h["step"] == s}) / bars if bars else 0.0
                                  for s in range(steps)],
@@ -418,7 +446,10 @@ def _assign_overlapped(x: np.ndarray, sr: int, hits: list, found: list, threshol
     ASSIGN_FULL_DB or more under it is compared with each group's medoid over its whole cut, one whose tail is between
     that and ASSIGN_SHORT_DB over its first ASSIGN_SHORT_S (the tail is lost under a decaying hit's body in the first
     tens of ms and keeps growing against it after), a louder tail: not at all. The hit goes to the nearest medoid when
-    that is within `threshold` and ASSIGN_MARGIN times nearer than the second nearest; its status becomes "assigned"."""
+    that is within `threshold` and ASSIGN_MARGIN times nearer than the second nearest; its status becomes "assigned".
+    A group of fewer than TENTATIVE_N measured hits is a candidate only when its medoid rose out of near silence
+    (`lead_db` of CLEAN_START_DB or less): a lone hit that sits on a tail is that tail's sound as much as its own, and
+    attracted the hits of the real group that were heard over the same kind of tail."""
     for h in hits:
         if h["status"] != "overlapped" or h["lead_db"] is None:
             continue
@@ -430,6 +461,8 @@ def _assign_overlapped(x: np.ndarray, sr: int, hits: list, found: list, threshol
         near = []
         for gid, g in found:
             m = hits[g["medoid"]]
+            if len(g["members"]) < TENTATIVE_N and not (m["lead_db"] is not None and m["lead_db"] <= CLEAN_START_DB):
+                continue
             mc = x[m["start"]:m["end"]]
             n = min(len(cut), len(mc)) if window is None else min(len(cut), len(mc), window)
             near.append((oneshot.spectral_distance(_fade(cut[:n], sr), _fade(mc[:n], sr), sr), gid, n))
@@ -473,18 +506,27 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     "faint", "overlapped", "silent" or "ungrouped"), "reason" (why not grouped), "group", "distance" (to its group's
     medoid, over the window that was compared)}.
     A group is {"id", "count" (measured members), "assigned" (overlapped hits placed in it), "tentative" (under 4 measured
-    members), "stability" (see below), "bars_with" (bars it plays in), "pattern" (per 16th, the share of the scope's
+    members), "stability", "separation", "nearest_group" (see below), "bars_with" (bars it plays in), "pattern" (per 16th, the share of the scope's
     bars it plays at, on-grid hits, assigned ones included), "assigned_pattern" (the same for the assigned hits alone),
     "level_db" (median), "spread" ({"median", "max"} of the members' distances to the medoid), "off_grid", "members"
     (hit ids), "assigned_members", "clean_hit" ({"hit", "start", "end", "onset_s", "level_db", "audio"} or None; never
     an assigned hit), "clean_note" (why None)}.
-    `stability` is how the group holds when the sample changes: the stem is grouped again `stability_runs` times
-    with the sample moved by 1/3 and 2/3 of a spacing (same threshold, same pitch split); for each run the Jaccard index
-    (members in both / members in either) of the group with the group of that run it shares most members with, and
-    the mean over the runs. 1.0: the same members every time; a group that a run splits or merges with another reads
-    lower. Material whose distances lie around the threshold (a continuum of decays, a velocity gradient) is cut
+    `stability` is how the group holds when the sample changes: the stem is grouped again `stability_runs` times with
+    the sample moved along; the k-th of the `sample` hits of a round is the one at position
+    round((k + shift) * (m - 1) / (sample - 1 + shift)) of the m hits still ungrouped, with shift 0 in the grouping
+    itself and (r + 1) / (stability_runs + 1) in regrouping r (1/3 and 2/3 by default). For each run, the Jaccard index
+    (members in both / members in either) of the group with the group of that run it shares most members with; the
+    figure is the mean over the runs. 1.0: the same members every time; a group that a run splits or merges with another
+    reads lower. Material whose distances lie around the threshold (a continuum of decays, a velocity gradient) is cut
     where the sample puts the cut, and reads well under 1; the figure is for the stem as a whole, section groups carry it
-    unchanged.
+    unchanged. It is None, with a note, when the sample cannot move (no more measured hits than `sample`: every regrouping
+    is then identical, and none is run), for a tentative group, and with `stability_runs=0`.
+    `separation` is how far the group lies from its neighbour: the nearest other group is the one whose medoid is
+    nearest this group's medoid (ties to the lower id), its id is `nearest_group`, and `separation` is the mean spectral
+    distance from 16 of this group's measured members to 12 of that group's, each set evenly spaced in time with the
+    first and the last included (all of them when fewer). Above `threshold`: the two sounds are apart; near or under it:
+    they are a continuum the threshold cut. None for a lone group. It is measured on the final groups, so a pitch split
+    is included.
     `groups` is the whole stem (its bars run from the first real hit's bar to the last's); each of `sections` has the same
     groups restricted to its bars, with the section's own count, pattern over its `bars`, level, spread and clean hit.
     `unmeasured_pattern` (per 16th, the share of the scope's bars with an on-grid hit there that is overlapped and not
@@ -525,6 +567,9 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     if grid_onsets:
         onsets = sorted(onsets + [(o, "grid") for o in _grid_onsets(x, sr, [o for o, _ in onsets], t0, step_s)])
         out["grid_hits"] = sum(src == "grid" for _, src in onsets)
+        if out["hat_like"] < 0.5:
+            out["notes"].append("grid_onsets is meant for hat-like stems and this one reads hat_like %.2f: the %d hits it added "
+                                "are bleed, tails or the phase of a low tone as often as hits" % (out["hat_like"], out["grid_hits"]))
     guard, lead_end, lead_len = (int(round(v * sr)) for v in (END_GUARD_S, 0.001, LEAD_WINDOW_S))
     hits, cuts, keys, tails = [], [], [], {}
     frame, glead = max(1, int(round(0.001 * sr))), int(round(GRID_LEAD_S * sr))
@@ -593,7 +638,11 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
         return _split_by_pitch(x, sr, hits, groups, pitch), [index[c] for c in rest]
 
     groups, rest = cluster(0.0) if cuts else ([], [])
-    runs = [cluster((r + 1) / (stability_runs + 1))[0] for r in range(stability_runs)] if cuts else []
+    movable = len(cuts) > sample                   # with no more measured hits than the sample every regrouping is the same
+    runs = [cluster((r + 1) / (stability_runs + 1))[0] for r in range(stability_runs)] if cuts and movable else []
+    if stability_runs and cuts and not movable:
+        out["notes"].append("stability is not measured: %d measured hits are no more than the sample (%d), so the sample "
+                            "cannot move" % (len(cuts), sample))
     groups.sort(key=lambda g: (-len(g["members"]), g["members"][0]))
     found = list(enumerate(groups))
     for gid, g in found:
@@ -603,11 +652,12 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
             best = max(other, key=lambda o: len(set(o["members"]) & set(g["members"])))
             both = len(set(best["members"]) & set(g["members"]))
             shares.append(both / (len(g["members"]) + len(best["members"]) - both))
-        g["stability"] = round(float(np.mean(shares)), 3) if shares else None
+        g["stability"] = round(float(np.mean(shares)), 3) if shares and len(g["members"]) >= TENTATIVE_N else None
         for i, d in g["distance"].items():
             hits[i]["group"], hits[i]["distance"] = gid, d
     for i in rest:
         hits[i]["status"], hits[i]["reason"] = "ungrouped", "more than %d distinct sounds: not forced into a group" % max_groups
+    _separation(x, sr, hits, found)
     _assign_overlapped(x, sr, hits, found, threshold)
     for h in hits:
         h.pop("_cut", None)
