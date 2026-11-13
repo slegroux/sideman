@@ -505,8 +505,8 @@ def reading(**kw) -> dict:
     return p
 
 
-def test_guess_treats_a_drop_over_in_under_5_ms_as_a_click_and_takes_the_settled_pitch_as_the_carrier():
-    click = patch.operator_guess(reading(pitch_drop_st=17.0, pitch_settle_ms=3.0, pitch_start_hz=270.0, pitch_start_at_ms=0.3))
+def test_guess_treats_a_drop_over_in_under_10_ms_as_a_click_and_takes_the_settled_pitch_as_the_carrier():
+    click = patch.operator_guess(reading(pitch_drop_st=17.0, pitch_settle_ms=8.0, pitch_start_hz=270.0, pitch_start_at_ms=0.3))
     assert click["patch"]["pitch_drop_st"] == 0.0 and click["structure"]["pitch_env_on"] is False
     assert "click" in click["sources"]["pitch_drop_st"]["reading"]
     glide = patch.operator_guess(reading(pitch_body_hz=51.1, pitch_drop_st=19.9, pitch_settle_ms=74.0, pitch_start_hz=161.7,
