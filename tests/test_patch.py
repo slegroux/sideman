@@ -8,6 +8,7 @@ search must not know what renders, and the real renderer will be Live. It is a s
 pitch envelope, an exponential amplitude envelope, a noise layer with its own level and decay, and a short
 attack. Its noise is drawn afresh on every render (like Operator's), so two renders of one patch differ.
 """
+import functools
 import math
 import pathlib
 import sys
@@ -124,10 +125,56 @@ def noise_at(p: dict, t: float) -> float:
     return p["noise_db"] - 20 * math.log10(math.e) * t / p["noise_decay"]
 
 
+@functools.lru_cache(maxsize=None)
+def runs_of(kind: str, fresh: bool) -> list:
+    return [run(kind, seed=seed, fresh=fresh) for seed in SEEDS]
+
+
+FRESH_SEEDS = [7 * 10 ** 6 + k for k in range(8)]      # noise for re-rendering: never one the search used
+
+
+def rerender(p: dict, fresh: bool) -> list:
+    return [standin(p, s) for s in (FRESH_SEEDS if fresh else [TARGET_SEED])]
+
+
+@pytest.mark.parametrize("kind", ["kick", "tom", "hat"])
+@pytest.mark.parametrize("fresh", [True, False], ids=["fresh-noise", "same-noise"])
+def test_search_reaches_the_score_of_the_truth(kind, fresh):
+    """What the search is for is the score it reaches, judged on re-renders of the final patch with noise it never
+    saw (the score it kept is the luckiest of its renders), against the true parameters rendered the same way.
+    Measured over 20 seeds (report, "Score reached"): the final patch is within the truth's distance plus two
+    spreads of it in every seed only on the hat-like target (kick 30 %, tom 20 % of the seeds; its mean gap to
+    the truth is 0.036, 3 to 4 spreads), so that is what is asserted strictly, and for the others the share of
+    the way from the start's distance to the truth's that it closes: at least 60 % in every seed (measured
+    minimum 61 %), 70 % at the median. With one fixed noise the truth scores 0 with no spread, so only the
+    share closed is asserted. Readings of the final patch against the target (oneshot.compare): no fall-time
+    reading (10 or 20 dB) in any seed of the kick-like and tom-like targets (the hat's readings are noise:
+    the truth's own render reads 'attack' and 'sub' differences against its target)."""
+    true = TRUE[kind]
+    target = standin(true, TARGET_SEED)
+    truth = np.array([oneshot.spectral_distance(x, target, SR) for x in rerender(true, fresh)])
+    tprof = oneshot.profile_array(target[:, None], SR, single=True)
+    closed, within = [], []
+    for _, res, _ in runs_of(kind, fresh):
+        final = np.array([oneshot.spectral_distance(x, target, SR) for x in rerender(res.best, fresh)]).mean()
+        closed.append((res.start_distance - final) / (res.start_distance - truth.mean()))
+        if fresh:
+            within.append(final <= truth.mean() + 2 * truth.std(ddof=1))
+        prof = oneshot.profile_array(rerender(res.best, fresh)[0][:, None], SR, single=True)
+        if kind != "hat":
+            falls = [t for t in oneshot.compare(prof, tprof)["readings"] if t.startswith(("falls 10 dB", "falls 20 dB"))]
+            assert not falls, "%s: %s" % (kind, falls)
+    assert min(closed) >= 0.6 and np.median(closed) >= 0.7, "%s: share of the gap closed per seed %s" % (kind, np.round(closed, 2))
+    if fresh and kind == "hat":
+        assert all(within), "%s: within truth + 2 spreads: %s" % (kind, within)
+
+
 @pytest.mark.parametrize("kind", ["kick", "tom", "hat"])
 @pytest.mark.parametrize("fresh", [True, False], ids=["fresh-noise", "same-noise"])
 def test_search_recovers_known_parameters(kind, fresh):
-    """The phase-21 thresholds (decay within 15 %, noise within 3 dB) from a start 30 % off, in 8 rounds of 16.
+    """Secondary: parameters that trade off against each other are not individually recovered (the noise layer's
+    decay and level: not identifiable in this budget, see the report), so the score above is the primary
+    criterion. The phase-21 thresholds (decay within 15 %, noise within 3 dB) from a start 30 % off, in 8 rounds of 16.
     Held to what the distance can tell apart, which the measured numbers set (module docstring of sideman.patch):
     - the tone's decay: every seed (not for the hat-like target, whose tone is masked by noise as loud as it:
       test_distance_is_flat_in_a_masked_tone);
@@ -135,7 +182,7 @@ def test_search_recovers_known_parameters(kind, fresh):
       layer is 10 to 12 dB under the tone and 15 % moves the distance by about one repeat spread;
     - the noise layer's level: half of the seeds, and the level it has at the time the tone has fallen 8.7 dB
       (decay and level of the layer lie on a ridge, this does not) within 3 dB at the median seed."""
-    runs = [run(kind, seed=seed, fresh=fresh) for seed in SEEDS]
+    runs = runs_of(kind, fresh)
     tone, noise_decay, noise_db, at_decay = [], [], [], []
     for true, res, render in runs:
         assert res.distance < res.start_distance
