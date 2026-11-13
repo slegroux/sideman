@@ -309,6 +309,7 @@ FALL20_PER_T = 0.29      # Operator, slope 1: the amp envelope falls 20 dB in 0.
 TAU_PER_FALL20 = 1.0 / math.log(10.0)       # tau = fall_20 / ln(10), for an exponential amplitude decay
 ATTACK_FLOOR_MS = 1.5    # a tone attack of 0.1 ms clicks (measured 2026-11-11): never less
 NOISE_ATTACK_FLOOR_MS = 0.1   # noise has no tone to click: the hand-built hats and claps use 0.1 ms
+CLICK_MS = 10.0         # a pitch drop over in less than this is a click, not a glide (oneshot: 5 ms; Tom_BOAVISTA's 17 st in 8 ms is one)
 TAIL_MS = 100.0         # track readings from here on, when they agree, are the carrier the glide settled on
 PITCH_BOUND_ST = 0.5     # the carrier may move this far either way in the search
 NOISE_REF_MS = 15.0      # the profile's "attack" noise reading is a Hann window over 0-30 ms: its centre
@@ -392,7 +393,7 @@ def _pitch_envelope(p: dict) -> dict:
     if abs(drop) <= oneshot.DROP_ST and max(early, default=0.0) <= oneshot.DROP_ST:
         return out                  # (a start read at the wrong moment can hide a drop the track still shows)
     settle = p.get("pitch_settle_ms")
-    if settle is not None and settle < oneshot.FAST_SETTLE_MS:
+    if settle is not None and settle < CLICK_MS:
         out["reading"] = "pitch_body_hz; the %.1f st drop is over in %.1f ms: a click, not a glide" % (drop, settle)
         return out
     late = [v for k, v in (p.get("pitch_track_hz") or {}).items() if v and float(k) >= TAIL_MS]
