@@ -388,8 +388,9 @@ def _pitch_envelope(p: dict) -> dict:
     drop = p.get("pitch_drop_st") or 0.0
     out = {"carrier_hz": f_body, "drop_st": 0.0, "tau_ms": 20.0,
            "reading": "pitch_body_hz; no drop above %.1f st" % oneshot.DROP_ST, "confidence": "measured"}
-    if abs(drop) <= oneshot.DROP_ST:
-        return out
+    early = [abs(12 * math.log2(v / f_body)) for k, v in (p.get("pitch_track_hz") or {}).items() if v and float(k) <= 20.0]
+    if abs(drop) <= oneshot.DROP_ST and max(early, default=0.0) <= oneshot.DROP_ST:
+        return out                  # (a start read at the wrong moment can hide a drop the track still shows)
     settle = p.get("pitch_settle_ms")
     if settle is not None and settle < oneshot.FAST_SETTLE_MS:
         out["reading"] = "pitch_body_hz; the %.1f st drop is over in %.1f ms: a click, not a glide" % (drop, settle)
@@ -409,22 +410,29 @@ def _pitch_envelope(p: dict) -> dict:
                            % (oneshot.SETTLE_ST, "carrier from the late track" if tail else "carrier = pitch_body_hz")}
     if len(pts) < 3:
         return fallback
-    t = np.array(sorted(pts))
-    st = np.array([12 * math.log2(pts[x] / f_body) for x in t])
-    w = (t + 5.0) / 50.0           # early points are the least reliable (a fast glide in short frames): weight by time
-    best = None
-    for tau in np.geomspace(1.0, 600.0, 160):
-        e = np.exp(-t / tau)
-        if tail:
-            amp = float(((st - s_tail) * e * w ** 2).sum() / max((e * e * w ** 2).sum(), 1e-12))
-            coef = np.array([s_tail, amp])
-        else:
-            coef = np.linalg.lstsq(np.stack([np.ones_like(t), e], axis=1) * w[:, None], st * w, rcond=None)[0]
-        rss = float(((((coef[0] + coef[1] * e) - st) * w) ** 2).sum())
-        if best is None or rss < best[0]:
-            best = (rss, tau, coef)
-    _, tau, (s_inf, amp) = best
-    rss = float(((s_inf + amp * np.exp(-t / tau) - st) ** 2).sum())
+    t_all = np.array(sorted(pts))
+    st_all = np.array([12 * math.log2(pts[x] / f_body) for x in t_all])
+    keep = np.ones(len(t_all), dtype=bool)
+    for _ in range(3):             # again without the worst point (up to two): an early reading in noise must not sink the fit
+        t, st = t_all[keep], st_all[keep]
+        w = (t + 5.0) / 50.0       # early points are the least reliable (a fast glide in short frames): weight by time
+        best = None
+        for tau in np.geomspace(1.0, 600.0, 160):
+            e = np.exp(-t / tau)
+            if tail:
+                amp = float(((st - s_tail) * e * w ** 2).sum() / max((e * e * w ** 2).sum(), 1e-12))
+                coef = np.array([s_tail, amp])
+            else:
+                coef = np.linalg.lstsq(np.stack([np.ones_like(t), e], axis=1) * w[:, None], st * w, rcond=None)[0]
+            rss = float(((((coef[0] + coef[1] * e) - st) * w) ** 2).sum())
+            if best is None or rss < best[0]:
+                best = (rss, tau, coef)
+        _, tau, (s_inf, amp) = best
+        res = s_inf + amp * np.exp(-t / tau) - st
+        rss = float((res ** 2).sum())
+        if rss / len(t) <= 0.5 ** 2 or len(t) <= 4:
+            break
+        keep[np.nonzero(keep)[0][int(np.argmax(np.abs(res)))]] = False
     if rss / len(t) > 0.5 ** 2 or abs(amp) <= oneshot.DROP_ST or tau in (1.0, 600.0) or abs(s_inf) > 2.0:
         return fallback
     return {"carrier_hz": f_body * 2 ** (s_inf / 12), "drop_st": float(amp), "tau_ms": float(tau),
