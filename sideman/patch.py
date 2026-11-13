@@ -299,66 +299,106 @@ def search(start: dict, bounds: dict, render, target: np.ndarray, sr: int, round
 # parameter values through a units table read from Live (not in this repository yet). Three layers, so each
 # can be tested alone and no unit is guessed silently:
 #   profile --operator_guess--> patch (semantic, physical units: Hz, ms, dB, semitones)
-#   patch --operator_live--> Live parameter name -> physical value (the formulas below), and the note to play
+#   patch --operator_live--> every Live parameter the voice owns, as a physical value (the formulas below)
 #   that --to_live(units)--> Live parameter name -> Live's value
 
-FALL20_PER_T = 0.29      # Operator, slope 1: the amp envelope falls 20 dB in 0.29 T (T = its Decay time).
-#                          Measured 2026-11-09 and 11 on the Bodzin kit (memory match-synth-to-sample-by-recording;
-#                          bzkit.py: "T ~ 3.5 x the measured -20 dB time"). For an exponential 20 dB is ln(10) tau,
-#                          so T = 7.94 tau: the Decay time is where the curve is about 69 dB down.
+FALL20_PER_T = 0.29      # Operator Ae Decay T: the amp envelope falls 20 dB in 0.29 T, measured 2026-11-09 and 11 on
+#                          the Bodzin kit (memory match-synth-to-sample-by-recording; bzkit.py: "T ~ 3.5 x the
+#                          measured -20 dB time"). Measured with the decay slope set to 1 through the preset XML;
+#                          whether the LOM-only device has that slope by default is an assumption (ASSUMPTIONS 1).
 TAU_PER_FALL20 = 1.0 / math.log(10.0)       # tau = fall_20 / ln(10), for an exponential amplitude decay
+T_PER_TAU = math.log(10.0) / FALL20_PER_T   # Operator T = 7.94 tau: the curve is about 69 dB down at T
+PE_DECAY_PER_TAU = T_PER_TAU                # Pe Decay = tau * this, an ASSUMPTION (2) checked against one take
 ATTACK_FLOOR_MS = 1.5    # a tone attack of 0.1 ms clicks (measured 2026-11-11): never less
 NOISE_ATTACK_FLOOR_MS = 0.1   # noise has no tone to click: the hand-built hats and claps use 0.1 ms
-CLICK_MS = 10.0         # a pitch drop over in less than this is a click, not a glide (oneshot: 5 ms; Tom_BOAVISTA's 17 st in 8 ms is one)
-TAIL_MS = 100.0         # track readings from here on, when they agree, are the carrier the glide settled on
+CLICK_MS = 10.0          # a pitch drop over in less than this is a click, not a glide. oneshot's own bound is its
+#                          FAST_SETTLE_MS (5 ms); Tom_BOAVISTA's 17 st in 8 ms is a click too, so the guess uses 10
+TAIL_MS = 100.0          # track readings from here on, when they agree, are the carrier the glide settled on
 PITCH_BOUND_ST = 0.5     # the carrier may move this far either way in the search
-NOISE_REF_MS = 15.0      # the profile's "attack" noise reading is a Hann window over 0-30 ms: its centre
-NOISE_BODY_MS = 80.0     # ...and the "body" reading's centre of weight (40-150 ms of a decaying hit)
-PEAK_DB_AT_0DB = {"tone": 3.0, "noise": 11.0}   # peak of a voice at osc level 0 dB, velocity 100 (measured 2026-11-11)
+PE_MAX_ST = 48.0         # a pitch drop is capped at this (ASSUMPTIONS 4: Operator's Pe range, to read from Live)
+MIN_CARRIER_HZ = 8.2     # MIDI note 0 (8.18 Hz): lower carriers cannot be played with Coarse 1
+NOISE_REF_MS = 15.0      # fallback reference time of the attack noise reading (a profile without attack_window_ms)
+NOISE_BODY_FRAC = 0.36   # where the body reading's weight sits, as a share into body_window_ms: 80 ms in 40-150
+#                          (calibrated on the stand-in's kick and tom, 79 and 86 ms; to re-check on takes)
+ONSET_CLAMP_DB = 12.0    # the extrapolation from the reference time back to the onset is at most this many dB
+HF_MARGIN_DB = 5.0       # noise counts only when the attack's power above 2 kHz (click_db) is within this of its level...
+FLAT_ATTACK = 0.001      # ...and the attack's spectrum has some flat part (flatness.attack: a tone and a click read 0.0, 3 decimals)
+FLAT_BODY = 0.02         # the tail rule also needs a flat body spectrum (flatness.body: a noise snare 0.07, a clave 0.001)
+NOISE_FREE_DB = -20.0    # a noise reading under this is near the leakage floor: its level is searched, not pinned
+NOISE_OFF_DB = -60.0     # ...down to this, which is off for a voice
+BODY_NOISE_DB = -9.0     # the tail rule needs a body at least this noisy (12 % of its energy): a tonal tail is not noise
+DEFAULT_NOISE_FRACTION = 0.2    # with no usable body reading the noise decays in a fifth of the tone's time
 FILTER_CLEAR_DB = 10.0   # a band within this of the densest is "clear" (the noise reaches down to it)
 TAIL_RATIO = 2.5         # a hit whose 40 dB fall is this many times its 20 dB fall has a tail longer than an exponential
+CONSISTENT = 1.25        # tone + noise may fall 40 dB this much later than the measured fall_40_ms
 DECAY_FACTOR = 1.5       # free decays may move by this factor either way
 NOISE_DECAY_FACTOR = 3.0
+DEFAULT_NOISE_FACTOR = 4.0      # ...4 when the noise decay is a default
+SLOW_NOISE_LOW_FACTOR = 3.0     # the tone decay may fall by this factor when the noise outlasts the tone (its 20 dB fall is the noise's)
+GLIDE_FACTOR = 4.0       # the glide's tau may move by this factor: either reading of the Pe Decay mapping is inside it
 DROP_WIDTH_ST = 2.0      # the free pitch drop may move by max(this, 40 %) either way
+PEAK_DB_AT_0DB = {"tone": 3.0, "noise": 11.0}   # peak of a voice at osc level 0 dB, velocity 100 (measured 2026-11-11)
+NOTE_VELOCITY = 100      # the velocity every level was measured at
 Z_AMPLITUDE_DB = 20.0 / math.log(10.0)      # 8.686 dB per neper of amplitude
 
 ASSUMPTIONS = (
-    "Ae/Be Decay: the envelope's decay slope is not a parameter in the LOM list (only Pe and Fe have slopes), "
-    "so Decay is assumed to be the device's default exponential: 20 dB in 0.29 T. Confirm on a scratch Operator "
-    "(Ae Decay 100 ms, play one note at velocity 100, read the 20 dB fall: expect 29 ms).",
-    "Noise: Osc-B Wave raw value 21 is a white noise wave (taken from bzkit.py's XML value, not from the LOM). "
-    "Confirm its name and index with str_for_value over Osc-B Wave, and that it is white.",
-    "Algorithm: raw value 10 is 'all four oscillators parallel' (bzkit.py: XML Algorithm 10 = algorithm 11). "
-    "Confirm the LOM index and that Osc A and B then both reach the output without modulating each other.",
-    "Pitch envelope levels (Pe Init, Pe Peak, Pe Sustain) are read in semitones when Pe Amount and Pe Amt A are "
-    "100 % (bzkit.py wrote 14.0 and 4.5 for a 14 st kick). to_live refuses a table whose unit is not 'st'.",
-    "Pe Decay is set to the time the glide takes to settle within 0.5 st, tau * ln(|drop| / 0.5), with Init = Peak "
-    "= the drop and Sustain 0: confirm that Pe Decay with its default slope gives that settle time (read with "
-    "sample_analyze: pitch_settle_ms).",
-    "Osc-A < Pe: a raw switch value 1 sends the pitch envelope to Osc A. Confirm it is on/off and not an amount.",
-    "Coarse and Fine: ratio = Coarse * (1 + Fine/1000) (measured 2026-11-11). A Coarse and A Fine are passed as "
-    "raw values if the units table has no row for them; confirm their display numbers equal the raw ones.",
-    "The note: the carrier is played from the MIDI note 1 to 2 semitones under it with Coarse 1 and a Fine of 59 "
-    "to 122, so a +-0.5 st move of the carrier stays in Fine's range and Coarse never drops under 1. "
-    "Transpose is left at 0.",
+    "Ae/Be Decay: the amp envelope's decay slope is not a parameter in the LOM list (only Pe and Fe have slopes). "
+    "FALL20_PER_T = 0.29 was measured with DecaySlope 1 written through the preset XML, so the guess ASSUMES the "
+    "LOM-only device has that slope by default. Confirm: Ae Decay 100 ms, one note at velocity 100, read the 20 dB "
+    "fall: expect 29 ms.",
+    "Pe Decay = tau * 7.94 (the amp envelope's constant), with Init = Peak = the drop and Sustain 0. Evidence, not "
+    "a measurement of Pe Decay: the recorded kick (take_final.json) reads 52.7, 49.8, 47.6 Hz at 40, 80, 150 ms "
+    "against 47.1 Hz, with Pe Decay 400 ms in bzkit.py (see the report: tau 38 to 57 ms, ratio 7 to 10). Confirm "
+    "by setting Pe Decay and reading pitch_settle_ms.",
+    "Noise: Osc-B Wave raw value 21 is a white noise wave (from bzkit.py's XML value, not the LOM). Confirm its "
+    "name and index with str_for_value over Osc-B Wave, that it is white, and that in ratio mode the noise does "
+    "not change with the note (the guess plays noise-only voices at note 60).",
+    "Pe levels (Pe Init, Pe Peak, Pe Sustain) are read in semitones when Pe Amount and Pe Amt A are 100 % "
+    "(bzkit.py wrote 14.0 and 4.5 for a 14 st kick); the range is assumed to reach +-48 st (PE_MAX_ST). "
+    "to_live refuses a table whose unit is not 'st'.",
+    "Osc-A < Pe, Osc-B < Pe: raw 1 sends the pitch envelope to that oscillator, 0 not (confirm they are switches and "
+    "not amounts); Pe Amt A = 100 and Pe Amt B = 0 are the routing amounts; Pe D Slope and Pe Dst B are left at the "
+    "device's defaults and the guess does not set them.",
+    "Osc-A Wave raw 0 is a sine. Osc-A/B Fix On = 0 is ratio mode (Fix On = 1 would be fixed frequency).",
+    "Algorithm raw 10 is 'all four oscillators parallel' (bzkit.py: XML Algorithm 10 = algorithm 11). Confirm the "
+    "LOM index and that Osc A and B then both reach the output without modulating each other. Osc-C and Osc-D are "
+    "switched off; their other parameters and the unused oscillator's envelope are not set.",
+    "Coarse and Fine: ratio = Coarse * (1 + Fine/1000) (measured 2026-11-11). The note played is 1 to 2 semitones "
+    "under the carrier, Coarse 1, Fine 59 to 122; Coarse 2 or more only above about 25 kHz. A Coarse and A Fine are "
+    "passed as raw values if the units table has no row for them: confirm their display numbers equal the raw ones.",
+    "Global Time = 0 % and Time < Key = 0 % leave every envelope time as set (Time scales them by about e^(0.023 per "
+    "%): measured 2026-11-09); Transpose 0; Tone, Spread, Glide On, Shaper, LFO On = 0 and Pan are left at the "
+    "device's defaults or the Set's state, not read: a scratch Operator must start from the Init preset.",
+    "Ae/Be Init and Peak levels, Ae Mode / Ae Loop (no loop), and Ae/Be Retrig are left at the device's defaults; "
+    "Sustain is -inf and Release = Decay as in bzkit.py. Osc level < velocity and < key are left at their defaults "
+    "(bzkit.py set 35 % level < velocity): the levels assume the default velocity response at velocity 100.",
+    "The profile's attack_ms equals Operator's Attack time: the profile reads the envelope's rise over whole periods "
+    "and a linear ramp reads 89 % of its length, while Operator's attack may not be linear.",
     "Filter On / Filter Type / Filter Freq: type 1 is the high-pass (bzkit.py: 0 LP, 1 HP, 2 BP in the XML). "
     "The one filter sits after both oscillators, so it is used only on a noise-led voice (tone off).",
     "Output: Volume = the sample's peak minus 3 dB (tone-led) or 11 dB (noise-led), from the peaks of single "
     "oscillators at 0 dB and velocity 100 (+3 dBFS sine, +9 to +13 noise: 2026-11-11). Confirm with one take.",
-    "Ae/Be Sustain -inf and Release = Decay, no loop (as bzkit.py): the raw value of Ae Mode / Ae Loop for "
-    "'no loop' is not set here and must be read from the device's defaults.",
+    "Reading times: the attack noise reading's weight is taken at the middle of attack_window_ms (the profile's "
+    "own window; a Hann window) and the body's at 0.36 of body_window_ms, calibrated on the stand-in; the "
+    "extrapolation back to the onset is clamped to +-12 dB. A noise layer is accepted only when the attack's "
+    "energy above 2 kHz (click_db) is within 5 dB of its level and its flatness is at least 0.001 (a tone's and a click's reads 0.0). All three are heuristics to re-check on takes.",
+    "The note is held for at least the longest Decay and the take runs past it (Release = Decay): the length "
+    "operator_live returns is a plan for the renderer, not something Live has been asked for.",
 )
 
-RAW_NAMES = frozenset({"Algorithm", "Osc-A On", "Osc-B On", "Osc-A Wave", "Osc-B Wave", "A Fix On ", "B Fix On ",
-                       "Pe On", "Filter On", "Filter Type", "Osc-A < Pe"})   # Live's own value, no conversion
-RAW_IF_NO_TABLE = frozenset({"A Coarse", "A Fine", "B Coarse", "B Fine"})    # display number = raw value, unless tabled
+STATE_SWITCHES = ("Osc-A On", "Osc-B On", "Osc-C On", "Osc-D On", "A Fix On ", "B Fix On ", "Pe On", "Osc-A < Pe",
+                  "Osc-B < Pe", "Filter On", "LFO On")
+RAW_NAMES = frozenset(STATE_SWITCHES) | {"Algorithm", "Osc-A Wave", "Osc-B Wave", "Filter Type"}   # Live's own value
+RAW_ENUMS = frozenset({"Algorithm", "Osc-A Wave", "Osc-B Wave", "Filter Type"})      # whole numbers, not 0/1
+QUANTIZED = frozenset({"A Coarse", "A Fine", "B Coarse", "B Fine"})    # whole numbers; display number = raw unless tabled
 EXPECTED_DIMENSION = {                        # what a parameter's display must be, so a wrong unit is refused
     **dict.fromkeys(("Ae Attack", "Ae Decay", "Ae Release", "Be Attack", "Be Decay", "Be Release", "Pe Decay"), "time"),
     **dict.fromkeys(("Volume", "Osc-A Level", "Osc-B Level", "Ae Sustain", "Be Sustain"), "db"),
     **dict.fromkeys(("Pe Init", "Pe Peak", "Pe Sustain", "Transpose"), "st"),
-    **dict.fromkeys(("Pe Amount", "Pe Amt A"), "pct"),
+    **dict.fromkeys(("Pe Amount", "Pe Amt A", "Pe Amt B", "Time", "Time < Key"), "pct"),
     "Filter Freq": "freq",
 }
+UNUSED_MS = 100.0        # what an unused envelope time is set to (its oscillator is off)
 
 
 @functools.lru_cache(maxsize=1)
@@ -376,9 +416,9 @@ def _entry(value, reading: str, confidence: str) -> tuple:
 def _pitch_envelope(p: dict) -> dict:
     """Carrier, drop and time constant from the profile's pitch readings: the body pitch, the start, and the track
     (pitch_track_hz at 0, 5, 10, 20, 40, 80, 150, 300 ms), fitted as semitones = s_inf + drop * exp(-t / tau)
-    (for each tau on a grid the other two are linear, weighted by t + 5 ms; the best tau wins). The fit gives the carrier the glide
-    settles on (the body pitch alone sits on the glide's tail), and the drop at the onset when the start was read
-    late. A poor fit or fewer than three points falls back to the measured drop and settle time."""
+    (for each tau on a grid the other two are linear, weighted by t + 5 ms; the best tau wins). The fit gives the carrier
+    the glide settles on (the body pitch alone sits on the glide's tail), and the drop at the onset when the start was
+    read late. A poor fit or fewer than three points falls back to the measured drop and settle time."""
     f_body = p["pitch_body_hz"]
     pts = {}
     if p.get("pitch_start_hz") and p.get("pitch_start_at_ms") is not None:
@@ -395,6 +435,7 @@ def _pitch_envelope(p: dict) -> dict:
     settle = p.get("pitch_settle_ms")
     if settle is not None and settle < CLICK_MS:
         out["reading"] = "pitch_body_hz; the %.1f st drop is over in %.1f ms: a click, not a glide" % (drop, settle)
+        out["click"] = True
         return out
     late = [v for k, v in (p.get("pitch_track_hz") or {}).items() if v and float(k) >= TAIL_MS]
     tail = None
@@ -446,9 +487,10 @@ def _noise_filter(p: dict):
     is within FILTER_CLEAR_DB of the densest one, when that is the 'mid' band (500 Hz) or above. White noise is
     equally dense in all bands and gets no filter; a hat that is empty under 4 kHz gets one at the lowest band
     edge that still holds it (a coarse edge: the six bands are wide)."""
-    bands, nyq = p.get("bands_db"), p["sample_rate"] / 2.0
-    if not bands:
+    bands, sr = p.get("bands_db"), p.get("sample_rate")
+    if not bands or not sr:
         return None
+    nyq = sr / 2.0
     dens = {}
     for name, lo, hi in BANDS:
         hi = min(hi, nyq)
@@ -462,11 +504,31 @@ def _noise_filter(p: dict):
         if lowest >= BANDS[3][1] else None
 
 
+def noise_onset_db(patch: dict) -> float:
+    """The noise layer's level against the tone at the onset, dB: the level pinned at noise_ref_ms, carried back to
+    the onset along the two decays, at most ONSET_CLAMP_DB either way (a long reach back from a decay estimate is not
+    to be trusted: the reference times are a window's centre, and a short hit has a short window)."""
+    tau_t = patch["tone_decay_ms"] * FALL20_PER_T * TAU_PER_FALL20
+    tau_n = patch["noise_decay_ms"] * FALL20_PER_T * TAU_PER_FALL20
+    back = Z_AMPLITUDE_DB * patch.get("noise_ref_ms", NOISE_REF_MS) * (1.0 / tau_n - 1.0 / tau_t)
+    return patch["noise_level_ref_db"] + max(-ONSET_CLAMP_DB, min(ONSET_CLAMP_DB, back))
+
+
+def _model_fall_ms(tau_t: float, tau_n: float, onset_db: float, drop_db: float = 40.0) -> float:
+    """When tone + noise (power sum of two exponentials, noise at onset_db against the tone) is last within drop_db
+    of its onset level."""
+    r2 = 10 ** (onset_db / 10.0)
+    t = np.linspace(0.0, 12.0 * max(tau_t, tau_n), 6000)
+    power = np.exp(-2 * t / tau_t) + r2 * np.exp(-2 * t / tau_n)
+    above = np.nonzero(power >= power.max() * 10 ** (-drop_db / 10.0))[0]
+    return float(t[above[-1]]) if len(above) else 0.0
+
+
 def operator_guess(profile: dict) -> dict:
     """A first Operator patch for the one-shot `profile` (oneshot.profile_array / sample_analyze output), in
     physical units, for one voice: a sine carrier on Osc A with a pitch envelope and a noise layer on Osc B,
     or, for an unpitched hit (hat, clap), noise only. Raises ValueError for a profile with no 20 dB fall
-    (the take ends first) or, when pitched, no body pitch.
+    (missing, or 0) or, when pitched, no body pitch.
 
     Returns {"patch": {name: float}, "structure": {...}, "sources": {name: {"reading", "confidence"}},
     "free": {name: (low, high, "log"|"lin")}, "pinned": {name: why}, "notes": [...], "assumptions": [...]}.
@@ -475,34 +537,44 @@ def operator_guess(profile: dict) -> dict:
 
     The patch (a name is absent when the voice has no such part):
       carrier_hz     body pitch, or the pitch the glide settles on (fit of the pitch track)
-      pitch_drop_st  semitones above carrier_hz at the onset (0 = no pitch envelope: under oneshot.DROP_ST)
+      pitch_drop_st  semitones above carrier_hz at the onset (0 = no pitch envelope: under oneshot.DROP_ST, or a
+                     click: over in under CLICK_MS), at most PE_MAX_ST
       pitch_tau_ms   time constant of the glide, exponential
       tone_attack_ms attack_ms, at least ATTACK_FLOOR_MS (0.1 ms clicks)
       tone_decay_ms  Operator's Decay time T = fall_20_ms / FALL20_PER_T (0.29: Operator, slope 1, measured)
       tone_level_db  0 (the reference: the noise is set against it)
-      noise_level_ref_db  the noise layer's level against the tone at NOISE_REF_MS (15 ms): the attack-window
-                     reading (noise_db.attack, a share of the total) as a power ratio, share / (1 - share)
-      noise_decay_ms Operator Decay time of the noise: from the two noise readings, whose windows centre on 15
-                     and 80 ms, the noise's decay rate against the tone's is
-                     (ratio_attack_dB - ratio_body_dB) / (8.686 * 65 ms), and 1/tau_noise = that + 1/tau_tone;
-                     with no usable body reading (under oneshot.NOISE_FLOOR_DB: a tone's window leakage) the
-                     default is a third of the tone's; a pitched hit whose 40 dB fall is over 2.5 times its 20 dB
-                     fall has it from fall_40_ms - fall_20_ms (a tail longer than an exponential is the noise's).
-                     Noise-led: the larger of fall_20_ms and fall_40_ms / 2, over 0.29 (when the hit falls more
-                     slowly later the late fall is the noise's: a tone in the first 20 dB decays faster)
+      noise_level_ref_db  the noise layer's level against the tone at noise_ref_ms: the attack-window reading
+                     (noise_db.attack, a share of the total) as a power ratio, share / (1 - share)
+      noise_ref_ms   half of attack_window_ms, the centre of the reading's Hann window (15 ms for a 30 ms window; a
+                     short hit has a shorter window: the profile says where it ended)
+      noise_decay_ms Operator Decay time of the noise. In order: (1) a body at least 12 % noise (BODY_NOISE_DB) with a flat
+                     spectrum (flatness.body at least FLAT_BODY), whose fall_40_ms is over TAIL_RATIO times its fall_20_ms: the tail, (fall_40 - fall_20) / ln 10;
+                     (2) a usable body reading (above oneshot.NOISE_FLOOR_DB, a tone's window leakage): the two
+                     readings, at noise_ref_ms and 0.36 into body_window_ms, give the rate of the noise against the
+                     tone, (ratio_attack_dB - ratio_body_dB) / (8.686 * the time between), and 1/tau_noise = that
+                     + 1/tau_tone; (3) otherwise a fifth of the tone's (default, searched within a factor of 4). The
+                     result is shortened until tone + noise fall 40 dB no more than 25 % after the measured fall_40_ms
+                     (unless the tone alone does: a gated shape). Noise-led: the larger of fall_20_ms and
+                     fall_40_ms / 2, over 0.29 (when the hit falls more slowly later the late fall is the noise's)
       noise_attack_ms attack_ms, at least NOISE_ATTACK_FLOOR_MS
       noise_filter_hz  high-pass for a noise-led hit whose bands are empty low (see _noise_filter)
       output_db      Volume: the sample's peak_db minus the peak of one oscillator at 0 dB (+3 tone, +11 noise)
-    Why the noise layer's level is pinned and its decay free: decay and level lie on a ridge (a longer layer,
-    quieter, scores like a shorter, louder one: the search report), so one must be held. The level at 15 ms is
-    a direct reading, the decay a two-reading derivation under a leakage floor, so the level (at the reading's own
-    time, not at the onset, so it does not move when the decay does) is pinned and the decay searched.
-    Why ratio mode and not a fixed frequency: Coarse/Fine from a played note is what was measured and
-    built (2026-11-11); whether a fixed-frequency oscillator follows the pitch envelope is not known."""
+    A noise layer is only added to a pitched hit when its attack reading is above the leakage floor AND the attack's
+    energy above 2 kHz (click_db) is within HF_MARGIN_DB of it and its spectrum has a flat part (flatness.attack): a glide, a gated tone or a click on a tone read
+    "noise" from window leakage, but have no broadband energy to match it (the Bodzin kick, low tom and clave).
+    A reading under NOISE_FREE_DB leaves the level free, down to NOISE_OFF_DB; a stronger one pins it.
+    Why the level is pinned and the decay free: decay and level lie on a ridge (a longer layer, quieter, scores like
+    a shorter, louder one: the search report), so one must be held. The level at its reference time is a direct
+    reading, the decay a two-reading derivation under a leakage floor, so the level (at the reading's own time, not
+    at the onset, so it does not move when the decay does) is pinned and the decay searched.
+    Why ratio mode and not a fixed frequency: Coarse/Fine from a played note is what was measured and built
+    (2026-11-11); whether a fixed-frequency oscillator follows the pitch envelope is not known."""
     p = profile
-    if p.get("fall_20_ms") is None:
-        raise ValueError("the profile has no 20 dB fall (the take ends before the hit has fallen): "
-                         "record a longer take")
+    fall20 = p.get("fall_20_ms")
+    if not fall20 or fall20 <= 0:
+        raise ValueError("the profile has no 20 dB fall (it is missing or 0: the take ends before the hit has "
+                         "fallen): record a longer take")
+    fall20 = float(fall20)
     pitched = bool(p.get("pitched")) and bool(p.get("pitch_body_hz"))
     patch, src, free, pinned, notes = {}, {}, {}, {}, []
 
@@ -510,7 +582,8 @@ def operator_guess(profile: dict) -> dict:
         patch[name], src[name] = _entry(float(value), reading, confidence)
 
     attack = p.get("attack_ms") or 0.0
-    fall20 = float(p["fall_20_ms"])
+    peak_db = p.get("peak_db")
+    peak_db = 0.0 if peak_db is None else peak_db
     tau_tone = fall20 * TAU_PER_FALL20
     f40 = p.get("fall_40_ms")
     if f40 and not 1.6 <= f40 / fall20 <= TAIL_RATIO:
@@ -520,6 +593,13 @@ def operator_guess(profile: dict) -> dict:
     structure = {"tone_on": pitched, "noise_on": False, "pitch_env_on": False, "filter_on": False}
     if pitched:
         pe = _pitch_envelope(p)
+        if pe.get("click"):
+            notes.append(pe["reading"])
+        if abs(pe["drop_st"]) > PE_MAX_ST:
+            notes.append("the pitch drop (%.1f st) is capped at %.0f st (Operator's range, to confirm)" % (pe["drop_st"], PE_MAX_ST))
+            pe["drop_st"] = math.copysign(PE_MAX_ST, pe["drop_st"])
+        if pe["carrier_hz"] < MIN_CARRIER_HZ:
+            notes.append("the carrier (%.1f Hz) is under MIDI note 0: operator_live will refuse it" % pe["carrier_hz"])
         put("carrier_hz", pe["carrier_hz"], pe["reading"], pe["confidence"])
         put("pitch_drop_st", pe["drop_st"], pe["reading"], pe["confidence"])
         put("pitch_tau_ms", pe["tau_ms"], pe["reading"], pe["confidence"])
@@ -529,52 +609,85 @@ def operator_guess(profile: dict) -> dict:
         put("tone_decay_ms", fall20 / FALL20_PER_T, "fall_20_ms / %.2f" % FALL20_PER_T, "derived")
         put("tone_level_db", 0.0, "reference level", "default")
         nz = p.get("noise_db") or {}
-        a, b = nz.get("attack"), nz.get("body")
-        if a is not None and a > oneshot.NOISE_FLOOR_DB:
+        a, b, click = nz.get("attack"), nz.get("body"), p.get("click_db")
+        flat = p.get("flatness") or {}
+        noise_wanted = a is not None and a > oneshot.NOISE_FLOOR_DB
+        if noise_wanted and (click is None or click < a - HF_MARGIN_DB or (flat.get("attack") or 0.0) < FLAT_ATTACK):
+            noise_wanted = False
+            notes.append("noise_db.attack is %.1f dB but the attack has %s dB above 2 kHz (click_db) and a flatness of %s: "
+                         "no broadband noise to match (window leakage of a glide, a gated tone or a click): no noise layer"
+                         % (a, "None" if click is None else "%.1f" % click, flat.get("attack")))
+        if noise_wanted:
             structure["noise_on"] = True
+            aw = p.get("attack_window_ms")
+            t_a = aw[1] / 2.0 if aw and aw[1] > 0 else NOISE_REF_MS
             share = 10 ** (a / 10.0)
             ratio_a = 10 * math.log10(share / max(1.0 - share, 1e-3))
-            put("noise_level_ref_db", ratio_a, "noise_db.attack as a power ratio to the tone, at %.0f ms" % NOISE_REF_MS, "derived")
-            if b is not None and b > oneshot.NOISE_FLOOR_DB:
+            put("noise_level_ref_db", ratio_a, "noise_db.attack as a power ratio to the tone, at %.1f ms (half of "
+                "attack_window_ms)" % t_a, "derived")
+            put("noise_ref_ms", t_a, "attack_window_ms / 2" if aw else "default %.0f ms (no attack_window_ms)" % NOISE_REF_MS,
+                "derived" if aw else "default")
+            bw = p.get("body_window_ms") or [40.0, 150.0]
+            t_b = bw[0] + NOISE_BODY_FRAC * (bw[1] - bw[0])
+            tau_noise, default_decay = None, False
+            if b is not None and b >= BODY_NOISE_DB and (flat.get("body") or 0.0) >= FLAT_BODY and f40 and f40 > TAIL_RATIO * fall20:
+                tau_noise = (f40 - fall20) * TAU_PER_FALL20
+                reading, conf = "fall_40_ms - fall_20_ms (a body %.0f dB noisy, and a tail %.1f times the first 20 dB, "\
+                                "is the noise's)" % (b, f40 / fall20), "derived"
+            elif b is not None and b > oneshot.NOISE_FLOOR_DB and t_b - t_a >= 5.0:
                 shb = 10 ** (b / 10.0)
                 ratio_b = 10 * math.log10(shb / max(1.0 - shb, 1e-3))
-                k = (ratio_a - ratio_b) / (Z_AMPLITUDE_DB * (NOISE_BODY_MS - NOISE_REF_MS))     # 1/ms
-                inv = max(k + 1.0 / tau_tone, 1.0 / (3.0 * tau_tone)) if tau_tone > 0 else 1.0
+                k = (ratio_a - ratio_b) / (Z_AMPLITUDE_DB * (t_b - t_a))        # 1/ms
+                inv = max(k + 1.0 / tau_tone, 1.0 / (3.0 * tau_tone))
                 tau_noise = min(1.0 / inv, 3.0 * tau_tone)
-                reading, conf = "noise_db.attack and noise_db.body, with the tone's fall_20_ms", "derived"
-            else:
-                tau_noise = tau_tone / 3.0
-                reading, conf = "none (no noise reading above %.0f dB in the body): a third of the tone's decay" % oneshot.NOISE_FLOOR_DB, "default"
-            f40 = p.get("fall_40_ms")
-            if f40 and f40 > TAIL_RATIO * fall20:
-                tau_noise = (f40 - fall20) * TAU_PER_FALL20
-                reading, conf = "fall_40_ms - fall_20_ms (the 20 dB between them is the tail, and a tail "\
-                                "%.1f times as long as the first 20 dB is the noise's)" % (f40 / fall20), "derived"
+                reading, conf = "noise_db.attack and noise_db.body, at %.0f and %.0f ms, with the tone's fall_20_ms" % (t_a, t_b), "derived"
+            if tau_noise is None:
+                tau_noise, default_decay = tau_tone * DEFAULT_NOISE_FRACTION, True
+                reading = "none (no usable noise reading in the body): a fifth of the tone's decay"
+                conf = "default"
+            if f40 and 2 * fall20 <= CONSISTENT * f40:                        # the tone alone is no later than fall_40
+                tone_only = {"tone_decay_ms": fall20 / FALL20_PER_T, "noise_level_ref_db": ratio_a, "noise_ref_ms": t_a}
+                shrunk = False
+                for _ in range(20):
+                    tone_only["noise_decay_ms"] = tau_noise / (FALL20_PER_T * TAU_PER_FALL20)
+                    onset = noise_onset_db(tone_only)
+                    if _model_fall_ms(tau_tone, tau_noise, onset) <= CONSISTENT * f40:
+                        break
+                    tau_noise *= 0.8
+                    shrunk = True
+                if shrunk:
+                    reading += "; shortened so tone + noise fall 40 dB within %.0f %% of fall_40_ms" % (100 * (CONSISTENT - 1))
             put("noise_decay_ms", tau_noise / (FALL20_PER_T * TAU_PER_FALL20), reading, conf)
-            put("noise_attack_ms", max(NOISE_ATTACK_FLOOR_MS, attack), "attack_ms, floored at %.1f ms" % NOISE_ATTACK_FLOOR_MS, "default")
-            pinned["noise_level_ref_db"] = "decay and level of the noise layer lie on a ridge; the level at 15 ms is read directly"
-        else:
+            put("noise_attack_ms", max(NOISE_ATTACK_FLOOR_MS, attack), "attack_ms, floored at %.1f ms" % NOISE_ATTACK_FLOOR_MS,
+                "measured" if attack >= NOISE_ATTACK_FLOOR_MS else "default")
+            if a > NOISE_FREE_DB:
+                pinned["noise_level_ref_db"] = "decay and level of the noise layer lie on a ridge; the level at its reference time is read directly"
+            else:
+                free["noise_level_ref_db"] = (NOISE_OFF_DB, ratio_a + 6.0, "lin")
+                notes.append("noise_db.attack is %.1f dB, near the %.0f dB leakage floor: the noise level is searched "
+                             "(down to %.0f dB, off), not pinned" % (a, oneshot.NOISE_FLOOR_DB, NOISE_OFF_DB))
+            nfactor = DEFAULT_NOISE_FACTOR if default_decay else NOISE_DECAY_FACTOR
+            free["noise_decay_ms"] = (patch["noise_decay_ms"] / nfactor, patch["noise_decay_ms"] * nfactor, "log")
+            pinned["noise_ref_ms"] = pinned["noise_attack_ms"] = "set from the reading, not searched"
+        elif a is None or a <= oneshot.NOISE_FLOOR_DB:
             notes.append("noise_db.attack is %s: no noise layer" % ("missing" if a is None else "%.1f dB, under the %.0f dB floor "
                                                                     "(a decaying tone reads that from window leakage)" % (a, oneshot.NOISE_FLOOR_DB)))
-        put("output_db", min(0.0, p.get("peak_db", 0.0) - PEAK_DB_AT_0DB["tone"]),
+        put("output_db", min(0.0, peak_db - PEAK_DB_AT_0DB["tone"]),
             "peak_db minus %.0f dB (one sine at 0 dB peaks at +3 dBFS)" % PEAK_DB_AT_0DB["tone"], "default")
         free["carrier_hz"] = (patch["carrier_hz"] * 2 ** (-PITCH_BOUND_ST / 12), patch["carrier_hz"] * 2 ** (PITCH_BOUND_ST / 12), "log")
         if structure["pitch_env_on"]:
             d = patch["pitch_drop_st"]
             w = max(DROP_WIDTH_ST, 0.4 * abs(d))
             free["pitch_drop_st"] = (d - w, d + w, "lin")
-            free["pitch_tau_ms"] = (patch["pitch_tau_ms"] / 2.0, patch["pitch_tau_ms"] * 2.0, "log")
+            free["pitch_tau_ms"] = (patch["pitch_tau_ms"] / GLIDE_FACTOR, patch["pitch_tau_ms"] * GLIDE_FACTOR, "log")
         else:
             pinned["pitch_drop_st"] = pinned["pitch_tau_ms"] = "no pitch drop above %.1f st was measured" % oneshot.DROP_ST
-        free["tone_decay_ms"] = (patch["tone_decay_ms"] / DECAY_FACTOR, patch["tone_decay_ms"] * DECAY_FACTOR, "log")
-        if structure["noise_on"]:
-            free["noise_decay_ms"] = (patch["noise_decay_ms"] / NOISE_DECAY_FACTOR, patch["noise_decay_ms"] * NOISE_DECAY_FACTOR, "log")
+        low = SLOW_NOISE_LOW_FACTOR if structure["noise_on"] and (patch["noise_decay_ms"] >= 0.8 * patch["tone_decay_ms"]) else DECAY_FACTOR
+        free["tone_decay_ms"] = (patch["tone_decay_ms"] / low, patch["tone_decay_ms"] * DECAY_FACTOR, "log")
         pinned["tone_attack_ms"] = pinned["tone_level_db"] = pinned["output_db"] = "set from the reading, not searched"
-        if structure["noise_on"]:
-            pinned["noise_attack_ms"] = "set from the reading, not searched"
     else:
         structure["noise_on"] = True
-        late = p.get("fall_40_ms")
+        late = f40
         decay_ms = max(fall20, late / 2.0 if late else 0.0) / FALL20_PER_T
         put("noise_decay_ms", decay_ms, "the larger of fall_20_ms and fall_40_ms / 2, over %.2f (when the hit falls more "
             "slowly later, the late fall is the noise's: a tone in the first 20 dB decays faster)" % FALL20_PER_T,
@@ -586,7 +699,7 @@ def operator_guess(profile: dict) -> dict:
             structure["filter_on"] = True
             put("noise_filter_hz", flt[0], flt[1], "derived")
             pinned["noise_filter_hz"] = "set from the band balance, not searched"
-        put("output_db", min(0.0, p.get("peak_db", 0.0) - PEAK_DB_AT_0DB["noise"]),
+        put("output_db", min(0.0, peak_db - PEAK_DB_AT_0DB["noise"]),
             "peak_db minus %.0f dB (noise voices peak at +9 to +13 dBFS at 0 dB)" % PEAK_DB_AT_0DB["noise"], "default")
         free["noise_decay_ms"] = (patch["noise_decay_ms"] / DECAY_FACTOR, patch["noise_decay_ms"] * DECAY_FACTOR, "log")
         pinned["noise_attack_ms"] = pinned["output_db"] = "set from the reading, not searched"
@@ -595,50 +708,92 @@ def operator_guess(profile: dict) -> dict:
             "notes": notes, "assumptions": list(ASSUMPTIONS)}
 
 
-def search_arguments(guess: dict) -> dict:
+def search_arguments(guess: dict, units: dict | None = None) -> dict:
     """The `start` and `bounds` arguments of `search` from an operator_guess result: start is the guess's patch,
-    bounds the guess's free parameters; every other name is pinned (rendered as given, never changed)."""
-    return {"start": dict(guess["patch"]), "bounds": dict(guess["free"])}
+    bounds the guess's free parameters; every other name is pinned (rendered as given, never changed). With a
+    units table, each bound is pulled in toward the start (halving the distance, up to 30 times) until the voice
+    at that bound converts through to_live: one candidate out of the table's range would stop the search
+    (a render that raises ends it), so the search is never offered one. Raises ValueError when the start itself
+    does not convert."""
+    start, bounds = dict(guess["patch"]), dict(guess["free"])
+    if units is None:
+        return {"start": start, "bounds": bounds}
+
+    def converts(patch: dict) -> bool:
+        try:
+            to_live(operator_live(patch, guess["structure"])["params"], units)
+            return True
+        except ValueError:
+            return False
+
+    if not converts(start):
+        raise ValueError("the guess itself does not convert through the units table (a value outside a table's range)")
+    for name, (lo, hi, scale) in list(bounds.items()):
+        for end in (0, 1):
+            v = (lo, hi)[end]
+            for _ in range(30):
+                if converts(dict(start, **{name: v})):
+                    break
+                a, b = start[name], v
+                v = math.sqrt(a * b) if scale == "log" else (a + b) / 2.0
+            else:
+                v = start[name]
+            lo, hi = (v, hi) if end == 0 else (lo, v)
+        bounds[name] = (lo, hi, scale)
+    return {"start": start, "bounds": bounds}
 
 
 def operator_live(patch: dict, structure: dict) -> dict:
-    """The Operator settings that play `patch` (operator_guess's patch, or a search's candidate), as
-    {"params": {Live parameter name: physical value}, "note": MIDI note to play}. Raw switches and enumerations
-    (RAW_NAMES) hold Live's own value; the rest are Hz, ms, dB, semitones or % (the unit to_live checks).
-    The formulas are the ones in operator_guess's docstring and ASSUMPTIONS; nothing here has been checked in Live."""
-    q, par, note = patch, {}, None
-    par.update({"Algorithm": 10, "Volume": q.get("output_db", 0.0)})
-    tau_tone = q["tone_decay_ms"] * FALL20_PER_T * TAU_PER_FALL20 if "tone_decay_ms" in q else None
-    if structure.get("tone_on"):
+    """The complete Operator state that plays `patch` (operator_guess's patch, or a search's candidate), as
+    {"params": {Live parameter name: physical value}, "note": MIDI note, "velocity": NOTE_VELOCITY,
+    "note_length_ms": how long to hold it}. The same keys for every structure: every oscillator's On, the pitch
+    envelope's switches and routing, Filter On, LFO On, global Time, Osc A and B's levels, envelopes and waves;
+    a part the voice does not have is switched off and its numbers are placeholders (UNUSED_MS, 0 dB, 0 st), which
+    still need a row in the units table. Raw switches and enumerations (RAW_NAMES) hold Live's own value; the
+    rest are Hz, ms, dB, semitones or % (the unit to_live checks). Noise-only voices are played at note 60 and
+    a carrier under MIDI note 0 (8.18 Hz) raises ValueError. The formulas are the ones in operator_guess's docstring and
+    ASSUMPTIONS; nothing here has been checked in Live."""
+    q = patch
+    tone, noise = bool(structure.get("tone_on")), bool(structure.get("noise_on"))
+    pe_on = tone and bool(structure.get("pitch_env_on"))
+    filt = bool(structure.get("filter_on"))
+    par = {"Algorithm": 10, "Volume": q.get("output_db", 0.0), "Time": 0.0, "Time < Key": 0.0,
+           "Osc-C On": 0, "Osc-D On": 0, "LFO On": 0}
+    note = 60
+    lev_tone, lev_noise = 0.0, 0.0
+    coarse, fine = 1, 0
+    if tone:
         f = q["carrier_hz"]
+        if f < MIN_CARRIER_HZ:
+            raise ValueError("the carrier (%.2f Hz) is under MIDI note 0 (8.18 Hz): it cannot be played" % f)
         floor_note = int(math.floor(69 + 12 * math.log2(f / 440.0)))
         note = max(0, min(127, floor_note - 1))
         ratio = f / (440.0 * 2 ** ((note - 69) / 12.0))
         coarse = max(1, min(48, int(math.floor(ratio))))
         fine = max(0, min(999, int(round((ratio / coarse - 1) * 1000))))
-        lev_tone, lev_noise = q.get("tone_level_db", 0.0), 0.0
-        if structure.get("noise_on"):
-            tau_n = q["noise_decay_ms"] * FALL20_PER_T * TAU_PER_FALL20
-            onset = q["noise_level_ref_db"] + Z_AMPLITUDE_DB * NOISE_REF_MS * (1.0 / tau_n - 1.0 / tau_tone)
+        lev_tone = q.get("tone_level_db", 0.0)
+        if noise:
+            onset = noise_onset_db(q)
             lev_tone, lev_noise = lev_tone + min(0.0, -onset), min(0.0, onset)
-        par.update({"Osc-A On": 1, "A Coarse": coarse, "A Fine": fine, "A Fix On ": 0, "Osc-A Wave": 0,
-                    "Osc-A Level": lev_tone, "Ae Attack": q["tone_attack_ms"], "Ae Decay": q["tone_decay_ms"],
-                    "Ae Sustain": -math.inf, "Ae Release": q["tone_decay_ms"]})
-        if structure.get("pitch_env_on"):
-            d = q["pitch_drop_st"]
-            settle = q["pitch_tau_ms"] * math.log(max(abs(d), 2 * oneshot.SETTLE_ST) / oneshot.SETTLE_ST)
-            par.update({"Pe On": 1, "Osc-A < Pe": 1, "Pe Init": d, "Pe Peak": d, "Pe Decay": settle, "Pe Sustain": 0.0,
-                        "Pe Amount": 100.0, "Pe Amt A": 100.0})
+    par.update({"Osc-A On": int(tone), "A Fix On ": 0, "A Coarse": coarse, "A Fine": fine, "Osc-A Wave": 0,
+                "Osc-A Level": lev_tone,
+                "Ae Attack": q.get("tone_attack_ms", ATTACK_FLOOR_MS), "Ae Decay": q.get("tone_decay_ms", UNUSED_MS),
+                "Ae Sustain": -math.inf, "Ae Release": q.get("tone_decay_ms", UNUSED_MS)})
+    par.update({"Osc-B On": int(noise), "B Fix On ": 0, "Osc-B Wave": 21, "Osc-B Level": lev_noise,
+                "Be Attack": q.get("noise_attack_ms", NOISE_ATTACK_FLOOR_MS),
+                "Be Decay": q.get("noise_decay_ms", UNUSED_MS), "Be Sustain": -math.inf,
+                "Be Release": q.get("noise_decay_ms", UNUSED_MS)})
+    if pe_on:
+        d = q["pitch_drop_st"]
+        par.update({"Pe Init": d, "Pe Peak": d, "Pe Decay": q["pitch_tau_ms"] * PE_DECAY_PER_TAU, "Pe Sustain": 0.0,
+                    "Pe Amount": 100.0, "Pe Amt A": 100.0, "Pe Amt B": 0.0})
     else:
-        par["Osc-A On"] = 0
-        lev_noise = 0.0
-    if structure.get("noise_on"):
-        par.update({"Osc-B On": 1, "Osc-B Wave": 21, "B Fix On ": 0, "Osc-B Level": lev_noise,
-                    "Be Attack": q["noise_attack_ms"], "Be Decay": q["noise_decay_ms"], "Be Sustain": -math.inf,
-                    "Be Release": q["noise_decay_ms"]})
-    if structure.get("filter_on"):
-        par.update({"Filter On": 1, "Filter Type": 1, "Filter Freq": q["noise_filter_hz"]})
-    return {"params": par, "note": note}
+        par.update({"Pe Init": 0.0, "Pe Peak": 0.0, "Pe Decay": UNUSED_MS, "Pe Sustain": 0.0, "Pe Amount": 0.0,
+                    "Pe Amt A": 0.0, "Pe Amt B": 0.0})
+    par.update({"Pe On": int(pe_on), "Osc-A < Pe": int(pe_on), "Osc-B < Pe": 0,
+                "Filter On": int(filt), "Filter Type": 1, "Filter Freq": q.get("noise_filter_hz", 1000.0)})
+    longest = max(par["Ae Decay"] if tone else 0.0, par["Be Decay"] if noise else 0.0, UNUSED_MS)
+    return {"params": par, "note": note, "velocity": NOTE_VELOCITY, "note_length_ms": longest}
 
 
 # ---- physical <-> Live values through a units table: {name: [[live_value, display_number, unit], ...]}
@@ -648,20 +803,22 @@ _UNITS = {"ms": ("time", 1.0), "s": ("time", 1000.0), "Hz": ("freq", 1.0), "kHz"
 
 
 class _Curve:
-    """One parameter's table: Live value <-> display number (in ms, Hz, dB, %, st or plain), piecewise linear, in the
-    log of the number when it is positive and spans a decade or more. -inf (a row whose display is -inf) is its
-    own point. Raises ValueError for a table that is not strictly monotone, mixes dimensions, or is empty."""
+    """One parameter's table: Live value <-> display number (in ms, Hz, dB, %, st or plain), piecewise linear. Rows
+    with the same display number (display rounding: two live values that both read "0.10 ms") are collapsed into one
+    at their mean live value. Each segment is interpolated in the log of the number when the table's positive rows
+    span a decade or more and both ends of the segment are positive, linearly otherwise (a 0 ms row does not make
+    the whole table linear). -inf (a row whose display is -inf) is its own point. Raises ValueError for a table that
+    is not strictly monotone once plateaus are collapsed, mixes dimensions, or has under two finite rows."""
 
     def __init__(self, name: str, rows: list):
-        pts, self.floor = [], None
-        dims = set()
+        pts, self.floor, dims = [], None, set()
         for row in rows:
             if len(row) != 3:
                 raise ValueError("units[%r]: a row is [live_value, display_number, unit], got %r" % (name, row))
             live, disp, unit = float(row[0]), float(row[1]), str(row[2]).strip()
             dim, mul = _UNITS.get(unit, ("other:" + unit, 1.0))
             dims.add(dim)
-            if disp == -math.inf:
+            if disp == -math.inf and math.isfinite(live):
                 self.floor = live
             elif math.isfinite(disp) and math.isfinite(live):
                 pts.append((live, disp * mul))
@@ -676,28 +833,38 @@ class _Curve:
         if want and self.dim != want:
             raise ValueError("units[%r]: its display is in %s, a physical value of this parameter is %s" % (name, self.dim, want))
         pts.sort()
+        if len(set(p[0] for p in pts)) != len(pts):
+            raise ValueError("units[%r]: two rows have the same live value" % name)
+        groups = {}
+        for live, disp in pts:
+            groups.setdefault(disp, []).append(live)
+        pts = sorted((sum(v) / len(v), d) for d, v in groups.items())      # plateaus: one row at the mean live value
         self.live = np.array([p[0] for p in pts])
         self.disp = np.array([p[1] for p in pts])
-        if len(set(self.live)) != len(self.live):
-            raise ValueError("units[%r]: two rows have the same live value" % name)
         d = np.diff(self.disp)
-        if not (np.all(d > 0) or np.all(d < 0)):
+        if len(pts) < 2 or not (np.all(d > 0) or np.all(d < 0)):
             raise ValueError("units[%r] is not monotone: the display number must rise (or fall) with the live value" % name)
-        self.log = bool(np.all(self.disp > 0) and self.disp.max() / self.disp.min() >= 10.0)
+        pos = self.disp[self.disp > 0]
+        self.decades = bool(len(pos) >= 2 and pos.max() / pos.min() >= 10.0)
         self.name = name
 
-    def _u(self, x):
-        return np.log(x) if self.log else np.asarray(x, dtype=float)
+    def _log(self, i: int) -> bool:
+        return self.decades and self.disp[i] > 0 and self.disp[i + 1] > 0
 
     def to_live(self, x: float) -> float:
         if x == -math.inf and self.floor is not None:
             return self.floor
         lo, hi = self.disp.min(), self.disp.max()
-        tol = 1e-9 * max(1.0, abs(lo), abs(hi))
-        if not (lo - tol <= x <= hi + tol):
+        if not (math.isfinite(x) and lo - 1e-9 * max(1.0, abs(lo), abs(hi)) <= x <= hi + 1e-9 * max(1.0, abs(lo), abs(hi))):
             raise ValueError("%s: %g is outside the table's range %g to %g" % (self.name, x, lo, hi))
-        u, order = self._u(self.disp), np.argsort(self._u(self.disp))
-        return float(np.interp(float(self._u(min(max(x, lo), hi))), u[order], self.live[order]))
+        x = min(max(x, lo), hi)
+        order = np.argsort(self.disp)
+        d, lv = self.disp[order], self.live[order]
+        i = int(min(max(np.searchsorted(d, x, side="right") - 1, 0), len(d) - 2))
+        seg_log = self.decades and d[i] > 0 and d[i + 1] > 0
+        u = (lambda v: math.log(v)) if seg_log else (lambda v: v)
+        f = (u(x) - u(d[i])) / (u(d[i + 1]) - u(d[i]))
+        return float(lv[i] + f * (lv[i + 1] - lv[i]))
 
     def from_live(self, v: float) -> float:
         if self.floor is not None and v == self.floor:
@@ -705,27 +872,33 @@ class _Curve:
         lo, hi = self.live.min(), self.live.max()
         if not (lo <= v <= hi):
             raise ValueError("%s: live value %g is outside the table's range %g to %g" % (self.name, v, lo, hi))
-        u = float(np.interp(v, self.live, self._u(self.disp)))
-        return float(np.exp(u) if self.log else u)
-
-
-def _curves(units: dict) -> dict:
-    names = set(operator_parameters())
-    for name in units:
-        if name not in names:
-            raise ValueError("units names %r, which is not an Operator parameter" % name)
-    return {name: _Curve(name, rows) for name, rows in units.items()}
+        i = int(min(max(np.searchsorted(self.live, v, side="right") - 1, 0), len(self.live) - 2))
+        f = (v - self.live[i]) / (self.live[i + 1] - self.live[i])
+        if self._log(i):
+            return float(math.exp(math.log(self.disp[i]) + f * (math.log(self.disp[i + 1]) - math.log(self.disp[i]))))
+        return float(self.disp[i] + f * (self.disp[i + 1] - self.disp[i]))
 
 
 def _convert(values: dict, units: dict, direction: str) -> dict:
-    curves, names, out = _curves(units), set(operator_parameters()), {}
+    names, out, curves = set(operator_parameters()), {}, {}
+    for name in units:
+        if name not in names:
+            raise ValueError("units names %r, which is not an Operator parameter" % name)
     for name, v in values.items():
         if name not in names:
             raise ValueError("%r is not an Operator parameter" % name)
-        if name in curves and name not in RAW_NAMES:
-            out[name] = getattr(curves[name], direction)(float(v))
-        elif name in RAW_NAMES or name in RAW_IF_NO_TABLE:
-            out[name] = v
+        if name in RAW_NAMES:
+            if not (isinstance(v, numbers.Real) and float(v) == int(v) and v >= 0
+                    and (name in RAW_ENUMS or v in (0, 1))):
+                raise ValueError("%s: %r is not a raw Live value (%s)" % (name, v, "a whole number from 0" if name in RAW_ENUMS else "0 or 1"))
+            out[name] = int(v)
+        elif name in units:
+            if name not in curves:
+                curves[name] = _Curve(name, units[name])           # only the tables a conversion needs: a bad unused one is not an error
+            x = float(round(v)) if name in QUANTIZED and direction == "to_live" else float(v)
+            out[name] = getattr(curves[name], direction)(x)
+        elif name in QUANTIZED:
+            out[name] = int(round(v))
         else:
             raise ValueError("no units table for %r: it cannot be converted" % name)
     return out
@@ -734,12 +907,14 @@ def _convert(values: dict, units: dict, direction: str) -> dict:
 def to_live(values: dict, units: dict) -> dict:
     """{Live parameter name: Live's value} from {name: physical value} (ms, Hz, dB, %, semitones; -inf allowed where
     the table has a -inf row) through `units` ({name: [[live_value, display_number, unit], ...]}, from Live's
-    str_for_value over each range). Interpolated piecewise linearly, in the log of the display number where it is
-    positive and spans a decade or more. Raises ValueError for a name that is not in Operator's parameter list,
-    a name with no table (raw switches and enumerations, RAW_NAMES, pass as they are, and so do the Coarse and
-    Fine of either oscillator when untabled), a table that is not monotone, in mixed units or in a unit that is
-    not the parameter's (EXPECTED_DIMENSION), and a value outside the table's range: it is refused and not
-    clamped, because a clamp would let the search believe in a value Live never rendered."""
+    str_for_value over each range). Interpolated piecewise linearly, per segment in the log of the display number
+    where the positive rows span a decade (see _Curve); plateaus from display rounding are collapsed. Raises
+    ValueError for a name that is not in Operator's parameter list, a name with no table, a table that is not
+    monotone, in mixed units or in a unit that is not the parameter's (EXPECTED_DIMENSION; only the tables of the
+    names converted are read), and a value outside the table's range: it is refused and not clamped, because a
+    clamp would let the search believe in a value Live never rendered. Raw switches (STATE_SWITCHES: 0 or 1) and
+    enumerations (whole numbers) pass as they are and are refused otherwise; Coarse and Fine are whole numbers
+    (rounded), passed raw if untabled."""
     return _convert(values, units, "to_live")
 
 
