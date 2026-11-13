@@ -848,6 +848,37 @@ def test_names_snare_stem_rim_snare_and_a_noise_hit_that_stays_neutral():
     assert "no rule of the snare stem fits" in out["groups"][2]["reason"] and out["groups"][2]["measures"]["noise_body_db"] == 0.0
 
 
+def reading(fall=100.0, share=0.0, pitched=False, hz=None):
+    """The readings of one clean hit that the rules use, as `_clean_measures` gives them."""
+    return {"fall_20_ms": fall, "fall_40_ms": None, "pitched": pitched, "pitch_hz": hz, "noise_body_db": share}
+
+
+def rule(kind, **m):
+    """(name, rule text) that the rules of stem `kind` give a clean hit with the readings `m`."""
+    r = fake_result([{"steps": [0], "audio": None}])
+    return drumroles._apply_rules(kind, drumroles._use(r, r["groups"][0]), reading(**m))
+
+
+def test_the_snare_rule_is_a_band_a_tom_or_a_kick_reading_is_not_a_snare_and_the_edges_are_exact():
+    # a tom (150 Hz, body noise share -31 dB) and a kick (45 Hz, -51 dB) in a snare stem stay neutral; a snare (-3 dB) is named
+    r = fake_result([{"steps": [4], "audio": tom_hit(f=150.0)}, {"steps": [8], "audio": tom_hit(f=45.0, tau=0.07)},
+                     {"steps": [12], "audio": snare_hit(1)}])
+    got, out = names(r, "snare")
+    assert got == ["snare 1", "snare 2", "snare"] and out["groups"][0]["measures"]["noise_body_db"] < -20
+    assert "no rule of the snare stem fits" in out["groups"][0]["reason"]
+    # the edges: over -12.0 and at most -1.0 (a fall of 100 ms: not a rim)
+    assert [rule("snare", share=v)[0] for v in (-12.1, -12.0, -11.9, -5.0, -1.1, -1.0, -0.99, -0.3, 0.0)] == [
+        None, None, "snare", "snare", "snare", "snare", None, None, None]
+    assert rule("snare", share=None)[0] is None                       # no noise reading: no snare
+
+
+def test_a_snare_stem_group_falling_20_db_in_exactly_30_ms_is_a_snare_in_29_9_ms_a_rim():
+    assert rule("snare", fall=30.0, share=-5.0)[0] == "snare"
+    name, why = rule("snare", fall=29.9, share=-5.0)
+    assert name == "rim" and "29.9 ms (under 30)" in why                  # not rounded to "30 ms (under 30)"
+    assert rule("snare", fall=29.9, share=0.0)[0] == "rim" and rule("snare", fall=30.0, share=0.0)[0] is None
+
+
 def test_names_toms_by_pitch_low_mid_high_when_several_and_kick_by_a_low_body():
     r = fake_result([{"steps": [4], "audio": tom_hit(f=150.0)}, {"steps": [8], "audio": tom_hit(f=100.0)},
                      {"steps": [12], "audio": tom_hit(f=220.0)}, {"steps": [0], "audio": noise_hit(1, 0.1)}])

@@ -147,7 +147,11 @@ ODD_KNOWN = 6            # the 16th rule needs at least this many of the 8 odd 1
 #                          Flare hh group 2, seen at its four "e" steps with the "a" steps unobservable, was named from half the evidence)
 OPEN_FALL_20_MS = 140.0  # hh open: the clean hit takes this long to fall 20 dB (library: closed hats 18-130 ms, open 15-269)
 RIM_FALL_20_MS = 30.0    # rim: it falls 20 dB in under this (library: 3 rims 5-28 ms, the other 28 snares and claps 35-167)
-SNARE_NOISE_DB = -1.0    # snare: the noise share of the body is at most this (a tone under the noise; library: 9 snares, 0 claps)
+SNARE_NOISE_MAX_DB = -1.0   # snare: the noise share of the body is at most this (a tone under the noise), and over...
+SNARE_NOISE_MIN_DB = -12.0  # ...this (a body that is nearly all tone is a tom or a kick). Library, 108 samples, rim rule first: the 9
+#                             snares read -9.1 to -1.0 (9 of 9 named), the 9 toms -40.6 to -14.8 (0 of 9; under -1 alone: 9 of 9) and the
+#                             33 kicks -39.7 to -23.0 (0 of 33; 31 of 33 under -1 alone). Still named: 1 clave (Clave Mian, -8.9) and 7
+#                             hats (3 closed, 4 open, -3.3 to -1.7: nothing here reads a hat's noise as noise), and the 14 claps stay neutral
 KICK_MAX_HZ = 70.0       # kick: pitched, body pitch at most this (library: 33 kicks at 28-56 Hz)
 NEAR_SEPARATION = 1.15   # two groups whose separation is at most this times the threshold may be one sound...
 SAME_PATTERN = 0.8       # ...when the cosine of the sets of 16ths they play at (one hit is enough) is at least this
@@ -832,10 +836,10 @@ def _apply_rules(kind: str, use: dict, m: dict | None) -> tuple[str | None, str 
             return "hh open", "falls 20 dB in %.0f ms (at least %.0f)" % (fall, OPEN_FALL_20_MS)
     elif kind == "snare" and m is not None:
         if fall is not None and fall < RIM_FALL_20_MS:
-            return "rim", "falls 20 dB in %.0f ms (under %.0f)" % (fall, RIM_FALL_20_MS)
-        if m["noise_body_db"] is not None and m["noise_body_db"] <= SNARE_NOISE_DB:
-            return "snare", "a tone under the noise: the body's noise share is %.1f dB (at most %.1f)" % (
-                m["noise_body_db"], SNARE_NOISE_DB)
+            return "rim", "falls 20 dB in %.1f ms (under %.0f)" % (fall, RIM_FALL_20_MS)
+        if m["noise_body_db"] is not None and SNARE_NOISE_MIN_DB < m["noise_body_db"] <= SNARE_NOISE_MAX_DB:
+            return "snare", "a tone under the noise: the body's noise share is %.1f dB (over %.1f, at most %.1f)" % (
+                m["noise_body_db"], SNARE_NOISE_MIN_DB, SNARE_NOISE_MAX_DB)
     elif kind == "toms" and m is not None and m["pitched"]:
         return "tom", "pitched, body at %.0f Hz" % m["pitch_hz"]
     elif kind == "kick" and m is not None and m["pitched"] and m["pitch_hz"] <= KICK_MAX_HZ:
