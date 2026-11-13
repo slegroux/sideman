@@ -1097,9 +1097,6 @@ def test_a_stem_with_no_more_hits_than_the_sample_is_stable_by_construction_and_
     assert quiet["groups"][0]["stability"] is None and quiet["groups"][0]["stability_status"] == "not asked for"
     got, out = names(quiet, "kick")
     assert got == ["kick 1"] and "stability is not measured: it was not asked for" in out["groups"][0]["reason"]
-    # one hit more than the sample and the sample can move: the stability is measured
-    more = run(stem([(at(16 * b + s), tom_hit(f=45.0, tau=0.07)) for b in range(9) for s in (0, 4, 8, 12)], 9), stability_runs=2)
-    assert more["groups"][0]["stability_status"] == "measured" and more["groups"][0]["stability"] == 1.0
 
 
 def test_names_stay_neutral_for_a_stem_of_unknown_kind_and_a_group_without_a_clean_hit():
@@ -1175,6 +1172,7 @@ def test_names_on_a_real_hat_stem_closed_16ths_and_a_short_hat_on_the_offbeats()
     assert [g["count"] for g in by_count] == [48, 16] and all(g["stability"] == 1.0 for g in by_count)
     assert {g["id"]: n for g, n in zip(r["groups"], got)} == {by_count[0]["id"]: "hh 16th", by_count[1]["id"]: "hh offbeat"}
     assert [role["name"] for role in out["roles"]] == ["hh 16th", "hh offbeat"] and all(g["named"] for g in out["groups"])
+    assert all(g["stability_status"] == "measured" for g in r["groups"])         # more hits than the sample: the regroupings ran
     # the same groups as a result that was not asked for regroupings (stability_runs=0) read: neither is named, with the reason
     # (the real stability_runs=0 run is in the stable-by-construction test)
     quiet = {**r, "groups": [{**g, "stability": None, "stability_status": "not asked for"} for g in r["groups"]]}
@@ -1305,38 +1303,32 @@ def test_a_kick_leaking_20_db_down_on_every_beat_into_a_snare_stem_is_marked_and
     assert all(leak["id"] not in role["groups"] for role in out["roles"]) and [r["groups"] for r in out["roles"]] == [[snare["id"]]]
 
 
-@pytest.mark.slow
-def test_a_snare_leaking_20_db_down_into_a_kick_stem_is_marked_the_same_way():
-    # snare stem: a snare on every beat. Kick stem: a kick on steps 0 and 8 and that snare 20 dB down on every beat (the
-    # copies alone, steps 4 and 12, are the leak group)
-    snares = {(b, s): snare_hit(100 * b + s) for b in range(8) for s in EVERY_BEAT}
-    loud = run(stem([(at(16 * b + s), snares[b, s]) for b, s in snares], 8))
-    mixed = run(stem([(at(16 * b + s), KICK()) for b in range(8) for s in (0, 8)]
-                     + [(at(16 * b + s), snares[b, s] * 0.1) for b, s in snares], 8))
-    marks = drumroles.mark_bleed({"snare": loud, "kick": mixed})
-    leak = group_at(mixed, 4)
-    assert leak["id"] == group_at(mixed, 12)["id"] != group_at(mixed, 0)["id"] and leak["count"] == 16
-    ev = marks["kick"][leak["id"]]
-    assert ev["bleed"] and ev["evidence"]["source_stem"] == "snare" and ev["evidence"]["co_located"] and ev["evidence"]["expected"] == 1.0
-    assert not marks["kick"][group_at(mixed, 0)["id"]]["bleed"]
-    out = drumroles.name_roles(mixed, "kick", bleed=marks["kick"])
-    assert all(leak["id"] not in role["groups"] for role in out["roles"])
+def constant_leak(x_audio, x_level, y_level=-10.0, bars=8, x_steps=(0, 8)):
+    """The leak tests on fake results (the real-audio one is above): y plays a kick on every beat of every bar at `y_level`; x plays
+    `x_audio` at `x_level` on `x_steps` of every bar. Expected rate 100 %: the coincidence cannot tell."""
+    every = [(b, s) for b in range(bars) for s in EVERY_BEAT]
+    x = [(b, s) for b in range(bars) for s in x_steps]
+    return drumroles.mark_bleed(bleed_pair(x_audio, x, x_level, KICK(), every, y_level, n_bars=bars))["x"][0]
 
 
-@pytest.mark.slow
-def test_a_different_sound_that_only_shares_the_pattern_is_not_marked_and_the_same_sound_8_db_down_is_not_either():
-    # a hat 20 dB under the kick on every beat of the snare stem: co-located, 20 dB under, but a hat is not a kick: likeness fails
-    nominal = oneshot._loudest_ms(KICK()[:, None], SR) / oneshot._loudest_ms(noise_hit(1, 0.012)[:, None], SR)
-    _, mixed, marks = leak_stems(lambda b, s: snare_hit(100 * b + s), (4, 12), noise_hit(1, 0.012) * nominal, -20.0)
-    ev = marks["mixed"][group_at(mixed, 0)["id"]]
+def test_a_constant_leak_of_either_stem_is_marked_a_different_sound_or_the_same_one_8_db_down_is_not():
+    # (fake results; what the pipeline does with real audio is the test above)
+    ev = constant_leak(KICK() * 0.1, -30.0)                                  # the kick 20 dB down on beats 1 and 3 of the other stem
+    assert ev["bleed"] and ev["evidence"]["co_located"] and ev["evidence"]["expected"] == 1.0 and ev["evidence"]["louder_db"] == pytest.approx(20.0)
+    assert "co-located: chance cannot tell" in ev["why"]
+    # the other way round: a snare 20 dB down on steps 4 and 12 of a stem against a snare on every beat
+    every = [(b, s) for b in range(8) for s in EVERY_BEAT]
+    snare = snare_hit(1)
+    ev = drumroles.mark_bleed(bleed_pair(snare * 0.1, [(b, s) for b in range(8) for s in (4, 12)], -30.0, snare, every, -10.0))["x"][0]
+    assert ev["bleed"] and ev["evidence"]["co_located"] and ev["evidence"]["distance"] < drumroles.CO_DISTANCE
+    # a hat 20 dB under the kick on the same 16ths: co-located, 20 dB under, but a hat is not a kick: likeness fails
+    ev = constant_leak(noise_hit(1, 0.012) * 0.1, -30.0)
     assert not ev["bleed"] and ev["evidence"]["co_located"] and ev["evidence"]["failed"] == "likeness"
-    assert ev["evidence"]["louder_db"] == pytest.approx(20.0, abs=2.0) and ev["evidence"]["distance"] > 2 * drumroles.CO_DISTANCE
-    assert "do not sound alike" in ev["why"]
-    # the same kick only 8 dB down: it would pass the 6 dB the other test asks for, not the 12 dB asked here
-    _, mixed, marks = leak_stems(lambda b, s: snare_hit(100 * b + s), (4, 12), KICK(), -8.0)
-    ev = marks["mixed"][group_at(mixed, 0)["id"]]
+    assert ev["evidence"]["distance"] > 2 * drumroles.CO_DISTANCE and "do not sound alike" in ev["why"]
+    # the same kick only 8 dB down: it would pass the 6 dB of the ordinary limits, not the 12 dB of these
+    ev = constant_leak(KICK() * 10 ** (-8 / 20), -18.0)
     assert not ev["bleed"] and ev["evidence"]["co_located"] and ev["evidence"]["failed"] == "level"
-    assert ev["evidence"]["louder_db"] == pytest.approx(8.0, abs=2.0) and "it needs +12 dB" in ev["why"]
+    assert ev["evidence"]["louder_db"] == pytest.approx(8.0) and "it needs +12 dB" in ev["why"]
 
 
 def test_the_chance_is_reported_over_the_groups_own_bars_too_and_p_is_not_evidence_when_the_two_agree():
@@ -1403,6 +1395,33 @@ def test_when_the_other_group_is_there_in_the_groups_own_bars_the_level_and_like
     for audio in (tom_hit() * 0.1, tom_hit(f=500.0) * 0.1):
         ev = drumroles.mark_bleed(bleed_pair(audio, CELLS, -18.0, tom_hit(), CELLS, -10.0))["x"][0]
         assert ev["bleed"] and not ev["evidence"]["strict"] and ev["evidence"]["louder_min_db"] == drumroles.BLEED_LOUDER_DB
+
+
+def test_a_co_located_group_is_marked_at_an_expected_rate_of_95_percent_and_needs_90_percent_of_its_hits_to_coincide():
+    # x plays step 0 in 20 bars, 20 dB under y's copy; y plays it in 19 of them (and elsewhere in the last): chance 95 %, and 19 of
+    # 20 hits coincide (95 %). Over 90 % chance the coincidence cannot tell (rate and margin are not asked), so level and likeness mark it
+    x = [(b, 0) for b in range(20)]
+    y = [(b, 0) for b in range(19)] + [(19, 14)]
+    ev = drumroles.mark_bleed(bleed_pair(tom_hit() * 0.1, x, -30.0, tom_hit(), y, -10.0, n_bars=20))["x"][0]["evidence"]
+    assert ev["co_located"] and ev["expected"] == pytest.approx(0.95) and ev["rate"] == pytest.approx(0.95) and ev["failed"] is None
+    # y plays step 0 in every bar (chance 100 %), but 6 of x's 20 hits are 30 ms off y's (not coincident): 70 % coincide, under the 90 %
+    pair = bleed_pair(tom_hit() * 0.1, x, -30.0, tom_hit(), [(b, 0) for b in range(20)], -10.0, n_bars=20)
+    for h in pair["x"]["hits"][:6]:
+        h["onset_s"] += 0.030
+    marks = drumroles.mark_bleed(pair)["x"][0]
+    assert not marks["bleed"] and marks["evidence"]["co_located"] and marks["evidence"]["rate"] == pytest.approx(0.7)
+    assert marks["evidence"]["failed"] == "coincidence" and "too few of the hits coincide (it needs 90 %)" in marks["why"]
+
+
+def test_an_offbeat_hat_needs_two_hits_a_bar_on_the_offbeats_1_75_is_not_enough():
+    # 8 bars, 14 hits on the offbeats (2 a bar for six bars, 1 for the last two), every offbeat in use (3 or 4 bars of 8): every hit
+    # on the offbeats, all 4 offbeats known and in use, 14 / 8 = 1.75 a bar. 2 a bar rotating (16 hits) is named
+    cells = [(b, OFFBEATS[(2 * b + k) % 4]) for b in range(6) for k in (0, 1)] + [(6, OFFBEATS[0]), (7, OFFBEATS[2])]
+    r = fake_result([{"cells": cells, "audio": noise_hit(1, 0.025)}])
+    got, out = names(r, "hh")
+    assert got == ["hh 1"] and out["groups"][0]["measures"]["density"]["off_density"] == 1.75
+    assert [row["state"] for row in out["groups"][0]["measures"]["steps"] if OFFBEAT(row["step"])] == ["in use"] * 4
+    assert "1.8 hits a bar on the offbeats" in out["groups"][0]["reason"]
 
 
 def split_source_pair(second_audio):
