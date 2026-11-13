@@ -369,47 +369,57 @@ PEAK_DB_AT_0DB = {"tone": 3.7, "noise": 8.0}    # peak of a voice at osc level 0
 NOTE_VELOCITY = 100      # the velocity every level was measured at
 Z_AMPLITUDE_DB = 20.0 / math.log(10.0)      # 8.686 dB per neper of amplitude
 
-ASSUMPTIONS = (
-    "Ae/Be Decay: the amp envelope's decay slope is not a parameter in the LOM list (only Pe and Fe have slopes). "
-    "FALL20_PER_T = 0.29 was measured with DecaySlope 1 written through the preset XML, so the guess ASSUMES the "
-    "LOM-only device has that slope by default. Confirm: Ae Decay 100 ms, one note at velocity 100, read the 20 dB "
-    "fall: expect 29 ms.",
-    "Pe Decay = tau * 7.94 (the amp envelope's constant), with Init = Peak = the drop and Sustain 0. Evidence, not "
-    "a measurement of Pe Decay: the recorded kick (take_final.json) reads 52.7, 49.8, 47.6 Hz at 40, 80, 150 ms "
-    "against 47.1 Hz, with Pe Decay 400 ms in bzkit.py (see the report: tau 38 to 57 ms, ratio 7 to 10). Confirm "
-    "by setting Pe Decay and reading pitch_settle_ms.",
-    "Noise: Osc-B Wave raw value 21 is a white noise wave (from bzkit.py's XML value, not the LOM). Confirm its "
-    "name and index with str_for_value over Osc-B Wave, that it is white, and that in ratio mode the noise does "
-    "not change with the note (the guess plays noise-only voices at note 60).",
-    "Pe levels (Pe Init, Pe Peak, Pe Sustain) are read in semitones when Pe Amount and Pe Amt A are 100 % "
-    "(bzkit.py wrote 14.0 and 4.5 for a 14 st kick); the range is assumed to reach +-48 st (PE_MAX_ST). "
-    "to_live refuses a table whose unit is not 'st'.",
-    "Osc-A < Pe, Osc-B < Pe: raw 1 sends the pitch envelope to that oscillator, 0 not (confirm they are switches and "
-    "not amounts); Pe Amt A = 100 and Pe Amt B = 0 are the routing amounts; Pe D Slope and Pe Dst B are left at the "
-    "device's defaults and the guess does not set them.",
-    "Osc-A Wave raw 0 is a sine. Osc-A/B Fix On = 0 is ratio mode (Fix On = 1 would be fixed frequency).",
-    "Algorithm raw 10 is 'all four oscillators parallel' (bzkit.py: XML Algorithm 10 = algorithm 11). Confirm the "
-    "LOM index and that Osc A and B then both reach the output without modulating each other. Osc-C and Osc-D are "
-    "switched off; their other parameters and the unused oscillator's envelope are not set.",
-    "Coarse and Fine: ratio = Coarse * (1 + Fine/1000) (measured 2026-11-11). The note played is 1 to 2 semitones "
-    "under the carrier, Coarse 1, Fine 59 to 122; Coarse 2 or more only above about 25 kHz. A Coarse and A Fine are "
-    "passed as raw values if the units table has no row for them: confirm their display numbers equal the raw ones.",
-    "Global Time = 0 % and Time < Key = 0 % leave every envelope time as set (Time scales them by about e^(0.023 per "
-    "%): measured 2026-11-09); operator_live writes LFO On = 0, Time = 0 and Time < Key = 0 itself. Transpose 0, "
-    "Tone, Spread, Glide On, Shaper and Pan are left at the device's defaults or the Set's state, not read: a "
-    "scratch Operator must start from the Init preset.",
-    "Ae/Be Init and Peak levels, Ae Mode / Ae Loop (no loop), and Ae/Be Retrig are left at the device's defaults; "
-    "Sustain is -inf and Release = Decay as in bzkit.py. Osc level < velocity and < key are left at their defaults "
-    "(bzkit.py set 35 % level < velocity): the levels assume the default velocity response at velocity 100.",
+CHECKED = (          # read or measured on a scratch Operator (Live 12.4.6) on 2026-11-12; live-assumptions-2026-11-12.md
+    "Amp decay: exponential and linear in dB; 20 dB in 0.227 T (Ae Decay 300 ms: fall 10/20/40 dB = 34.2 / 68.3 / 135.9 "
+    "ms; 1000 ms: 113.7 / 226.6 / 452.5 ms), for noise 0.216 T (Be Decay 500 ms: 108 ms). The decay slope is not a LOM "
+    "parameter; this is the device insert_device gives (the 0.29 of the XML kit, DecaySlope 1, does not apply).",
+    "Pe Decay = tau * 7.94 holds within the search's range (7.0 to 8.4): Pe Init = Peak 12 st, Pe Decay 400 ms read 11.0 / "
+    "8.5 / 5.85 / 2.6 / 1.69 / 0.56 / 0.18 st at 5 / 20 / 40 / 80 / 100 / 150 / 200 ms (tau 58 falling to 49 ms); the "
+    "glide is steeper than one exponential late and reaches 0 at T.",
+    "Pe levels are semitones at Pe Amount 100 % and Pe Amt A 100 %, with Osc-A < Pe on: the table of Pe Init is -48 to "
+    "48 st, and a 12 st drop read 11.8 st at 3 ms.",
+    "Osc-B Wave 21 is `Noise White` (20 is `Noise Looped`): band density flat within about 2 dB from 20 Hz to 20 kHz, "
+    "flatness 0.56; the noise does not change with the note (notes 60 and 36: same spectrum, fall 107.9 and 108.3 ms).",
+    "Osc-A Wave 0 is `Sine`; Fix On 0 is ratio mode (note 60 plays 261.62 Hz).",
+    "Coarse and Fine: ratio = Coarse * (1 + Fine/1000) (Coarse 2, Fine 386, note 48: 362.61 Hz measured and expected). "
+    "A Coarse raw 0 displays 0.5, raw 1 displays 1: the units table has both, so to_live reads their display numbers.",
+    "Algorithm raw 10 is `Alg. 11`, all four in parallel: tone and noise both present, noise reading -12.5 dB with Osc-B "
+    "Level -10 dB.",
+    "Filter Type 1 is the high-pass (types: Lowpass, Highpass, Bandpass, Notch, Morph): Filter Freq 2000 Hz read -70.7 dB "
+    "under 200 Hz and -11.2 dB at 200 to 1000 Hz.",
+    "Ae Sustain must be written: the device default is 0 dB (raw 1.0), and operator_live writes -inf, which gives a "
+    "decaying hit on a held note. Defaults read: Ae Init -inf dB, Ae Peak 0 dB, Pe D Slope 1.0, Pe A Slope 0.",
+    "Output: a sine at Osc-A Level 0 dB peaks at Volume + 3.7 dB (Volume -12 dB: -8.3 and -7.9 dBFS); noise at Osc-B "
+    "Level 0 dB peaks at Volume + 7.5 and + 8.6 dB (-4.5 and -3.4 dBFS: two takes, so PEAK_DB_AT_0DB uses 8).",
+    "The units table (sideman/data/operator_units.json): the range, default and display values (49 points) of every "
+    "parameter, 132 continuous and 53 quantized; every table is accepted by to_live's curve reader. Takes repeat for a "
+    "sine (two reads of one take: identical onset, attack and falls). The first 0.9 ms of a sine reads 0.45 st high.",
+)
+
+ASSUMPTIONS = (      # NOT checked in Live (what the report lists as checked is in CHECKED)
+    "Two results that held only roughly: the profile's attack_ms reads Operator's Ae Attack low (1.5 ms reads 1.0 to "
+    "1.2 ms, 20 ms reads 16.5 ms: the profile reads to within 1 dB of the peak, so a slow attack reads short), and "
+    "Release = Decay does not make the note length immaterial: a note released after an eighth of a second lengthens "
+    "the fall of Decay 1000 ms by 7 % (20 dB: 241.6 ms against 226.6) to 10 % (40 dB: 500.0 against 452.5), so the "
+    "voice is held for at least the longest Decay and the take runs past it.",
+    "Osc-B < Pe and Pe Amt B = 0 (and Pe Dst B): that the pitch envelope does not reach Osc B. Osc-B < Pe raw 0 is "
+    "assumed to be off; only Osc-A < Pe = 1 and Pe Amt A = 100 were read (through the pitch of the tone).",
     "Pe Mode, Pe Loop, Pe Retrig, Pe Release and Pe End are left at the device's defaults: they matter after the "
     "note-off (a pitch envelope that loops, or whose release moves the pitch again, would change the tail), and the "
-    "guess holds the note for the longest decay. Confirm they are off / zero on the Init preset.",
-    "The profile's attack_ms equals Operator's Attack time: the profile reads the envelope's rise over whole periods "
-    "and a linear ramp reads 89 % of its length, while Operator's attack may not be linear.",
-    "Filter On / Filter Type / Filter Freq: type 1 is the high-pass (bzkit.py: 0 LP, 1 HP, 2 BP in the XML). "
-    "The one filter sits after both oscillators, so it is used only on a noise-led voice (tone off).",
-    "Output: Volume = the sample's peak minus 3 dB (tone-led) or 11 dB (noise-led), from the peaks of single "
-    "oscillators at 0 dB and velocity 100 (+3 dBFS sine, +9 to +13 noise: 2026-11-11). Confirm with one take.",
+    "guess holds the note for the longest decay. Not read; confirm they are off / zero on the Init preset.",
+    "Ae Mode / Ae Loop (no loop), Ae/Be Retrig, Be Init and Be Peak are left at the device's defaults; Be Sustain is "
+    "-inf and Be Release = Be Decay as for Ae (only Ae Init and Peak were read).",
+    "Velocity: the levels assume the default velocity response at velocity 100 (Osc level < velocity and < key are left "
+    "at their defaults; bzkit.py set 35 % level < velocity). Time < Key = 0 % and global Time = 0 % leave every "
+    "envelope time as set (Time scales times by about e^(0.023 per %): measured 2026-11-09 on the kit, not on this device).",
+    "LFO On = 0 (written by operator_live) is assumed to silence the LFO; the LFO's own settings are not read. "
+    "Transpose 0, Tone, Spread, Glide On, Shaper and Pan are left at the device's defaults or the Set's state: a "
+    "scratch Operator must start from the Init preset.",
+    "Osc-C and Osc-D are switched off, and the unused oscillator's envelope and levels are placeholders (UNUSED_MS, 0 dB): "
+    "that they stay silent is assumed, not read.",
+    "Filter types other than the high-pass (band-pass, notch) and the filter's resonance: the one filter sits after both "
+    "oscillators, so it is used only on a noise-led voice (tone off), and only as a high-pass. The pads' band-pass "
+    "filters in bzkit.py are not reproduced.",
     "Reading times: the attack noise reading's weight is taken at the middle of attack_window_ms (the profile's "
     "own window; a Hann window) and the body's at 0.36 of body_window_ms, calibrated on the stand-in; the "
     "extrapolation back to the onset is clamped to +-12 dB. A noise layer is accepted only when the attack's "
@@ -420,8 +430,6 @@ ASSUMPTIONS = (
     "a phantom layer off and keep a real one (it cannot add one back); the same goes for the tail rule's flat body: a "
     "noisy body with a long tail and no flat spectrum keeps the two-reading decay, and the noise decay's free range "
     "is widened up to the tail's value. All of it is heuristics to re-check on takes.",
-    "The note is held for at least the longest Decay and the take runs past it (Release = Decay): the length "
-    "operator_live returns is a plan for the renderer, not something Live has been asked for.",
 )
 
 STATE_SWITCHES = ("Osc-A On", "Osc-B On", "Osc-C On", "Osc-D On", "A Fix On ", "B Fix On ", "Pe On", "Osc-A < Pe",
@@ -569,7 +577,8 @@ def operator_guess(profile: dict) -> dict:
     (missing, or 0) or, when pitched, no body pitch.
 
     Returns {"patch": {name: float}, "structure": {...}, "sources": {name: {"reading", "confidence"}},
-    "free": {name: (low, high, "log"|"lin")}, "pinned": {name: why}, "notes": [...], "assumptions": [...]}.
+    "free": {name: (low, high, "log"|"lin")}, "pinned": {name: why}, "notes": [...], "assumptions": [...] (not
+    checked in Live), "checked": [...] (read on a scratch device on 2026-11-12)}.
     `confidence` is "measured" (a reading used as it is), "derived" (computed from readings, with a
     formula) or "default" (no reading; a choice). Feed it to `search_arguments` and `operator_live`.
 
@@ -759,7 +768,7 @@ def operator_guess(profile: dict) -> dict:
         pinned["noise_attack_ms"] = pinned["output_db"] = "set from the reading, not searched"
         notes.append("unpitched: the voice is noise only (tone off); the profile's partials are not rendered")
     return {"patch": patch, "structure": structure, "sources": src, "free": free, "pinned": pinned,
-            "notes": notes, "assumptions": list(ASSUMPTIONS)}
+            "notes": notes, "assumptions": list(ASSUMPTIONS), "checked": list(CHECKED)}
 
 
 def search_arguments(guess: dict, units: dict | None = None) -> dict:
@@ -819,7 +828,7 @@ def operator_live(patch: dict, structure: dict) -> dict:
     still need a row in the units table. Raw switches and enumerations (RAW_NAMES) hold Live's own value; the
     rest are Hz, ms, dB, semitones or % (the unit to_live checks). Noise-only voices are played at note 60 and
     a carrier under MIDI note 0 (8.18 Hz) raises ValueError. The formulas are the ones in operator_guess's docstring and
-    ASSUMPTIONS; nothing here has been checked in Live."""
+    CHECKED and ASSUMPTIONS; only what CHECKED lists has been read in Live."""
     q = patch
     tone, noise = bool(structure.get("tone_on")), bool(structure.get("noise_on"))
     pe_on = tone and bool(structure.get("pitch_env_on"))
