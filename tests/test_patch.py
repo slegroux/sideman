@@ -9,6 +9,7 @@ pitch envelope, an exponential amplitude envelope, a noise layer with its own le
 attack. Its noise is drawn afresh on every render (like Operator's), so two renders of one patch differ.
 """
 import functools
+import json
 import math
 import pathlib
 import sys
@@ -1203,3 +1204,75 @@ def test_the_search_keeps_a_real_band_passed_noise_layer_whose_level_it_may_swit
     levels = np.array([phantom_search(true, target, None, seed, profile=prof)[0] for seed in PHANTOM_SEEDS])
     assert np.all(np.abs(levels - true["noise_db"]) <= 6.0), levels
     assert abs(np.median(levels) - true["noise_db"]) <= 6.0
+
+
+# ---- the shipped units table (sideman/data/operator_units.json, read from Live 12.4.6 on a scratch Operator)
+
+def test_every_table_of_the_shipped_units_file_is_accepted_and_inf_is_a_float():
+    units = patch.operator_units()
+    assert len(units) == 132 and set(units) <= set(patch.operator_parameters())
+    for name, rows in units.items():
+        curve = patch._Curve(name, rows)             # monotone, one unit, the dimension the code expects
+        assert all(isinstance(v, float) for row in rows for v in row[:2]), name
+        assert len(curve.live) >= 2
+    assert units["Volume"][0][:2] == [0.0, -math.inf] and units["Ae Decay"][0][2] == "ms" and units["Ae Decay"][-1][2] == "s"
+    assert patch.operator_units() is not units and patch.operator_units() == units          # a new copy each time
+
+
+def _kick_snare_hat_guesses():
+    snare = reading(fall_20_ms=111.0, fall_40_ms=508.0, noise_db={"attack": -6.9, "body": -6.9}, click_db=-7.8,
+                    flatness={"attack": 0.075, "body": 0.069}, pitch_body_hz=130.0)
+    hat = reading(pitched=False, pitch_body_hz=None, fall_20_ms=60.0, fall_40_ms=120.0, attack_ms=0.4, peak_db=-3.0,
+                  bands_db={"sub": -60.0, "low": -50.0, "lowmid": -40.0, "mid": -20.0, "highmid": -6.0, "high": -3.0})
+    return {"kick": profile_of(TRUE["kick"], 1), "snare": snare, "hat": hat}
+
+
+@pytest.mark.parametrize("kind", ["kick", "snare", "hat"])
+def test_a_guess_converts_through_the_shipped_table_and_back_within_interpolation_error(kind):
+    units = patch.operator_units()
+    g = patch.operator_guess(_kick_snare_hat_guesses()[kind])
+    phys = patch.operator_live(g["patch"], g["structure"])["params"]
+    live = patch.to_live(phys, units)
+    back = patch.from_live(live, units)
+    assert set(back) == set(phys)
+    for name, v in phys.items():
+        if name in patch.RAW_NAMES:
+            assert back[name] == v, name
+        elif name in patch.QUANTIZED:
+            assert abs(back[name] - v) <= 0.5 + 1e-9, name       # whole numbers: Coarse 1, Fine to the nearest unit
+        elif v == -math.inf:
+            assert back[name] == -math.inf, name
+        else:
+            assert back[name] == pytest.approx(v, rel=1e-6, abs=1e-6), (name, v, back[name])
+        if name not in patch.RAW_NAMES and name not in patch.QUANTIZED and v != -math.inf:
+            assert 0.0 <= live[name] <= 1.0 or name in ("Time", "Time < Key", "Pe Init", "Pe Peak", "Pe Sustain", "Pe Amount",
+                                                         "Pe Amt A", "Pe Amt B"), (name, live[name])
+    args = patch.search_arguments(g, units)             # the table feeds the search's bound check directly
+    assert args["start"] == g["patch"] and set(args["bounds"]) == set(g["free"])
+    for name, (lo, hi, _) in args["bounds"].items():
+        assert g["free"][name][0] <= lo <= g["patch"][name] <= hi <= g["free"][name][1]
+
+
+def _text_display(text: str) -> float:
+    """Live's display text -> ms, Hz, dB (read here, apart from the table, to check it)."""
+    num, unit = text.split()
+    return float(num) * {"ms": 1.0, "s": 1000.0, "Hz": 1.0, "kHz": 1000.0, "dB": 1.0}[unit]
+
+
+@pytest.mark.parametrize("name, value, written", [
+    ("Ae Decay", 300.0, 0.5184374519784173), ("Ae Decay", 1000.0, 0.6278481862400666), ("Pe Decay", 400.0, 0.5446614978544123),
+    ("Filter Freq", 2000.0, 0.6538756597411892), ("Volume", -12.0, 0.5416666666666666)])
+def test_physical_values_checked_on_the_device_land_on_the_display_live_gave(name, value, written):
+    """`written` is the Live value the takes of 2026-11-12 wrote for this physical value and the device played (the
+    300 ms and 1000 ms decays fall 20 dB in 68.3 and 226.6 ms). The shipped table reproduces it, and Live's own
+    display text at the two table points either side of it, read apart from the table, brackets the value: its
+    log (dB: linear) interpolation at `written` is within 1 % of the physical value."""
+    units = patch.operator_units()
+    assert patch.to_live({name: value}, units)[name] == pytest.approx(written, rel=1e-6)
+    assert patch.from_live({name: written}, units)[name] == pytest.approx(value, rel=1e-6)
+    raw = json.loads((pathlib.Path(patch.__file__).parent / "data" / "operator_units.json").read_text())["parameters"][name]["display"]
+    pts = [(live, _text_display(text)) for live, text in raw if "inf" not in text]
+    (l0, d0), (l1, d1) = [(a, b) for a, b in zip(pts, pts[1:]) if a[0] <= written <= b[0]][0]
+    f = (written - l0) / (l1 - l0)
+    shown = d0 + f * (d1 - d0) if name == "Volume" else math.exp(math.log(d0) + f * (math.log(d1) - math.log(d0)))
+    assert shown == pytest.approx(value, rel=0.01)

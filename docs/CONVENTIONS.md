@@ -375,6 +375,25 @@ between files at one sample rate, not between 44.1 and 96 kHz.
 - At 22.05 kHz the bands above 11 kHz are empty, so a hat compared with a
   44.1 kHz file reads "highs low".
 
+**Operator's units table.** `sideman/data/operator_units.json` holds, for every
+parameter of Operator in Live 12.4.6, its range, default, whether it is
+quantized (with its value items) and, for the 132 continuous ones, what Live
+displays (`str_for_value`) at 49 points across the range, as Live's text and as
+a parsed `units` table. `sideman.patch.operator_units()` returns that table in
+the form `to_live`, `from_live` and `search_arguments` take, so a patch in
+milliseconds, hertz, decibels and semitones becomes the 0 to 1 values Live
+wants. It was read from a scratch Operator (a fresh `insert_device` on a
+throwaway track) with `scripts/operator_units.py`: `str_for_value` only formats
+a value and writes nothing to the device, but the calls go through Sideman's
+undo wrapping, so they run in chunks of 150 per undo step (47 steps, 6,958
+calls). To re-read it for another Live version, put a fresh Operator on a
+scratch track and run `uv run python scripts/operator_units.py "live_set tracks
+N devices 0" sideman/data/operator_units.json` (N is that track's index), then
+run `tests/test_patch.py`, whose tests refuse a table `to_live` cannot read.
+The decay and output constants in `sideman/patch.py` (`FALL20_PER_T`,
+`PEAK_DB_AT_0DB`) were measured on takes of that device, not read from the
+table: re-measure them (the report `live-assumptions`) for a new version.
+
 ## Comparing a scene with a reference track
 
 `reference_profile` and `mix_report` measure one scene of the Set against the

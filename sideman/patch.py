@@ -455,6 +455,20 @@ def operator_parameters() -> tuple:
     return tuple(json.loads(path.read_text(encoding="utf-8"))["names"])
 
 
+@functools.lru_cache(maxsize=1)
+def _units_file() -> dict:
+    path = pathlib.Path(__file__).parent / "data" / "operator_units.json"
+    return json.loads(path.read_text(encoding="utf-8"))["units"]
+
+
+def operator_units() -> dict:
+    """The units table of Operator in Live 12.4.6 (sideman/data/operator_units.json, read from a scratch device with
+    scripts/operator_units.py), in the form `to_live`, `from_live` and `search_arguments` take: {parameter name:
+    [[live_value, display_number, unit], ...]} for the 132 continuous parameters (49 points each, ends included).
+    The file stores a "-inf" display as the string "-inf"; here it is the float. A new copy on each call."""
+    return {name: [[float(live), float(disp), unit] for live, disp, unit in rows] for name, rows in _units_file().items()}
+
+
 def _entry(value, reading: str, confidence: str) -> tuple:
     return value, {"reading": reading, "confidence": confidence}
 
