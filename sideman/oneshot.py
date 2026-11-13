@@ -894,6 +894,7 @@ def _measure(y: np.ndarray, sr: int, cut: str, quick: bool = False) -> dict:
     low = np.nonzero(env[ip:a1] < env[ip] * 10 ** (-ATTACK_RANGE_DB / 10))[0]
     a2 = max(int(FRAME_S[0] * sr), ip + int(low[0])) if len(low) else a1
     att = _spectrum(y, 0, min(a1, a2), sr, level=env)
+    out["attack_window_ms"] = [0.0, _ms(min(a1, a2), sr)]     # what noise_db["attack"] was read over
     out["noise_db"], out["flatness"] = {}, {}
     for name, s in (("attack", att), ("body", None if few else body)):
         if s is None:
@@ -956,6 +957,7 @@ def profile(path: str | pathlib.Path, hit: int | str | None = None) -> dict:
                     do not follow one pitch); None when the track cannot be followed
                     back to the onset
     pitch_body_hz   pitch over body_window_ms (40-150 ms, shorter for a short hit)
+    attack_window_ms  [0, end]: the span noise_db['attack'] is read over (30 ms, or until the envelope is 30 dB down)
     pitch_drop_st   start minus body, semitones
     pitch_settle_ms when the pitch comes within 0.5 st of the body pitch and stays 10 ms
                     (None when it never does, or is already there where first read)
