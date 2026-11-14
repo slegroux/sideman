@@ -153,6 +153,14 @@ genuinely cannot work. Full signatures in **[docs/TOOLS.md](docs/TOOLS.md)**.
 | `lom_observe` / `lom_poll_events` / `lom_observers` / `lom_unobserve*` | Change notification |
 | `audio_analyze` / `audio_compare` / `mix_report` / `reference_profile` / `sample_analyze` / `sample_compare` | Loudness, peaks, spectrum and stereo of an audio file, vs a reference; per-section report of a capture, against a reference track's stems per section and per element against the kick; envelope, pitch and tone of a drum one-shot, and how a synth take differs from one (local; `listen` extra) |
 
+**Sideman and Roadie.** Sideman measures what needs only Live and the Set's own signal: `audio_analyze`,
+`audio_compare` and `mix_report` with no reference or an audio file. Analysis that needs a reference track's
+profile, stems or samples (`reference_profile`, `sample_analyze`, `sample_compare`, and `mix_report` against a
+profile, there called `session_compare`) lives in [Roadie](https://github.com/slegroux/roadie)'s MCP server,
+`roadie mcp`. Roadie builds on `sideman.listen` and reaches Live only through `sideman.client`; Sideman imports
+nothing from Roadie. Register both servers. Those four still work here for now and will be removed from Sideman
+after one release that says so.
+
 **Observers are unique to this server.** Nothing else in the field reports
 changes *the user* makes in the GUI.
 

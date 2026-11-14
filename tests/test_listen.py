@@ -1038,6 +1038,29 @@ def test_profile_small_things_json_extension_tempo_note_markdown_and_stale_toler
         listen.reference_profile(ref["mix"], {"kick": ref["kick"]}, TEMPO, T0, SECTIONS[:1], beats_per_bar=float("nan"))
 
 
+# ------------------------------------------------------------------ public API (roadie_analysis imports it)
+
+PUBLIC_API = {"_db": "to_db", "_db_amp": "amp_to_db", "_peak_rms": "peak_rms", "_spectra": "spectra",
+              "_band": "band_power", "_check_channels": "check_channels", "_stereo": "to_stereo",
+              "_check_sections": "check_sections", "_load_manifest": "load_manifest",
+              "_load_source": "load_source", "_bar_seconds": "bar_seconds", "_slice": "slice_span"}
+
+
+@pytest.mark.parametrize("private,public", sorted(PUBLIC_API.items()))
+def test_public_names_are_the_old_private_functions_and_say_so(private, public):
+    assert getattr(listen, public) is getattr(listen, private)
+    assert "Public API" in getattr(listen, public).__doc__
+
+
+def test_the_other_names_roadie_imports_are_public_api_too():
+    for name in ("load", "analyze", "analyze_array", "compare", "masking", "change_rate", "load_capture",
+                 "mix_layer", "write_report"):
+        assert "Public API" in getattr(listen, name).__doc__, name
+        assert name in listen.__doc__, name
+    for name in ("BANDS", "FLOOR_DB", "MASK_FLAG", "MASK_AUDIBLE_DB", "CHANGE_BLOCK_BARS", "CHANGE_DB"):
+        assert hasattr(listen, name) and name in listen.__doc__, name
+
+
 # ------------------------------------------------------------------ golden: unchanged output
 
 GOLDEN = pathlib.Path(__file__).resolve().parent / "golden"
@@ -1065,9 +1088,9 @@ def _norm_paths(text):
 
 
 def _same(a, b, path=""):
-    """Equal structure, keys, strings and numbers exactly; the path-valued keys are not compared."""
+    """Equal structure, keys in the same order, strings and numbers exactly; the path-valued keys are not compared."""
     if isinstance(a, dict):
-        assert isinstance(b, dict) and a.keys() == b.keys(), (path, sorted(a), sorted(b))
+        assert isinstance(b, dict) and list(a) == list(b), (path, list(a), list(b))
         for k in a:
             if k not in ("json_path", "md_path", "manifest", "reference"):
                 _same(a[k], b[k], path + "/" + k)
@@ -1088,6 +1111,44 @@ def test_mix_report_output_is_unchanged_without_a_profile(tmp_path, name, with_r
     _same(json.loads(pathlib.Path(r["json_path"]).read_text()), want)
     assert _norm_paths(pathlib.Path(r["md_path"]).read_text()) == _norm_paths((GOLDEN / (name + ".md")).read_text())
     assert "elements" not in json.dumps(want) and "reference_kind" not in want
+
+
+def test_the_seam_load_capture_mix_layer_write_report_gives_mix_reports_bytes_and_places_a_layer(tmp_path):
+    """Roadie's session_compare builds on these three: with no layer they write what mix_report writes; a
+    layer's row keys sit before the masking keys, `intro` replaces the reference line, `layers` sit between
+    the section table and the change rate, and a layer's `vs_reference` fills the "vs ref" column."""
+    import json
+    m = golden_capture(tmp_path)
+    ref = str(tmp_path / "ref.wav")
+    for name, reference in (("plain", None), ("audio_reference", ref)):
+        r = listen.mix_report(m, reference=reference, out_dir=tmp_path / name)
+        want = {k: pathlib.Path(r[k]).read_bytes() for k in ("json_path", "md_path")}
+        cap = listen.load_capture(m)
+        assert cap["sr"] == SR and set(cap["audio"]) == {"master", "kick", "bass"} and cap["path"] is None
+        report, spans = listen.mix_layer(cap, reference)
+        assert "json_path" not in report and not (tmp_path / "layer").exists()        # nothing written yet
+        assert [s["section"] for s in spans] == m["sections"] and spans[1]["t0"] == pytest.approx(0.3 + 4 * 2.0)
+        assert spans[0]["analysis"]["bands_db"] == report["sections"][0]["bands_db"]
+        for p in (tmp_path / name).iterdir():
+            p.unlink()
+        got = listen.write_report(report, cap, tmp_path / name)
+        for k in ("json_path", "md_path"):
+            assert pathlib.Path(got[k]).read_bytes() == want[k], (name, k)
+    report, spans = listen.mix_layer(listen.load_capture(m), ref)
+    for row in report["sections"]:
+        row["layer"] = {"x": 1}
+        row["vs_reference"] = {"band_balance_db": {"sub": 5.0}, "flagged_bands": ["sub"], "lufs_diff": 0.0}
+    report["layer_kind"] = "test"
+    got = listen.write_report(report, listen.load_capture(m), tmp_path / "layer",
+                              intro=["Layer intro.", ""], layers=["", "## A layer", "", "body"])
+    text = pathlib.Path(got["json_path"]).read_text()
+    assert list(json.loads(text)["sections"][0])[-5:] == ["vs_reference", "layer", "kick_bass_overlap",
+                                                         "kick_bass_quieter_db", "masking_flag"]
+    assert list(json.loads(text))[-3:] == ["layer_kind", "json_path", "md_path"]
+    md = pathlib.Path(got["md_path"]).read_text()
+    assert "Layer intro." in md and "Reference: `" not in md
+    assert md.index("| B |") < md.index("## A layer") < md.index("body") < md.index("## Change rate")
+    assert "| vs ref |" in md and "sub +5.0" in md
 
 
 def test_profile_a_phrase_in_four_of_eight_bars_is_present_and_one_bar_in_eight_is_not_enough(tmp_path):
