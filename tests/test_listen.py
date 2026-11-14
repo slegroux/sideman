@@ -1088,9 +1088,9 @@ def _norm_paths(text):
 
 
 def _same(a, b, path=""):
-    """Equal structure, keys, strings and numbers exactly; the path-valued keys are not compared."""
+    """Equal structure, keys in the same order, strings and numbers exactly; the path-valued keys are not compared."""
     if isinstance(a, dict):
-        assert isinstance(b, dict) and a.keys() == b.keys(), (path, sorted(a), sorted(b))
+        assert isinstance(b, dict) and list(a) == list(b), (path, list(a), list(b))
         for k in a:
             if k not in ("json_path", "md_path", "manifest", "reference"):
                 _same(a[k], b[k], path + "/" + k)
