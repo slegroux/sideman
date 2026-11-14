@@ -23,7 +23,7 @@ Choices that are not obvious from the code:
   six bands cover 20 Hz-20 kHz, so they sum to the file's power within that range. Spectral comparisons remove the
   median band offset first, so a level difference does not read as a tonal one.
 
-Public API. Roadie's `roadie.analysis` (the reference-profile half of the analysis: `oneshot`,
+Public API. Roadie's `roadie_analysis` (the reference-profile half of the analysis: `oneshot`,
 `reference_profile`, the element and drum layers of `mix_report`) imports these names, and nothing
 in Sideman imports Roadie, so renaming or changing one is a breaking change to a downstream repo.
 Each is marked "Public API" in its docstring:
@@ -86,8 +86,8 @@ def to_stereo(x: np.ndarray) -> np.ndarray:
     return x[:, :2]
 
 
-# Roadie's analysis package (roadie.analysis) and sideman.oneshot build on the public names above and
-# below. These aliases keep the old private spellings working; new code uses the public ones.
+# Roadie's analysis package (roadie_analysis) builds on the public names above and below. These aliases keep
+# the old private spellings working (sideman.oneshot still imports them); new code uses the public ones.
 _db, _db_amp, _check_channels, _stereo = to_db, amp_to_db, check_channels, to_stereo
 
 

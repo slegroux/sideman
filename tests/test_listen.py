@@ -1038,7 +1038,7 @@ def test_profile_small_things_json_extension_tempo_note_markdown_and_stale_toler
         listen.reference_profile(ref["mix"], {"kick": ref["kick"]}, TEMPO, T0, SECTIONS[:1], beats_per_bar=float("nan"))
 
 
-# ------------------------------------------------------------------ public API (roadie.analysis imports it)
+# ------------------------------------------------------------------ public API (roadie_analysis imports it)
 
 PUBLIC_API = {"_db": "to_db", "_db_amp": "amp_to_db", "_peak_rms": "peak_rms", "_spectra": "spectra",
               "_band": "band_power", "_check_channels": "check_channels", "_stereo": "to_stereo",
