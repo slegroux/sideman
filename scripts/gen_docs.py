@@ -154,7 +154,7 @@ def render():
 # `reload` have no tool counterpart; anything unlisted falls into "Other",
 # which is the signal to update this list.
 CLIENT_GROUPS = [
-    ("Connection", ["request", "reload"]),
+    ("Connection", ["request", "close", "reload"]),
     ("Discovery", ["search", "describe", "canonical_path", "count", "types",
                    "ping"]),
     ("Read / write", ["get", "set", "call",
