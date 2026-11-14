@@ -33,15 +33,19 @@ Connects per request, like the MCP layer: there is no socket to go stale
 between two notebook cells run minutes apart.
 
 A script that sends many requests in a row can hold one connection for
-the run instead, which saves Live a tick per request (measured: 375 ms
-against 590 ms each on a busy Set):
+the run instead, which saves Live a tick per request (measured: 389 ms
+against 603 ms each on a Set with ten stems loaded):
 
     with Live() as live:
         for i in range(n):
             live.set("live_set tracks %d" % i, "name", names[i])
 
 Inside the block every request goes down the same socket; leaving it, or
-close(), closes it, and the object connects per request again.
+close(), closes it, and the object connects per request again. If Live
+closed the connection between two requests (it quit and came back), the
+next request connects again by itself. A connection lost after a request
+was sent raises LiveError("ConnectionClosed") and is never sent again:
+Live may have run it. Not thread-safe inside a block, and blocks do not nest.
 
 ## Connection
 

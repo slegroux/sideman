@@ -14,11 +14,13 @@ from sideman import Live, LiveError  # noqa: E402
 
 class Server:
     """Answers each request line with {"ok": true, "result": {"n": <request number>, "op": <op>}} and counts
-    the connections it accepted. `drop_after` closes a connection after that many replies; `silent` never replies."""
+    the connections it accepted. `drop_after` closes a connection after that many replies (`closed` is set
+    once it has); `silent` never replies; `hang_up_on` closes the connection on reading that op, unanswered."""
 
-    def __init__(self, drop_after=None, silent=False):
-        self.drop_after, self.silent = drop_after, silent
+    def __init__(self, drop_after=None, silent=False, hang_up_on=None):
+        self.drop_after, self.silent, self.hang_up_on = drop_after, silent, hang_up_on
         self.connections, self.requests = 0, []
+        self.closed = threading.Event()
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(8)
@@ -35,33 +37,49 @@ class Server:
             threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
 
     def _serve(self, conn):
+        try:
+            self._talk(conn)
+        finally:
+            conn.close()
+            self.closed.set()
+
+    def _talk(self, conn):
         buf, replies = b"", 0
-        with conn:
-            while True:
-                try:
-                    chunk = conn.recv(65536)
-                except OSError:
+        while True:
+            try:
+                chunk = conn.recv(65536)
+            except OSError:
+                return
+            if not chunk:
+                return
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                req = json.loads(line)
+                self.requests.append(req)
+                if self.silent:
+                    continue
+                if req["op"] == self.hang_up_on:
                     return
-                if not chunk:
+                if req["op"] == "refuse":
+                    reply = {"ok": False, "error": {"type": "PermissionError", "message": "no"}}
+                else:
+                    reply = {"ok": True, "result": {"n": len(self.requests), "op": req["op"]}}
+                conn.sendall(json.dumps(reply).encode() + b"\n")
+                replies += 1
+                if self.drop_after and replies >= self.drop_after:
                     return
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    req = json.loads(line)
-                    self.requests.append(req)
-                    if self.silent:
-                        continue
-                    if req["op"] == "refuse":
-                        reply = {"ok": False, "error": {"type": "PermissionError", "message": "no"}}
-                    else:
-                        reply = {"ok": True, "result": {"n": len(self.requests), "op": req["op"]}}
-                    conn.sendall(json.dumps(reply).encode() + b"\n")
-                    replies += 1
-                    if self.drop_after and replies >= self.drop_after:
-                        return
 
     def close(self):
         self.sock.close()
+
+
+def _wait_until_closed_by_peer(server, live):
+    """The server has hung up AND the client's socket has seen it (it reads as ready)."""
+    import select
+    assert server.closed.wait(2)
+    assert select.select([live._sock], [], [], 2)[0]
+    server.closed.clear()
 
 
 @pytest.fixture
@@ -98,20 +116,31 @@ def test_a_refusal_keeps_the_held_connection(server):
         assert live.request("ping")["n"] == 3 and server.connections == 1
 
 
-def test_a_held_connection_live_closed_is_opened_again_without_losing_the_request():
-    server = Server(drop_after=1)                # the server hangs up after each reply, as a reload does
+def test_a_held_connection_live_closed_is_opened_again_and_the_request_is_sent_once():
+    server = Server(drop_after=1)                # the server hangs up after each reply, as Live does when it quits
     try:
         with Live(port=server.port, timeout=2) as live:
             got = []
             for _ in range(3):
-                try:
-                    got.append(live.request("ping")["op"])
-                except LiveError as e:           # the hang-up can also be seen while reading: reported, not retried
-                    assert e.type == "ConnectionClosed"
-                    got.append("closed")
-            assert got[0] == "ping" and "ping" in got[1:]
-            # nothing was sent twice: every request the server saw got exactly one reply or one error
-            assert len(server.requests) <= 3
+                got.append(live.request("ping")["n"])
+                _wait_until_closed_by_peer(server, live)
+            assert got == [1, 2, 3]                                  # no request lost
+            assert len(server.requests) == 3 and server.connections == 3   # none sent twice; one connection each
+    finally:
+        server.close()
+
+
+def test_a_connection_lost_after_the_request_was_sent_is_reported_and_not_sent_again():
+    server = Server(hang_up_on="create")         # Live reads the request, then goes: it may have run it
+    try:
+        with Live(port=server.port, timeout=2) as live:
+            assert live.request("ping")["n"] == 1
+            with pytest.raises(LiveError) as e:
+                live.request("create")
+            assert e.value.type == "ConnectionClosed" and "before replying" in str(e.value)
+            assert [r["op"] for r in server.requests] == ["ping", "create"]     # sent once
+            assert live._sock is None
+            assert live.request("ping")["n"] == 3 and server.connections == 2   # the next one connects again
     finally:
         server.close()
 

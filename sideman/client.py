@@ -24,6 +24,7 @@ never guess member names.
 from __future__ import annotations
 
 import json
+import select
 import socket
 from typing import Any
 
@@ -48,15 +49,19 @@ class Live:
     between two notebook cells run minutes apart.
 
     A script that sends many requests in a row can hold one connection for
-    the run instead, which saves Live a tick per request (measured: 375 ms
-    against 590 ms each on a busy Set):
+    the run instead, which saves Live a tick per request (measured: 389 ms
+    against 603 ms each on a Set with ten stems loaded):
 
         with Live() as live:
             for i in range(n):
                 live.set("live_set tracks %d" % i, "name", names[i])
 
     Inside the block every request goes down the same socket; leaving it, or
-    close(), closes it, and the object connects per request again.
+    close(), closes it, and the object connects per request again. If Live
+    closed the connection between two requests (it quit and came back), the
+    next request connects again by itself. A connection lost after a request
+    was sent raises LiveError("ConnectionClosed") and is never sent again:
+    Live may have run it. Not thread-safe inside a block, and blocks do not nest.
     """
 
     def __init__(self, host: str = HOST, port: int = PORT,
@@ -109,15 +114,23 @@ class Live:
                            "params": params or {}}).encode() + b"\n"
         reused = self._sock is not None
         s = self._sock if reused else self._connect()
+        if reused and select.select([s], [], [], 0)[0]:
+            # Readable before anything was asked: Live closed the held
+            # connection since the last request (it quit, or the control
+            # surface was switched off). A send would still succeed locally and
+            # the request would look lost, so connect again first.
+            self._drop()
+            reused = False
+            s = self._connect()
         try:
             try:
                 s.sendall(line)
             except socket.timeout:
                 raise
             except OSError:
-                # A held connection Live closed since the last request (a
-                # reload, a restart): nothing was sent, so connect again and
-                # send once. A fresh connection that fails here is an error.
+                # The same, seen at the send: nothing was sent, so connect
+                # again and send once. A fresh connection that fails here is
+                # an error.
                 if not reused:
                     raise
                 self._drop()
@@ -126,9 +139,18 @@ class Live:
                 s.sendall(line)
             buf = b""
             while b"\n" not in buf:
-                chunk = s.recv(65536)
+                try:
+                    chunk = s.recv(65536)
+                except ConnectionResetError:
+                    if not reused:
+                        raise
+                    chunk = b""
                 if not chunk:
+                    # Sent, and no (whole) reply: Live may have run it, so it
+                    # is reported and not sent again.
                     raise LiveError("ConnectionClosed",
+                                    "Live closed the connection before replying"
+                                    if reused and not buf else
                                     "Live closed the connection mid-reply")
                 buf += chunk
         except socket.timeout:
