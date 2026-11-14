@@ -1038,6 +1038,27 @@ def test_profile_small_things_json_extension_tempo_note_markdown_and_stale_toler
         listen.reference_profile(ref["mix"], {"kick": ref["kick"]}, TEMPO, T0, SECTIONS[:1], beats_per_bar=float("nan"))
 
 
+# ------------------------------------------------------------------ public API (roadie.analysis imports it)
+
+PUBLIC_API = {"_db": "to_db", "_db_amp": "amp_to_db", "_peak_rms": "peak_rms", "_spectra": "spectra",
+              "_band": "band_power", "_check_channels": "check_channels", "_stereo": "to_stereo",
+              "_check_sections": "check_sections", "_load_manifest": "load_manifest",
+              "_load_source": "load_source", "_bar_seconds": "bar_seconds", "_slice": "slice_span"}
+
+
+@pytest.mark.parametrize("private,public", sorted(PUBLIC_API.items()))
+def test_public_names_are_the_old_private_functions_and_say_so(private, public):
+    assert getattr(listen, public) is getattr(listen, private)
+    assert "Public API" in getattr(listen, public).__doc__
+
+
+def test_the_other_names_roadie_imports_are_public_api_too():
+    for name in ("load", "analyze", "analyze_array", "compare", "masking", "change_rate"):
+        assert "Public API" in getattr(listen, name).__doc__, name
+    for name in ("BANDS", "FLOOR_DB", "MASK_FLAG", "MASK_AUDIBLE_DB", "CHANGE_BLOCK_BARS", "CHANGE_DB"):
+        assert hasattr(listen, name) and name in listen.__doc__, name
+
+
 # ------------------------------------------------------------------ golden: unchanged output
 
 GOLDEN = pathlib.Path(__file__).resolve().parent / "golden"

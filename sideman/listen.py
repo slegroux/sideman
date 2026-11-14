@@ -22,6 +22,19 @@ Choices that are not obvious from the code:
 - Band levels are mean power in dBFS (a full-scale sine reads -3.01 dB); the
   six bands cover 20 Hz-20 kHz, so they sum to the file's power within that range. Spectral comparisons remove the
   median band offset first, so a level difference does not read as a tonal one.
+
+Public API. Roadie's `roadie.analysis` (the reference-profile half of the analysis: `oneshot`,
+`reference_profile`, the element and drum layers of `mix_report`) imports these names, and nothing
+in Sideman imports Roadie, so renaming or changing one is a breaking change to a downstream repo.
+Each is marked "Public API" in its docstring:
+
+- constants: BANDS, FLOOR_DB, MASK_FLAG, MASK_AUDIBLE_DB, CHANGE_BLOCK_BARS, CHANGE_DB
+- levels and spectra: to_db, amp_to_db, peak_rms, spectra, band_power, analyze_array, analyze, compare
+- files: load, check_channels, to_stereo, load_manifest, load_source, check_sections, bar_seconds, slice_span
+- section measurements: masking, change_rate
+
+The old private spellings (_db, _db_amp, _peak_rms, _spectra, _band, _check_channels, _stereo,
+_check_sections, _load_manifest, _load_source, _bar_seconds, _slice) stay as aliases.
 """
 from __future__ import annotations
 
@@ -41,32 +54,41 @@ FLAG_DB = 3.0           # audio_compare flags a band that differs by more than t
 K_TAPS = 8192           # K-weighting impulse response length; the high-pass is below -170 dB by then
 
 
-def _db(power: float) -> float:
+def to_db(power: float) -> float:
+    """Public API. A mean power as dB, FLOOR_DB when it is zero or negative."""
     return max(FLOOR_DB, 10.0 * math.log10(power)) if power > 0 else FLOOR_DB
 
 
-def _db_amp(amp: float) -> float:
-    return _db(amp * amp)
+def amp_to_db(amp: float) -> float:
+    """Public API. An amplitude (RMS or peak) as dB, FLOOR_DB when it is zero."""
+    return to_db(amp * amp)
 
 
 def load(path: str | pathlib.Path) -> tuple[np.ndarray, int]:
-    """(samples as float32 [n, channels], sample rate). Mono stays one channel.
+    """Public API. (samples as float32 [n, channels], sample rate). Mono stays one channel.
     More than two channels is refused rather than silently cut to L/R."""
     x, sr = sf.read(str(path), dtype="float32", always_2d=True)
-    _check_channels(x)
+    check_channels(x)
     return x, sr
 
 
-def _check_channels(x: np.ndarray) -> None:
+def check_channels(x: np.ndarray) -> None:
+    """Public API. Raises ValueError unless x is [n, 1] or [n, 2]."""
     if x.ndim != 2 or not 1 <= x.shape[1] <= 2:
         raise ValueError("%s channels: only mono and stereo are measured"
                          % (x.shape[1] if x.ndim == 2 else "?"))
 
 
-def _stereo(x: np.ndarray) -> np.ndarray:
+def to_stereo(x: np.ndarray) -> np.ndarray:
+    """Public API. x [n, channels] as [n, 2]: mono is duplicated to both channels."""
     if x.shape[1] == 1:
         return np.repeat(x, 2, axis=1)
     return x[:, :2]
+
+
+# Roadie's analysis package (roadie.analysis) and sideman.oneshot build on the public names above and
+# below. These aliases keep the old private spellings working; new code uses the public ones.
+_db, _db_amp, _check_channels, _stereo = to_db, amp_to_db, check_channels, to_stereo
 
 
 # --------------------------------------------------------------- loudness
@@ -185,7 +207,8 @@ def true_peak(x: np.ndarray, factor: int = 4, chunk: int = 1 << 16, margin: int 
     return max(peak, float(np.abs(x).max()) if x.size else 0.0)
 
 
-def _peak_rms(x: np.ndarray, chunk: int = 1 << 20) -> tuple[float, float]:
+def peak_rms(x: np.ndarray, chunk: int = 1 << 20) -> tuple[float, float]:
+    """Public API. (sample peak, RMS) of x as linear amplitudes, summed over all channels."""
     peak, ss = 0.0, 0.0
     for s in range(0, x.shape[0], chunk):
         c = x[s:s + chunk].astype(np.float64)
@@ -196,8 +219,8 @@ def _peak_rms(x: np.ndarray, chunk: int = 1 << 20) -> tuple[float, float]:
 
 # --------------------------------------------------------------- spectrum
 
-def _spectra(x: np.ndarray, sr: int) -> dict:
-    """Frame-averaged one-sided power spectra of L, R, mid and side, plus the
+def spectra(x: np.ndarray, sr: int) -> dict:
+    """Public API. Frame-averaged one-sided power spectra of L, R, mid and side, plus the
     low-end cross spectrum. Powers are scaled so that sum over bins = mean square."""
     n = FRAME if x.shape[0] >= FRAME else max(256, 1 << int(math.log2(max(2, x.shape[0]))))
     hop = n // 2
@@ -228,12 +251,16 @@ def _spectra(x: np.ndarray, sr: int) -> dict:
     return out
 
 
-def _band(p: np.ndarray, freqs: np.ndarray, lo: float, hi: float) -> float:
+def band_power(p: np.ndarray, freqs: np.ndarray, lo: float, hi: float) -> float:
+    """Public API. Sum of the power spectrum p over the bins of freqs in [lo, hi) Hz."""
     return float(p[(freqs >= lo) & (freqs < hi)].sum())
 
 
+_peak_rms, _spectra, _band = peak_rms, spectra, band_power
+
+
 def analyze_array(x: np.ndarray, sr: int) -> dict:
-    """The full profile of one signal [n, channels]. See analyze()."""
+    """Public API. The full profile of one signal [n, channels]. See analyze()."""
     _check_channels(x)
     st = _stereo(x)
     sp = _spectra(st, sr)
@@ -264,7 +291,7 @@ def analyze_array(x: np.ndarray, sr: int) -> dict:
 
 
 def analyze(path: str | pathlib.Path) -> dict:
-    """Loudness, peak, dynamics, spectrum and stereo profile of an audio file.
+    """Public API. Loudness, peak, dynamics, spectrum and stereo profile of an audio file.
 
     integrated_lufs / short_term_max_lufs / momentary_max_lufs  BS.1770-4
     true_peak_dbtp, sample_peak_db, rms_db, crest_db (peak minus RMS)
@@ -282,7 +309,7 @@ def analyze(path: str | pathlib.Path) -> dict:
 
 
 def compare(a: dict, b: dict) -> dict:
-    """Differences a - b between two analyze() results (a = the Set, b = the
+    """Public API. Differences a - b between two analyze() results (a = the Set, b = the
     reference). Band balance is compared after removing the median band offset,
     so a quieter master does not read as a darker one; `flagged_bands` names the
     bands that still differ by more than FLAG_DB."""
@@ -332,7 +359,8 @@ STATIC_MAX_BARS = 8      # flag a run longer than this without a change (the 4/8
 SILENT_DB = -70.0        # a block whose loudest third-octave band is under this is silence
 
 
-def _check_sections(sections: list) -> None:
+def check_sections(sections: list) -> None:
+    """Public API. Raises ValueError unless every section has whole-number start_bar >= 0 and bars >= 1."""
     for sec in sections:
         if not isinstance(sec, dict):
             raise ValueError("each section must be an object with start_bar and bars, got %r" % (sec,))
@@ -342,8 +370,8 @@ def _check_sections(sections: list) -> None:
                              % sec.get("name", sec))
 
 
-def _load_manifest(manifest: dict | str | pathlib.Path) -> tuple[dict, pathlib.Path | None]:
-    """The manifest as a dict, with every source resolved to an existing
+def load_manifest(manifest: dict | str | pathlib.Path) -> tuple[dict, pathlib.Path | None]:
+    """Public API. The manifest as a dict, with every source resolved to an existing
     absolute path (relative paths are taken from the manifest's folder) and
     tempo, sections and bar numbers checked. A source may be a list of files, summed into
     one role. Raises ValueError saying what is wrong."""
@@ -393,8 +421,8 @@ def _load_manifest(manifest: dict | str | pathlib.Path) -> tuple[dict, pathlib.P
     return m, mpath
 
 
-def _load_source(path: str | list) -> tuple[np.ndarray, int]:
-    """(samples, rate) of a manifest source: one file, or several summed (same rate, cut to the
+def load_source(path: str | list) -> tuple[np.ndarray, int]:
+    """Public API. (samples, rate) of a manifest source: one file, or several summed (same rate, cut to the
     shortest)."""
     if isinstance(path, str):
         return load(path)
@@ -408,16 +436,22 @@ def _load_source(path: str | list) -> tuple[np.ndarray, int]:
     return sum((x if mono else _stereo(x))[:n] for x, _ in loaded), rates.pop()
 
 
-def _bar_seconds(m: dict) -> float:
+def bar_seconds(m: dict) -> float:
+    """Public API. Length in seconds of one bar of a loaded manifest (beats_per_bar at its tempo)."""
     return float(m.get("beats_per_bar", 4)) * 60.0 / float(m["tempo"])
 
 
-def _slice(x: np.ndarray, sr: int, t0: float, t1: float) -> np.ndarray:
+def slice_span(x: np.ndarray, sr: int, t0: float, t1: float) -> np.ndarray:
+    """Public API. x [n, channels] from t0 to t1 seconds, clamped at the start of x."""
     return x[max(0, int(round(t0 * sr))):max(0, int(round(t1 * sr)))]
 
 
+_check_sections, _load_manifest, _load_source = check_sections, load_manifest, load_source
+_bar_seconds, _slice = bar_seconds, slice_span
+
+
 def masking(kick: np.ndarray, bass: np.ndarray, sr: int) -> float | None:
-    """How kick and bass share 40-120 Hz, over ~85 ms frames. Returns
+    """Public API. How kick and bass share 40-120 Hz, over ~85 ms frames. Returns
     {"overlap", "quieter_db"} or None when either is silent there.
 
     overlap: how much of the quieter part's energy sits in the same
@@ -460,7 +494,7 @@ def _third_octave_db(x: np.ndarray, sr: int) -> np.ndarray:
 
 def change_rate(x: np.ndarray, sr: int, bar_s: float, offset_s: float, first_bar: int,
                 last_bar: int) -> dict:
-    """Spectral change between consecutive 4-bar blocks on the bar grid: the mean
+    """Public API. Spectral change between consecutive 4-bar blocks on the bar grid: the mean
     absolute third-octave difference (dB) over the bands sounding in either
     block, each block's bands floored at 40 dB under its loudest, so an
     element far below the mix entering does not read as a 70 dB jump. Runs longer than 8 bars
