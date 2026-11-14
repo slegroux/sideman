@@ -32,6 +32,8 @@ Each is marked "Public API" in its docstring:
 - levels and spectra: to_db, amp_to_db, peak_rms, spectra, band_power, analyze_array, analyze, compare
 - files: load, check_channels, to_stereo, load_manifest, load_source, check_sections, bar_seconds, slice_span
 - section measurements: masking, change_rate
+- the mix report, for a layer built on it (Roadie's session_compare): load_capture, mix_layer,
+  write_report. mix_report itself runs through these three.
 
 The old private spellings (_db, _db_amp, _peak_rms, _spectra, _band, _check_channels, _stereo,
 _check_sections, _load_manifest, _load_source, _bar_seconds, _slice) stay as aliases.
@@ -528,6 +530,113 @@ def change_rate(x: np.ndarray, sr: int, bar_s: float, offset_s: float, first_bar
             run_start = i
     return {"block_bars": CHANGE_BLOCK_BARS,
             "steps": steps, "static_runs": flags}
+
+
+# mix_report in three steps, so a layer that needs more than the Set (Roadie's session_compare, against a
+# reference profile) builds on the same report: load_capture, mix_layer, then the layer adds its keys,
+# then write_report.
+
+_MASK_KEYS = ("kick_bass_overlap", "kick_bass_quieter_db", "masking_flag")
+
+
+def load_capture(manifest: dict | str | pathlib.Path) -> dict:
+    """Public API. A capture manifest read and checked (load_manifest) with every source loaded:
+    {"manifest": the manifest as load_manifest returns it, "path": its file or None, "audio": {role:
+    (samples, rate)}, "sr": the rate, "bar_s": one bar in seconds, "offset_s": where bar 0 sits}.
+    Raises ValueError when a source's rate is not the master's, offset_s is negative, or a source ends
+    before the last section does."""
+    m, mpath = load_manifest(manifest)
+    audio = {}
+    for role, path in m["sources"].items():
+        audio[role] = load_source(path)
+    sr = audio["master"][1]
+    for role, (_, r) in audio.items():
+        if r != sr:
+            raise ValueError("%s is %d Hz but master is %d Hz" % (role, r, sr))
+    bar_s, off = bar_seconds(m), float(m.get("offset_s", 0.0))
+    if off < 0:
+        raise ValueError("offset_s must be >= 0")
+    last = max(s["start_bar"] + s["bars"] for s in m["sections"])
+    end_s = off + last * bar_s
+    for role, (x, _) in audio.items():
+        have = x.shape[0] / sr
+        if have + 0.01 < end_s:
+            raise ValueError("%s is %.2f s long but the sections run to bar %d = %.2f s"
+                             % (role, have, last, end_s))
+    return {"manifest": m, "path": mpath, "audio": audio, "sr": sr, "bar_s": bar_s, "offset_s": off}
+
+
+def mix_layer(capture: dict, reference: str | pathlib.Path | None = None) -> tuple[dict, list]:
+    """Public API. The mix layer of mix_report for a load_capture result, no file written: (report,
+    spans). `report` is what mix_report returns with no reference, or with `reference` as an audio
+    file, less json_path and md_path. `spans` has one entry per manifest section, in order:
+    {"section": the manifest's section, "t0": its start in seconds, "analysis": analyze_array of the
+    master over it}, for a layer that measures further. Pass the report on to write_report."""
+    m, audio, sr = capture["manifest"], capture["audio"], capture["sr"]
+    bar_s, off = capture["bar_s"], capture["offset_s"]
+    first = min(s["start_bar"] for s in m["sections"])
+    last = max(s["start_bar"] + s["bars"] for s in m["sections"])
+    ref = analyze(reference) if reference else None
+    kick_role = "kick" if "kick" in audio else ("drums" if "drums" in audio else None)
+    rows, spans = [], []
+    for sec in m["sections"]:
+        t0 = off + sec["start_bar"] * bar_s
+        t1 = t0 + sec["bars"] * bar_s
+        a = analyze_array(slice_span(audio["master"][0], sr, t0, t1), sr)
+        row = {"name": sec.get("name", "bar %d" % sec["start_bar"]), "start_bar": sec["start_bar"],
+               "bars": sec["bars"]}
+        for k in ("integrated_lufs", "short_term_max_lufs", "true_peak_dbtp", "crest_db", "width",
+                  "low_end_correlation", "centroid_hz", "bands_db", "side_minus_mid_db"):
+            row[k] = a[k]
+        if ref is not None:
+            c = compare(a, ref)
+            row["vs_reference"] = {"band_balance_db": c["band_balance_db"],
+                                   "flagged_bands": [f["band"] for f in c["flagged_bands"]],
+                                   "lufs_diff": c["diff"].get("integrated_lufs")}
+        if kick_role and "bass" in audio:
+            mk = masking(slice_span(audio[kick_role][0], sr, t0, t1), slice_span(audio["bass"][0], sr, t0, t1), sr)
+            row["kick_bass_overlap"] = mk and mk["overlap"]
+            row["kick_bass_quieter_db"] = mk and mk["quieter_db"]
+            row["masking_flag"] = bool(mk and mk["overlap"] > MASK_FLAG
+                                       and mk["quieter_db"] >= MASK_AUDIBLE_DB)
+        rows.append(row)
+        spans.append({"section": sec, "t0": t0, "analysis": a})
+    cr = change_rate(audio["master"][0], sr, bar_s, off, first, last)
+    names = sorted((s["start_bar"], s["start_bar"] + s["bars"], s.get("name", "")) for s in m["sections"])
+    for f in cr["static_runs"]:
+        f["sections"] = [n for a0, a1, n in names if a0 < f["end_bar"] and a1 > f["start_bar"]]
+    report = {"manifest": str(capture["path"]) if capture["path"] else None,
+              "reference": str(reference) if reference else None,
+              "tempo": m["tempo"], "sections": rows, "change_rate": cr,
+              "whole": {k: v for k, v in analyze_array(
+                  slice_span(audio["master"][0], sr, off + first * bar_s, off + last * bar_s), sr).items()
+                  if k in ("integrated_lufs", "short_term_max_lufs", "true_peak_dbtp", "crest_db", "width")}}
+    return report, spans
+
+
+def write_report(report: dict, capture: dict, out_dir: str | pathlib.Path | None = None,
+                 intro: list | None = None, layers: list = ()) -> dict:
+    """Public API. Writes a mix_layer report, with whatever a layer added to it and to its section rows,
+    as mix_report.json and mix_report.md into out_dir (default: the master file's folder), replacing
+    earlier ones there, and returns it with their paths (json_path, md_path). In each row the masking
+    keys are moved last, so a layer's keys sit before them as in mix_report. In the markdown, `intro`
+    (lines) takes the place of the line naming an audio-file reference, under the whole-capture line,
+    and `layers` (lines) go between the section table and the change rate. A layer that adds a row's
+    `vs_reference` fills the table's "vs ref" column."""
+    import json
+    for row in report["sections"]:
+        for k in _MASK_KEYS:
+            if k in row:
+                row[k] = row.pop(k)
+    master_src = capture["manifest"]["sources"]["master"]
+    out = pathlib.Path(out_dir) if out_dir else pathlib.Path(
+        master_src if isinstance(master_src, str) else master_src[0]).parent
+    out.mkdir(parents=True, exist_ok=True)
+    jp, mdp = out / "mix_report.json", out / "mix_report.md"
+    report["json_path"], report["md_path"] = str(jp), str(mdp)
+    jp.write_text(json.dumps(report, indent=2))
+    mdp.write_text(_markdown(report, intro, layers))
+    return report
 
 
 # ------------------------------------------------------- reference profile
@@ -1243,89 +1352,36 @@ def mix_report(manifest: dict | str | pathlib.Path,
     profile's paths, only the span needed; a role whose stem changed since the profile
     is skipped, with a note; a side with no clean hit gives a note and no readings.
     `reference_stale` lists profile inputs
-    that changed since it was built."""
-    import json
-    m, mpath = _load_manifest(manifest)
-    audio = {}
-    for role, path in m["sources"].items():
-        audio[role] = _load_source(path)
-    sr = audio["master"][1]
-    for role, (_, r) in audio.items():
-        if r != sr:
-            raise ValueError("%s is %d Hz but master is %d Hz" % (role, r, sr))
-    bar_s, off = _bar_seconds(m), float(m.get("offset_s", 0.0))
-    if off < 0:
-        raise ValueError("offset_s must be >= 0")
-    first = min(s["start_bar"] for s in m["sections"])
-    last = max(s["start_bar"] + s["bars"] for s in m["sections"])
-    end_s = off + last * bar_s
-    for role, (x, _) in audio.items():
-        have = x.shape[0] / sr
-        if have + 0.01 < end_s:
-            raise ValueError("%s is %.2f s long but the sections run to bar %d = %.2f s"
-                             % (role, have, last, end_s))
+    that changed since it was built.
+
+    The plain report goes through load_capture, mix_layer and write_report; a profile adds its
+    layers between the last two, as Roadie's session_compare does."""
+    cap = load_capture(manifest)
     prof = _load_profile(reference)
     stale = profile_stale(prof) if prof is not None else []
+    report, spans = mix_layer(cap, reference if prof is None else None)
+    if prof is None:
+        return write_report(report, cap, out_dir)
     stale_roles = {x["role"] for x in stale}
-    ref = analyze(reference) if reference and prof is None else None
-    kick_role = "kick" if "kick" in audio else ("drums" if "drums" in audio else None)
-    rows = []
-    for sec in m["sections"]:
-        t0 = off + sec["start_bar"] * bar_s
-        t1 = t0 + sec["bars"] * bar_s
-        a = analyze_array(_slice(audio["master"][0], sr, t0, t1), sr)
-        row = {"name": sec.get("name", "bar %d" % sec["start_bar"]), "start_bar": sec["start_bar"],
-               "bars": sec["bars"]}
-        for k in ("integrated_lufs", "short_term_max_lufs", "true_peak_dbtp", "crest_db", "width",
-                  "low_end_correlation", "centroid_hz", "bands_db", "side_minus_mid_db"):
-            row[k] = a[k]
-        if ref is not None:
-            c = compare(a, ref)
-            row["vs_reference"] = {"band_balance_db": c["band_balance_db"],
-                                   "flagged_bands": [f["band"] for f in c["flagged_bands"]],
-                                   "lufs_diff": c["diff"].get("integrated_lufs")}
-        if prof is not None:
-            psec, fb, pnotes = _pair(prof, sec, row["name"])
-            if abs(float(prof["tempo"]) - float(m["tempo"])) > 0.01:
-                pnotes = pnotes + ["tempo differs: the manifest says %g BPM, the profile %g: bars are compared "
-                                   "bar for bar, not second for second" % (m["tempo"], prof["tempo"])]
-            if psec is None:
-                row["elements"] = {"paired": False, "notes": pnotes}
-            else:
-                row["vs_reference"], row["elements"] = _element_layer(prof, psec, fb, pnotes, sec, a, audio,
-                                                                      sr, t0, bar_s)
-                row["drums"] = _drum_layer(prof, psec, fb, sec, audio, sr, t0, bar_s,
-                                           float(m.get("beats_per_bar", 4)), stale_roles, row["elements"]["presence"])
-        if kick_role and "bass" in audio:
-            mk = masking(_slice(audio[kick_role][0], sr, t0, t1), _slice(audio["bass"][0], sr, t0, t1), sr)
-            row["kick_bass_overlap"] = mk and mk["overlap"]
-            row["kick_bass_quieter_db"] = mk and mk["quieter_db"]
-            row["masking_flag"] = bool(mk and mk["overlap"] > MASK_FLAG
-                                       and mk["quieter_db"] >= MASK_AUDIBLE_DB)
-        rows.append(row)
-    cr = change_rate(audio["master"][0], sr, bar_s, off, first, last)
-    names = sorted((s["start_bar"], s["start_bar"] + s["bars"], s.get("name", "")) for s in m["sections"])
-    for f in cr["static_runs"]:
-        f["sections"] = [n for a0, a1, n in names if a0 < f["end_bar"] and a1 > f["start_bar"]]
-    report = {"manifest": str(mpath) if mpath else None,
-              "reference": (prof.get("json_path") or prof["mix"]) if prof is not None
-              else (str(reference) if reference else None),
-              "tempo": m["tempo"], "sections": rows, "change_rate": cr,
-              "whole": {k: v for k, v in analyze_array(
-                  _slice(audio["master"][0], sr, off + first * bar_s, off + last * bar_s), sr).items()
-                  if k in ("integrated_lufs", "short_term_max_lufs", "true_peak_dbtp", "crest_db", "width")}}
-    if prof is not None:
-        report["reference_kind"] = "profile"
-        report["reference_stale"] = stale
-    master_src = m["sources"]["master"]
-    out = pathlib.Path(out_dir) if out_dir else pathlib.Path(
-        master_src if isinstance(master_src, str) else master_src[0]).parent
-    out.mkdir(parents=True, exist_ok=True)
-    jp, mdp = out / "mix_report.json", out / "mix_report.md"
-    report["json_path"], report["md_path"] = str(jp), str(mdp)
-    jp.write_text(json.dumps(report, indent=2))
-    mdp.write_text(_markdown(report))
-    return report
+    m, audio, sr, bar_s = cap["manifest"], cap["audio"], cap["sr"], cap["bar_s"]
+    for row, span in zip(report["sections"], spans):
+        sec, t0 = span["section"], span["t0"]
+        psec, fb, pnotes = _pair(prof, sec, row["name"])
+        if abs(float(prof["tempo"]) - float(m["tempo"])) > 0.01:
+            pnotes = pnotes + ["tempo differs: the manifest says %g BPM, the profile %g: bars are compared "
+                               "bar for bar, not second for second" % (m["tempo"], prof["tempo"])]
+        if psec is None:
+            row["elements"] = {"paired": False, "notes": pnotes}
+        else:
+            row["vs_reference"], row["elements"] = _element_layer(prof, psec, fb, pnotes, sec, span["analysis"],
+                                                                  audio, sr, t0, bar_s)
+            row["drums"] = _drum_layer(prof, psec, fb, sec, audio, sr, t0, bar_s,
+                                       float(m.get("beats_per_bar", 4)), stale_roles, row["elements"]["presence"])
+    report["reference"] = prof.get("json_path") or prof["mix"]
+    report["reference_kind"] = "profile"
+    report["reference_stale"] = stale
+    return write_report(report, cap, out_dir, intro=_profile_intro_markdown(report),
+                        layers=_elements_markdown(report) + _drums_markdown(report))
 
 
 def _fmt(v, nd=1):
@@ -1398,7 +1454,17 @@ def _drums_markdown(r: dict) -> list:
     return lines
 
 
-def _markdown(r: dict) -> str:
+def _profile_intro_markdown(r: dict) -> list:
+    lines = ["Reference profile: `%s`. Sections are paired with the profile's by name; band balance "
+             "is relative to the matching section after removing the overall level offset, and bands "
+             "more than 3 dB away are listed." % r["reference"], ""]
+    lines += ["- ⚠ %s `%s` %s since the profile was built" % (s["role"], s["path"], s["reason"])
+              for s in r["reference_stale"]]
+    lines += [""] if r["reference_stale"] else []
+    return lines
+
+
+def _markdown(r: dict, intro: list | None = None, layers: list = ()) -> str:
     w = r["whole"]
     lines = ["# Mix report", "",
              "Tempo %s BPM. Whole capture: %s LUFS integrated, short-term max %s, true peak %s dBTP, "
@@ -1406,13 +1472,8 @@ def _markdown(r: dict) -> str:
                                          _fmt(w["short_term_max_lufs"]), _fmt(w["true_peak_dbtp"]),
                                          _fmt(w["crest_db"]), _fmt(w["width"], 2)),
              ""]
-    if r.get("reference_kind") == "profile":
-        lines += ["Reference profile: `%s`. Sections are paired with the profile's by name; band balance "
-                  "is relative to the matching section after removing the overall level offset, and bands "
-                  "more than 3 dB away are listed." % r["reference"], ""]
-        lines += ["- ⚠ %s `%s` %s since the profile was built" % (s["role"], s["path"], s["reason"])
-                  for s in r["reference_stale"]]
-        lines += [""] if r["reference_stale"] else []
+    if intro is not None:
+        lines += intro
     elif r["reference"]:
         lines += ["Reference: `%s`. Band balance is relative to it after removing the overall level "
                   "offset; bands more than 3 dB away are listed." % r["reference"], ""]
@@ -1434,8 +1495,7 @@ def _markdown(r: dict) -> str:
             cells.append(_fmt(ov, 2) + ("" if q is None else " (quieter %+.0f dB)" % q)
                          + (" ⚠" if s.get("masking_flag") else ""))
         lines.append("| " + " | ".join(cells) + " |")
-    if r.get("reference_kind") == "profile":
-        lines += _elements_markdown(r) + _drums_markdown(r)
+    lines += layers
     cr = r["change_rate"]
     lines += ["", "## Change rate", "",
               "Spectral change between consecutive %d-bar blocks (mean third-octave difference, dB). "
