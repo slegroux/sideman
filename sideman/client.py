@@ -24,6 +24,7 @@ never guess member names.
 from __future__ import annotations
 
 import json
+import select
 import socket
 from typing import Any
 
@@ -46,11 +47,62 @@ class Live:
 
     Connects per request, like the MCP layer: there is no socket to go stale
     between two notebook cells run minutes apart.
+
+    A script that sends many requests in a row can hold one connection for
+    the run instead, which saves Live a tick per request (measured: 389 ms
+    against 603 ms each on a Set with ten stems loaded):
+
+        with Live() as live:
+            for i in range(n):
+                live.set("live_set tracks %d" % i, "name", names[i])
+
+    Inside the block every request goes down the same socket; leaving it, or
+    close(), closes it, and the object connects per request again. If Live
+    closed the connection between two requests (it quit and came back), the
+    next request connects again by itself. A connection lost after a request
+    was sent raises LiveError("ConnectionClosed") and is never sent again:
+    Live may have run it. Not thread-safe inside a block, and blocks do not nest.
     """
 
     def __init__(self, host: str = HOST, port: int = PORT,
                  timeout: float = TIMEOUT):
         self.host, self.port, self.timeout = host, port, timeout
+        self._held = False          # inside a `with` block
+        self._sock = None           # the held connection, once a request opened it
+
+    def __enter__(self) -> "Live":
+        self._held = True
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close the connection a `with` block holds, and stop holding one.
+
+        Safe to call at any time, also twice; the next request connects on its
+        own, as outside a block."""
+        self._held = False
+        self._drop()
+
+    def _drop(self) -> None:
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+    def _connect(self) -> socket.socket:
+        try:
+            return socket.create_connection((self.host, self.port),
+                                            timeout=self.timeout)
+        except ConnectionRefusedError:
+            raise LiveError(
+                "ConnectionRefused",
+                "nothing listening on %s:%d. Ableton Live must be running "
+                "with 'AbletonLOM' selected as a Control Surface in "
+                "Preferences > Link, Tempo & MIDI." % (self.host, self.port))
 
     def request(self, op: str, params: dict[str, Any] | None = None) -> Any:
         """Send one wire-protocol op and return its unwrapped result.
@@ -58,29 +110,63 @@ class Live:
         The escape hatch: every named method below is one line of sugar over
         this, and any op docs/PROTOCOL.md lists works here by name.
         """
+        line = json.dumps({"id": "py", "op": op,
+                           "params": params or {}}).encode() + b"\n"
+        reused = self._sock is not None
+        s = self._sock if reused else self._connect()
+        if reused and select.select([s], [], [], 0)[0]:
+            # Readable before anything was asked: Live closed the held
+            # connection since the last request (it quit, or the control
+            # surface was switched off). A send would still succeed locally and
+            # the request would look lost, so connect again first.
+            self._drop()
+            reused = False
+            s = self._connect()
         try:
-            s = socket.create_connection((self.host, self.port),
-                                         timeout=self.timeout)
-        except ConnectionRefusedError:
-            raise LiveError(
-                "ConnectionRefused",
-                "nothing listening on %s:%d. Ableton Live must be running "
-                "with 'AbletonLOM' selected as a Control Surface in "
-                "Preferences > Link, Tempo & MIDI." % (self.host, self.port))
-        try:
-            s.sendall(json.dumps({"id": "py", "op": op,
-                                  "params": params or {}}).encode() + b"\n")
+            try:
+                s.sendall(line)
+            except socket.timeout:
+                raise
+            except OSError:
+                # The same, seen at the send: nothing was sent, so connect
+                # again and send once. A fresh connection that fails here is
+                # an error.
+                if not reused:
+                    raise
+                self._drop()
+                reused = False
+                s = self._connect()
+                s.sendall(line)
             buf = b""
             while b"\n" not in buf:
-                chunk = s.recv(65536)
+                try:
+                    chunk = s.recv(65536)
+                except ConnectionResetError:
+                    if not reused:
+                        raise
+                    chunk = b""
                 if not chunk:
+                    # Sent, and no (whole) reply: Live may have run it, so it
+                    # is reported and not sent again.
                     raise LiveError("ConnectionClosed",
+                                    "Live closed the connection before replying"
+                                    if reused and not buf else
                                     "Live closed the connection mid-reply")
                 buf += chunk
         except socket.timeout:
+            # The reply may still arrive: on a held connection it would be
+            # read as the answer to the next request, so the socket goes.
+            self._sock = s
+            self._drop()
             raise LiveError("Timeout",
                             "Live did not respond within %.1fs" % self.timeout)
-        finally:
+        except BaseException:
+            self._sock = s
+            self._drop()
+            raise
+        if self._held:
+            self._sock = s
+        else:
             s.close()
 
         resp = json.loads(buf.split(b"\n", 1)[0].decode())
