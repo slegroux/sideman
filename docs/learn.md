@@ -1,3 +1,8 @@
+---
+pagetitle: "Learn to control Ableton Live with Claude"
+description: "Learn Sideman, the Ableton Live MCP server for Claude: build a loop by talking in ten minutes, drive Live from Python, then the tool reference and wire protocol."
+---
+
 # Learn
 
 Sideman is an Ableton Live MCP server: you describe what you want, Claude

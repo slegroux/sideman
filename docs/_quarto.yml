@@ -29,6 +29,14 @@ book:
         - CLIENT.md
         - CONVENTIONS.md
   page-navigation: true
+  # site-url makes Quarto write sitemap.xml and absolute share URLs. The card
+  # image is the landing page's; a relative path would resolve per page and
+  # break below make/. Each chapter carries its own description.
+  site-url: https://slegroux.github.io/sideman/learn/
+  image: https://slegroux.github.io/sideman/og.jpg
+  open-graph: true
+  twitter-card:
+    card-style: summary_large_image
   repo-url: https://github.com/slegroux/sideman
   sidebar:
     logo: img/logo-light.svg

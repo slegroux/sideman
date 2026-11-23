@@ -3,8 +3,41 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Sideman</title>
+<title>Sideman — Ableton Live MCP server for Claude</title>
 <meta name="description" content="An MCP server that gives Claude the whole of Ableton Live 12 — every track, clip, device and parameter — so you can build, tweak and undo by talking.">
+<link rel="canonical" href="https://slegroux.github.io/sideman/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Sideman">
+<meta property="og:url" content="https://slegroux.github.io/sideman/">
+<meta property="og:title" content="Sideman — Ableton Live MCP server for Claude">
+<meta property="og:description" content="Claude gets the whole of Ableton Live 12 — every track, clip, device and knob. Ask for a loop, a sound, a filter sweep. Watch it appear.">
+<meta property="og:image" content="https://slegroux.github.io/sideman/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="628">
+<meta property="og:image:alt" content="Ableton Live's clip view with a filter envelope that Sideman wrote, one step a bar">
+<meta property="og:video" content="https://slegroux.github.io/sideman/demo.mp4">
+<meta property="og:video:type" content="video/mp4">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Sideman — Ableton Live MCP server for Claude">
+<meta name="twitter:description" content="Claude gets the whole of Ableton Live 12 — every track, clip, device and knob. Ask for a loop, a sound, a filter sweep. Watch it appear.">
+<meta name="twitter:image" content="https://slegroux.github.io/sideman/og.jpg">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Sideman",
+  "description": "An MCP server that gives Claude and other MCP clients the whole Ableton Live 12 object model: tracks, clips, MIDI notes, devices, parameters, automation envelopes and observers.",
+  "url": "https://slegroux.github.io/sideman/",
+  "image": "https://slegroux.github.io/sideman/og.jpg",
+  "applicationCategory": "MultimediaApplication",
+  "applicationSubCategory": "Music production",
+  "operatingSystem": "macOS",
+  "softwareRequirements": "Ableton Live 12",
+  "license": "https://www.gnu.org/licenses/gpl-3.0.html",
+  "sameAs": "https://github.com/slegroux/sideman",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
@@ -703,12 +736,12 @@ VIRTUAL_ENV=.venv uv pip install -e .   <span class="c"># explicit, or uv may ta
         <span class="t">docs/TUTORIAL.md</span>
         <span class="s">Build a 4-bar house loop from an empty Set. Ten minutes.</span>
       </a>
-      <a class="doc" href="https://github.com/slegroux/sideman/blob/main/docs/TOOLS.md">
-        <span class="t">docs/TOOLS.md</span>
+      <a class="doc" href="learn/TOOLS.html">
+        <span class="t">Tool reference</span>
         <span class="s">All 36 tools with signatures, generated from the code so it can't drift.</span>
       </a>
-      <a class="doc" href="https://github.com/slegroux/sideman/blob/main/docs/PROTOCOL.md">
-        <span class="t">docs/PROTOCOL.md</span>
+      <a class="doc" href="learn/PROTOCOL.html">
+        <span class="t">Wire protocol</span>
         <span class="s">The wire protocol, the threading contract, and how to add an op.</span>
       </a>
       <a class="doc" href="https://github.com/slegroux/sideman/blob/main/skills/sideman/SKILL.md">
