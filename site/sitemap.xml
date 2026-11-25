@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The landing page; the Learn book writes learn/sitemap.xml. A project site
+     can't serve a root robots.txt, so submit both in Search Console. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://slegroux.github.io/sideman/</loc>
+  </url>
+</urlset>

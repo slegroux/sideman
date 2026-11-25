@@ -1,3 +1,8 @@
+---
+pagetitle: "Control Ableton Live with Claude: start here"
+description: "Three prompts, ten minutes: Claude builds a house loop in Ableton Live from nothing, writes a filter sweep as automation, and notices what you changed by hand."
+---
+
 # Start here: three things to say
 
 You need Live open on a new Set (⌘N), Claude Code with Sideman installed, and
